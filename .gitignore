@@ -1,3 +1,10 @@
 result
 result-*
 .direnv/
+
+# linux-builder local state — NEVER commit (private key + 20GB VM disk).
+# Left here only if someone runs `nix run .#linux-builder` from the repo dir;
+# the launchd builder agent uses a dedicated dir outside the repo.
+keys/
+*.qcow2
+nixos.qcow2

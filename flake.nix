@@ -36,10 +36,26 @@
         let
           pkgs = pkgsFor system;
 
-          # Everything the agent needs to be useful inside the container.
-          # NOTE: `prx` is NOT in nixpkgs — it's built from this repo; wiring it
-          # in (a bun-compiled binary added to `paths`) is a TODO for prx-vds.
+          # prx — the box's SANCTIONED tool (prx-0wc). Pinned release binary
+          # (aarch64-linux, v0.8.4); autoPatchelf relinks the ubuntu-built ELF
+          # against the image's nix glibc so it runs in the nix-based image.
+          prx = pkgs.stdenv.mkDerivation {
+            pname = "prx";
+            version = "0.8.4";
+            src = pkgs.fetchurl {
+              url = "https://github.com/bounded-systems/prx/releases/download/v0.8.4/prx-aarch64-linux";
+              sha256 = "0k0sdmc3s0vxnc2qdzgd53ynmn97lql9gcazja0zbb3kjs9hawir";
+            };
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+            installPhase = "install -Dm755 $src $out/bin/prx";
+          };
+
+          # Everything the agent needs in the box. prx is THE tool (prx-0wc) —
+          # it reaches OUT to the keeperd/beadsd boxes; the rest support it.
           toolchain = with pkgs; [
+            prx                # the box's sanctioned tool (pinned v0.8.4)
             claude-code        # the star — pinned by the locked nixpkgs rev
             git
             gh                 # GitHub CLI

@@ -37,17 +37,18 @@
           pkgs = pkgsFor system;
 
           # prx — the box's SANCTIONED tool (prx-0wc). Pinned release binary
-          # (aarch64-linux, v0.8.4). It's a `bun --compile` binary: bun appends
+          # (aarch64-linux, v0.10.0 — includes prx-ag7: runtime repo-root from
+          # cwd not the binary dir). It's a `bun --compile` binary: bun appends
           # the app blob AFTER the ELF, so patchelf/autoPatchelf rewrites the ELF
           # and CORRUPTS the blob → the binary degrades to bare bun. So leave the
           # binary untouched and invoke the nix glibc loader directly on it (the
           # ubuntu-built ELF's hardcoded /lib interpreter is absent in a nix image).
           prxBin = pkgs.fetchurl {
-            url = "https://github.com/bounded-systems/prx/releases/download/v0.8.4/prx-aarch64-linux";
-            sha256 = "0k0sdmc3s0vxnc2qdzgd53ynmn97lql9gcazja0zbb3kjs9hawir";
+            url = "https://github.com/bounded-systems/prx/releases/download/v0.10.0/prx-aarch64-linux";
+            sha256 = "1b8ba6xgi6hdaknlhigcxai1xxlvz8j1sdm570y7jssckgiqy89l";
           };
           prxLibs = pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.stdenv.cc.cc.lib ];
-          prx = pkgs.runCommand "prx-0.8.4" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+          prx = pkgs.runCommand "prx-0.10.0" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
             install -Dm755 ${prxBin} $out/libexec/prx
             makeWrapper ${pkgs.glibc}/lib/ld-linux-aarch64.so.1 $out/bin/prx \
               --add-flags "--library-path ${prxLibs}" \
@@ -58,7 +59,7 @@
           # Everything the agent needs in the box. prx is THE tool (prx-0wc) —
           # it reaches OUT to the keeperd/beadsd boxes; the rest support it.
           toolchain = with pkgs; [
-            prx                # the box's sanctioned tool (pinned v0.8.4)
+            prx                # the box's sanctioned tool (pinned v0.10.0)
             claude-code        # the star — pinned by the locked nixpkgs rev
             git
             gh                 # GitHub CLI

@@ -39,6 +39,27 @@ twin; both are doors, not credentials in the box. That's the ocap win: a
 compromised or runaway box can only *ask* a daemon that enforces policy and
 holds the keys — it cannot exfiltrate keys or force-push.
 
+## Transport is interchangeable — the door is the capability
+
+*How* a door reaches the box is an implementation detail; the grant is unchanged
+("this one door, no shell"). Today the box runs in the **podman-machine** VM
+while the daemons run in the **Lima devshell** VM, so a door hops
+container → host → Lima-VM. Across that two-VM gap:
+
+| Transport | Across the gap |
+|---|---|
+| unix-socket bind-mount (`-v keeperd.sock`) | **flaky** — a socket over virtiofs into a *nested* container often won't connect |
+| podman host-gateway TCP (`host.containers.internal:PORT`) | **robust**, podman-native; needs the door on a host port; token auth (keeperd holds the keys) |
+| `ssh -L` (forward the socket) | **robust**; lock the key to forwarding-only (no shell) — ssh is *transport*, not authority |
+
+**Recommended end-state — remove the gap (`prx-62h`):** run claude-box in the
+**Lima VM's containerd** (nerdctl), colocated with the daemons. Then every door
+is a plain local mount —
+`nerdctl run … -v /tmp/keeperd.sock:/run/keeperd.sock` — no ssh, no TCP, no
+forwarding, nothing on the network. One VM → doors are local files. Until then,
+host-gateway TCP or `ssh -L` carry the door. The capability is identical in
+every case; only the plumbing differs.
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a

@@ -52,13 +52,16 @@ container → host → Lima-VM. Across that two-VM gap:
 | podman host-gateway TCP (`host.containers.internal:PORT`) | **robust**, podman-native; needs the door on a host port; token auth (keeperd holds the keys) |
 | `ssh -L` (forward the socket) | **robust**; lock the key to forwarding-only (no shell) — ssh is *transport*, not authority |
 
-**Recommended end-state — remove the gap (`prx-62h`):** run claude-box in the
-**Lima VM's containerd** (nerdctl), colocated with the daemons. Then every door
-is a plain local mount —
-`nerdctl run … -v /tmp/keeperd.sock:/run/keeperd.sock` — no ssh, no TCP, no
-forwarding, nothing on the network. One VM → doors are local files. Until then,
-host-gateway TCP or `ssh -L` carry the door. The capability is identical in
-every case; only the plumbing differs.
+**Recommended end-state — remove the gap by consolidating on podman (`prx-zj8`):**
+run the services (keeperd / beadsd / dolt) as **pinned OCI images in a podman
+pod**, and launch claude-box **into that pod**. Then every door is a **direct
+local mount** — `-v /run/keeperd.sock` / `localhost` — no ssh, no TCP, no
+forwarding, nothing on the wire. One runtime, every service a pinned image
+(claude-box was the template). "direct" isn't a separate transport; it's what
+you get once there's no gap. The ssh-`-L` / host-gateway-TCP rows above are
+**interim stopgaps** for the current two-VM split only. The capability is
+identical in every case; only the plumbing differs. (Retires the Lima daemon-VM;
+reshapes `prx-5ed` from prx-owns-VM → prx-owns-image-fleet.)
 
 ## Why this matters
 

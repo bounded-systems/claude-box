@@ -37,20 +37,23 @@
           pkgs = pkgsFor system;
 
           # prx — the box's SANCTIONED tool (prx-0wc). Pinned release binary
-          # (aarch64-linux, v0.8.4); autoPatchelf relinks the ubuntu-built ELF
-          # against the image's nix glibc so it runs in the nix-based image.
-          prx = pkgs.stdenv.mkDerivation {
-            pname = "prx";
-            version = "0.8.4";
-            src = pkgs.fetchurl {
-              url = "https://github.com/bounded-systems/prx/releases/download/v0.8.4/prx-aarch64-linux";
-              sha256 = "0k0sdmc3s0vxnc2qdzgd53ynmn97lql9gcazja0zbb3kjs9hawir";
-            };
-            dontUnpack = true;
-            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
-            installPhase = "install -Dm755 $src $out/bin/prx";
+          # (aarch64-linux, v0.8.4). It's a `bun --compile` binary: bun appends
+          # the app blob AFTER the ELF, so patchelf/autoPatchelf rewrites the ELF
+          # and CORRUPTS the blob → the binary degrades to bare bun. So leave the
+          # binary untouched and invoke the nix glibc loader directly on it (the
+          # ubuntu-built ELF's hardcoded /lib interpreter is absent in a nix image).
+          prxBin = pkgs.fetchurl {
+            url = "https://github.com/bounded-systems/prx/releases/download/v0.8.4/prx-aarch64-linux";
+            sha256 = "0k0sdmc3s0vxnc2qdzgd53ynmn97lql9gcazja0zbb3kjs9hawir";
           };
+          prxLibs = pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.stdenv.cc.cc.lib ];
+          prx = pkgs.runCommand "prx-0.8.4" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+            install -Dm755 ${prxBin} $out/libexec/prx
+            makeWrapper ${pkgs.glibc}/lib/ld-linux-aarch64.so.1 $out/bin/prx \
+              --add-flags "--library-path ${prxLibs}" \
+              --add-flags "$out/libexec/prx" \
+              --set LD_LIBRARY_PATH "${prxLibs}"
+          '';
 
           # Everything the agent needs in the box. prx is THE tool (prx-0wc) —
           # it reaches OUT to the keeperd/beadsd boxes; the rest support it.

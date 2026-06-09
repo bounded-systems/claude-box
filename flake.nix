@@ -99,9 +99,9 @@
             # Create the non-root `claude` user + a writable HOME with the config
             # dir that the persistent volume mounts over. extraCommands runs in
             # the image root at build time.
-            # TODO(prx-6xx): finalize ownership (chown to ${uid}) under
-            # fakeRootCommands/enableFakechroot so a rootless runtime can write
-            # without a named-volume perm dance.
+            # prx-al1: HOME is chowned to the claude uid (fakeRootCommands,
+            # below) so the rootless runtime can write ~/.cache etc. — without
+            # it, prx hit `EACCES: mkdir '/home/claude/.cache'` (root-owned home).
             extraCommands = ''
               mkdir -p etc tmp ${builtins.substring 1 (-1) home}/.config/claude
               chmod 1777 tmp
@@ -113,6 +113,13 @@
               root:x:0:
               ${user}:x:${toString uid}:
               EOF
+            '';
+
+            # prx-al1: own HOME as the claude uid so a rootless runtime can write
+            # ~/.cache (and anything else outside the config volume). chown sticks
+            # into the layer here; the config-volume mount (:U) handles its own.
+            fakeRootCommands = ''
+              chown -R ${toString uid}:${toString uid} ${builtins.substring 1 (-1) home}
             '';
 
             config = {

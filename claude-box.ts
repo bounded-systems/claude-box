@@ -18,6 +18,8 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Compiled to a binary by nix (Bun).
  */
 
+import { resolve } from "node:path";
+
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
@@ -27,6 +29,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box                  personal account
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
+  claude-box work --repo .    mount the current worktree at /work (work on a repo)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label`;
 
@@ -80,12 +83,37 @@ async function setName(account: string, desc: string): Promise<number> {
   return 0;
 }
 
-function run(account: string, args: string[]): Promise<number> {
-  const volume = `claude-${account}-config:/home/claude/.config/claude:U`;
+/** The real git dir (a worktree's lives in a bare repo OUTSIDE the worktree). */
+async function gitCommonDir(repo: string): Promise<string | undefined> {
   const proc = Bun.spawn(
-    ["podman", "run", "-it", "--rm", "-v", volume, IMAGE, ...args],
-    { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+    ["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    { stdout: "pipe", stderr: "ignore" },
   );
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  return out || undefined;
+}
+
+async function run(account: string, args: string[], repo?: string): Promise<number> {
+  const argv = [
+    "podman", "run", "-it", "--rm",
+    "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
+  ];
+  if (repo) {
+    const abs = resolve(repo);
+    // Mount the worktree RW at /work; map the host user → the in-box `claude`
+    // uid so host-owned files line up (writable + no git "dubious ownership"),
+    // WITHOUT chowning the repo.
+    argv.push("-v", `${abs}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
+    // A worktree's git dir lives in a bare repo outside the worktree; mount that
+    // common dir at its host path so `git` resolves inside the box.
+    const common = await gitCommonDir(abs);
+    if (common && !common.startsWith(`${abs}/`)) {
+      argv.push("-v", `${common}:${common}`);
+    }
+  }
+  argv.push(IMAGE, ...args);
+  const proc = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
   return proc.exited;
 }
 
@@ -111,6 +139,18 @@ switch (first) {
 // treat everything as claude args (so `claude-box --resume` works too).
 const named = first !== undefined && !first.startsWith("-");
 const account = named ? first : "personal";
-const args = named ? rest : first !== undefined ? [first, ...rest] : [];
+const tail = named ? rest : first !== undefined ? [first, ...rest] : [];
 
-process.exit(await run(account, args));
+// `--repo <path>` is a claude-box flag (mount a worktree at /work); everything
+// else passes through to claude.
+let repo: string | undefined;
+const claudeArgs: string[] = [];
+for (let i = 0; i < tail.length; i++) {
+  if (tail[i] === "--repo") {
+    repo = tail[++i];
+    continue;
+  }
+  claudeArgs.push(tail[i]!);
+}
+
+process.exit(await run(account, claudeArgs, repo));

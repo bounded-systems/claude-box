@@ -63,6 +63,26 @@ you get once there's no gap. The ssh-`-L` / host-gateway-TCP rows above are
 identical in every case; only the plumbing differs. (Retires the Lima daemon-VM;
 reshapes `prx-5ed` from prx-owns-VM → prx-owns-image-fleet.)
 
+**Launcher decision — the box always sees a unix socket.** The launcher forwards
+each door as a **unix-socket bind-mount only** (`--keeper`, `--beads`), because
+the socket is the ocap-purest, fastest, most portable shape:
+
+- **ocap** — the socket *fd* is the capability; possessing it is the grant. No
+  port for anything else to knock on, and **no token or key in the box** (a TCP
+  door needs a bearer token, an `ssh -L` door needs a key — both reintroduce the
+  ambient secret the box exists to avoid).
+- **speed** — local kernel IPC, no TLS/ssh handshake.
+- **portability** — in the consolidated pod it's a direct `-v /run/keeperd.sock`
+  mount that deploys identically anywhere the pod runs.
+
+So the box's **contract is fixed**: a unix socket at `/run/keeperd.sock` (and
+`/run/beadsd.sock`). The two-VM gap is bridged **outside** the box — relay
+keeperd's socket to a host-local socket (e.g. `socat` / `ssh -L` *on the
+podman-machine host*, never inside the box) and point `$KEEPERD_SOCK` /
+`$BEADSD_SOCK` at it. The TCP / in-box-ssh rows above stay rejected: the box
+never sees the wire. When the pod lands (`prx-zj8`), the relay disappears and the
+same `--keeper` launch becomes a direct local mount with zero changes.
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a

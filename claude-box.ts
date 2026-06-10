@@ -24,14 +24,28 @@ const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
 
+// The doors (CAPABILITIES.md). The box holds no git creds / signing key and no
+// beads access; it routes git writes through keeperd and beads ops through
+// beadsd. We forward the door (the host socket) — never the keys. The host
+// socket path is overridable so the same launcher works across transports
+// (a direct socket today; a host-gateway/ssh-forwarded socket across the gap).
+const KEEPERD_SOCK = process.env.KEEPERD_SOCK ?? "/tmp/keeperd.sock";
+const BEADSD_SOCK = process.env.BEADSD_SOCK ?? "/tmp/beadsd.sock";
+const KEEPERD_DOOR = "/run/keeperd.sock"; // where the box looks for it
+const BEADSD_DOOR = "/run/beadsd.sock";
+
 const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude, one account per volume
 
   claude-box                  personal account
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
   claude-box work --repo .    mount the current worktree at /work (work on a repo)
+  claude-box work --keeper    forward the keeperd door (signed git writes)
+  claude-box work --beads     forward the beadsd door (beads reads/writes)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label`;
+
+type Doors = { keeper?: boolean; beads?: boolean };
 
 type Meta = Record<string, { desc?: string }>;
 
@@ -94,11 +108,19 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
   return out || undefined;
 }
 
-async function run(account: string, args: string[], repo?: string): Promise<number> {
+async function run(account: string, args: string[], repo?: string, doors: Doors = {}): Promise<number> {
   const argv = [
     "podman", "run", "-it", "--rm",
     "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
   ];
+  // Forward the doors (sockets) the launch granted — never keys. The box looks
+  // for each at a fixed in-box path (exported so prx finds it).
+  if (doors.keeper) {
+    argv.push("-v", `${KEEPERD_SOCK}:${KEEPERD_DOOR}`, "--env", `KEEPERD_SOCK=${KEEPERD_DOOR}`);
+  }
+  if (doors.beads) {
+    argv.push("-v", `${BEADSD_SOCK}:${BEADSD_DOOR}`, "--env", `BEADSD_SOCK=${BEADSD_DOOR}`);
+  }
   if (repo) {
     const abs = resolve(repo);
     // Mount the worktree RW at /work; map the host user → the in-box `claude`
@@ -141,16 +163,25 @@ const named = first !== undefined && !first.startsWith("-");
 const account = named ? first : "personal";
 const tail = named ? rest : first !== undefined ? [first, ...rest] : [];
 
-// `--repo <path>` is a claude-box flag (mount a worktree at /work); everything
-// else passes through to claude.
+// claude-box flags: `--repo <path>` (mount a worktree at /work), `--keeper` /
+// `--beads` (forward a door). Everything else passes through to claude.
 let repo: string | undefined;
+const doors: Doors = {};
 const claudeArgs: string[] = [];
 for (let i = 0; i < tail.length; i++) {
   if (tail[i] === "--repo") {
     repo = tail[++i];
     continue;
   }
+  if (tail[i] === "--keeper") {
+    doors.keeper = true;
+    continue;
+  }
+  if (tail[i] === "--beads") {
+    doors.beads = true;
+    continue;
+  }
   claudeArgs.push(tail[i]!);
 }
 
-process.exit(await run(account, claudeArgs, repo));
+process.exit(await run(account, claudeArgs, repo, doors));

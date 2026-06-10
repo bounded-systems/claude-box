@@ -72,5 +72,8 @@ reshapes `prx-5ed` from prx-owns-VM → prx-owns-image-fleet.)
 - **Auditable** — every write is a keeperd-mediated, signed action.
 
 Tracking: `prx-mlj` (keeper grant + this surface), `prx-8qj` (the builder
-actor), the workcell-sandbox-projection. Grants beyond the config volume are
-**planned** — this doc is the design the launcher implements.
+actor), the workcell-sandbox-projection. `--repo`, `--keeper`, and `--beads`
+are **implemented** in the launcher (each forwards its door as a socket
+bind-mount; the keeperd/beadsd host-socket paths are overridable via
+`KEEPERD_SOCK` / `BEADSD_SOCK` so the same launch works across transports). The
+live-daemon integration tests stay `test.todo` until the pod lands (`prx-asr`).

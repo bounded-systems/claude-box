@@ -33,35 +33,45 @@ function boxNet(podmanArgs: string[], script: string): { code: number; out: stri
   };
 }
 
+// These assertions exercise the REAL image under podman; they can only run where
+// the runtime + image are present (a Mac with `podman load -i result`). Where
+// they aren't (CI without podman, a fresh checkout), skip rather than hard-fail
+// so the default `bun test` stays green — the integration gate is environment,
+// not a regression. Grant-profile cases below stay `test.todo` until the pod.
+const RUNTIME_READY =
+  Bun.spawnSync(["sh", "-c", `command -v podman >/dev/null 2>&1 && podman image exists ${IMAGE}`])
+    .exitCode === 0;
+const boxTest = test.skipIf(!RUNTIME_READY);
+
 // ── least authority: the box runs unprivileged with no escalation ──
-test("runs non-root (uid 1000)", () => {
+boxTest("runs non-root (uid 1000)", () => {
   expect(box("id -u").out).toBe("1000");
 });
 
-test("no privilege-escalation / container tooling (sudo, docker, podman, kubectl)", () => {
+boxTest("no privilege-escalation / container tooling (sudo, docker, podman, kubectl)", () => {
   const found = box(
     "for c in sudo docker podman kubectl nsenter; do command -v $c >/dev/null 2>&1 && echo $c; done",
   ).out;
   expect(found).toBe(""); // none present
 });
 
-test("no docker socket, no ambient daemon", () => {
+boxTest("no docker socket, no ambient daemon", () => {
   expect(box("test -S /var/run/docker.sock && echo present || echo absent").out).toBe("absent");
 });
 
 // ── the sanctioned tool surface IS present ──
-test("prx + claude are the sanctioned tools", () => {
+boxTest("prx + claude are the sanctioned tools", () => {
   expect(box("command -v prx >/dev/null && command -v claude >/dev/null && echo ok").out).toBe("ok");
 });
 
-test("prx is really prx (not bare bun — patchelf-corruption regression guard)", () => {
+boxTest("prx is really prx (not bare bun — patchelf-corruption regression guard)", () => {
   expect(box("prx --version").out).toContain("v0.10");
 });
 
 // ── network is a door, not a NIC ──
 // Default profile launches with --network=none: no ambient egress to exfiltrate
 // through. (box() runs the image directly, so assert under that flag here.)
-test("default: --network=none has no egress (exfil has no route)", () => {
+boxTest("default: --network=none has no egress (exfil has no route)", () => {
   const p = Bun.spawnSync(
     ["podman", "run", "--rm", "--network=none", "--entrypoint", "sh", IMAGE,
      "-c", "getent hosts api.anthropic.com >/dev/null 2>&1 && echo reachable || echo offline"],
@@ -73,7 +83,7 @@ test("default: --network=none has no egress (exfil has no route)", () => {
 // ── egress is a grant: a container bounds what the box WRITES, not what it
 //    REACHES, so no door ⇒ no network (--network=none, the launcher default).
 //    socat is in the box only to RELAY the netd door — it grants no egress. ──
-test("no door ⇒ no egress (api.anthropic.com unreachable under --network=none)", () => {
+boxTest("no door ⇒ no egress (api.anthropic.com unreachable under --network=none)", () => {
   const r = boxNet(
     ["--network=none"],
     `bun -e 'fetch("https://api.anthropic.com").then(()=>process.exit(0)).catch(()=>process.exit(7))'`,

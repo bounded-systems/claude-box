@@ -56,6 +56,9 @@ runaway box can't POST your repo to an arbitrary host — there is nothing to
 POST it through except netd, which enforces policy. `--net-open` (full ambient
 egress) exists only as a loud, explicit fallback for when no netd is running.
 
+netd's contract — socket protocol, default allowlist, no-MITM destination
+gating, audit log — is [NETD.md](./NETD.md).
+
 ## Git writes go through keeper — not raw git
 
 The box holds **no git credentials and no signing key** on purpose. To

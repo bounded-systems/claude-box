@@ -15,9 +15,20 @@ declaration, projected onto the `podman run` mounts/sockets).
 | **`--repo <path>`** | work on a real project | bind-mount a worktree, read-write only that path |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--beads`** | beads reads/writes | forward the **beadsd** door (socket) |
+| **`--door <name>[=<sock>]`** | attach any other service | the **generic door** — mount a host socket at `/run/<name>.sock`, export `<NAME>_SOCK` |
 
 Each grant is opt-in per launch. No grant ⇒ the box can think and read its
 mounted repo, but cannot mutate anything outside its volume.
+
+**One primitive, named presets.** A *door* is the whole capability mechanism: a
+single `(name, socket)` pair. `--keeper` / `--beads` are just **named presets**
+over the generic `--door` — canonical in-box path + a rulebook — and any other
+service attaches with `--door <name>=<host.sock>`. We build **one** box image and
+attach services per launch by socket; there is **one door registry** in the
+launcher, so the mount, the env, the manifest, the help and these docs all fall
+out of a single source and **cannot drift**. (That drift is exactly what let
+`--keeper` ship "documented but unimplemented": the description and the reality
+were separate artifacts. With one registry that is structurally impossible.)
 
 ## Git writes go through keeper — not raw git
 
@@ -83,6 +94,37 @@ podman-machine host*, never inside the box) and point `$KEEPERD_SOCK` /
 never sees the wire. When the pod lands (`prx-zj8`), the relay disappears and the
 same `--keeper` launch becomes a direct local mount with zero changes.
 
+## The surface is honest — the box knows what it can't do
+
+An OCAP surface needs two things, and the doors above only give the first:
+
+1. **Unforgeable.** No `--keeper` ⇒ no keeperd socket ⇒ *there is nothing in the
+   box to push with*. The capability can't be faked; its absence is real.
+2. **Self-describing.** The box must *know* its surface — granted **and** denied
+   — so it never "thinks it can." Otherwise the agent reads a stale doc, reaches
+   for a door that isn't there, and fails at runtime (or hallucinates success).
+
+For (2), the launcher emits a **per-launch capability manifest from the same
+registry that does the mounting**, so it is ground truth by construction:
+
+- a machine-readable manifest is exported as **`$CLAUDE_BOX_CAPABILITIES`**
+  (granted doors + repo + the explicit *denied* list);
+- a human-readable version is **injected into the agent's context every launch**
+  via `claude --append-system-prompt` — "your authority is EXACTLY this; if it
+  isn't GRANTED you don't have it," with, for each door, *how to use it* and, for
+  each denied door, *do not attempt; relaunch with `--flag`*.
+
+This is the Chinese Room: the box (the room) hands the agent (the man) a rulebook
+keyed to exactly the doors present. He never needs ambient authority ("to
+understand Chinese") — he translates only via the card for the symbols he holds,
+and for symbols with no card there is no rule. He cannot "think he can."
+
+**Follow-up — enforce, don't just describe (prx tool-gating).** Injecting the
+manifest *tells* the agent its limits; the stronger form is for the in-box
+runtime (**prx**) to read `$CLAUDE_BOX_CAPABILITIES` and **not expose a tool for a
+denied door at all** — absence becomes unforgeable at the tool layer, not merely
+stated. That lives in prx, not this launcher; tracked as a follow-up.
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a
@@ -92,8 +134,11 @@ same `--keeper` launch becomes a direct local mount with zero changes.
 - **Auditable** — every write is a keeperd-mediated, signed action.
 
 Tracking: `prx-mlj` (keeper grant + this surface), `prx-8qj` (the builder
-actor), the workcell-sandbox-projection. `--repo`, `--keeper`, and `--beads`
-are **implemented** in the launcher (each forwards its door as a socket
-bind-mount; the keeperd/beadsd host-socket paths are overridable via
-`KEEPERD_SOCK` / `BEADSD_SOCK` so the same launch works across transports). The
-live-daemon integration tests stay `test.todo` until the pod lands (`prx-asr`).
+actor), the workcell-sandbox-projection. `--repo`, `--keeper`, `--beads`, and the
+generic `--door` are **implemented** in the launcher over one door registry (each
+forwards its door as a socket bind-mount; host-socket paths are overridable via
+`KEEPERD_SOCK` / `BEADSD_SOCK` / a `--door name=host.sock` so the same launch
+works across transports). The capability manifest (`$CLAUDE_BOX_CAPABILITIES` +
+injected system prompt) ships with it; pure unit tests cover the surface
+(`tests/door.test.ts`). The live-daemon integration tests stay `test.todo` until
+the pod lands (`prx-asr`); **prx tool-gating on the manifest** is the follow-up.

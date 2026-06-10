@@ -49,7 +49,7 @@ test("prx + claude are the sanctioned tools", () => {
 });
 
 test("prx is really prx (not bare bun — patchelf-corruption regression guard)", () => {
-  expect(box("prx --version").out).toContain("v0.8");
+  expect(box("prx --version").out).toContain("v0.10");
 });
 
 // ── grant profiles — pending the pod (prx-asr) ──

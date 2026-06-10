@@ -37,6 +37,12 @@ walks the `links` back-references up the chain.
 This is the plain "signed artifact" win: anyone can verify the image they run is
 the one nix built from the pinned flake.
 
+> **Implemented** (in claude-box): `nix run .#provenance -- --image-digest
+> sha256:<hex>` emits this statement (`provenance.ts`), pulling materials from
+> `flake.lock` + `flake.nix`. Sign the emitted statement downstream, e.g.
+> `cosign attest --predicate <stmt> --type custom <image-ref>` (keyless OIDC in
+> CI). Capabilities are emitted empty here by design.
+
 ## L2 — launch attestation  *(claude-box launcher requests; keeperd signs)*
 
 - **subject:** a launch id = `image digest + nonce` (one per `claude-box … run`).

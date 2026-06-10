@@ -82,6 +82,24 @@ claude-box work --net --net-profile js   # + npm/github (a JS workload)
 `--net-open` bypasses netd entirely (full ambient egress) — the loud, explicit,
 **unsafe** escape hatch, for when no netd is running.
 
+### Allowlist hygiene — fetch hosts, never write sinks (GH-6)
+
+The allowlist is **security-critical**: the box can read its own OAuth token
+(plaintext in the config volume), so egress is only safe while there's no
+**writable sink** to POST it (or the repo) to. The rule for every default
+profile:
+
+- allow **fetch/read** hosts only — `codeload.github.com`,
+  `objects.githubusercontent.com`, `registry.npmjs.org`, `files.pythonhosted.org`;
+- **never** put a write API or upload target in a default profile —
+  **`api.github.com`** (gists/PRs), pastebins, generic object stores, webhook
+  catchers. Those turn a sanctioned door into an exfil channel.
+
+`github.com:443` for `git clone`/`fetch` over HTTPS is a *fetch* use, but it is
+also reachable for pushes — so pushes still go through **keeperd**, not netd, and
+netd's job is only to let reads through. If a workload truly needs a write API,
+that's an explicit, named, non-default grant — never folded into `js`/`clone`.
+
 ## Reference implementation
 
 Recommended: **Squid** in allowlist-only mode (chosen in design review), fronted

@@ -84,6 +84,25 @@ twin; both are doors, not credentials in the box. That's the ocap win: a
 compromised or runaway box can only *ask* a daemon that enforces policy and
 holds the keys — it cannot exfiltrate keys or force-push.
 
+### Credential hygiene — the tools are present, the creds are not (GH-5)
+
+The image ships `git`, `gh`, and `openssh`. "Credential-free" is about what's
+*reachable*, not what's installed:
+
+- **Nothing ambient is forwarded.** Unlike agent-forwarding setups, the launcher
+  passes no SSH agent, no keys, no `GH_TOKEN`. The box starts with zero push
+  capability; the *only* sanctioned write path is the keeperd door.
+- **In-box creds don't persist.** Only `~/.config/claude` is the volume; `gh`'s
+  config (`~/.config/gh`) and `~/.ssh` are **outside** it, so anything a session
+  authenticates is thrown away with the `--rm` container — it can't silently
+  become a standing credential.
+- **So the one way to defeat the model is to *hand* the box a credential** —
+  `gh auth login` with a real token, mounting a key, or `-e GH_TOKEN=…`. Don't.
+  That re-creates a direct push path that bypasses keeperd's policy + signing.
+
+The enforced version (GH-5) is to retire the in-box auth path entirely so
+keeperd is the *only* way to write history, not merely the recommended one.
+
 ## Transport is interchangeable — the door is the capability
 
 *How* a door reaches the box is an implementation detail; the grant is unchanged

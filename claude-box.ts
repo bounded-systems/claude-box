@@ -18,17 +18,46 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Compiled to a binary by nix (Bun).
  */
 
-import { resolve } from "node:path";
+import { statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
-// Default netd door socket (the egress proxy lives behind it). Override with
-// `--net <sock>`; see CAPABILITIES.md "Network is a door — not a NIC".
-const NETD_SOCK = `${process.env.XDG_RUNTIME_DIR ?? "/tmp"}/netd.sock`;
 // The localhost proxy the in-box relay exposes; the image entrypoint forwards
 // it to /run/netd.sock. Clients route egress here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
+
+/** Default path for a door socket (netd/keeperd). FAIL CLOSED: a world-writable
+ *  fallback like /tmp lets another host user pre-create the socket and MITM the
+ *  door, so we require XDG_RUNTIME_DIR (a private, 0700 dir) and refuse to guess. */
+function doorSock(name: string): string {
+  const rt = process.env.XDG_RUNTIME_DIR;
+  if (!rt) {
+    console.error(
+      `claude-box: XDG_RUNTIME_DIR unset — refusing to put the ${name} door in a world-writable /tmp (hijack risk). Set XDG_RUNTIME_DIR or pass an explicit socket path.`,
+    );
+    process.exit(2);
+  }
+  return `${rt}/${name}.sock`;
+}
+
+/** A door socket's directory must not be world-writable, or another user can
+ *  pre-create the socket and MITM the door. Validates explicit paths too. */
+function assertSocketDir(sock: string): void {
+  const dir = dirname(sock);
+  let mode: number;
+  try {
+    mode = statSync(dir).mode;
+  } catch {
+    console.error(`claude-box: door socket dir ${dir} does not exist`);
+    process.exit(2);
+  }
+  if (mode & 0o002) {
+    console.error(`claude-box: refusing door socket in world-writable ${dir} (hijack risk) — use a private dir`);
+    process.exit(2);
+  }
+}
 
 const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude, one account per volume
 
@@ -36,9 +65,10 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
   claude-box work --repo .    mount the current worktree at /work (work on a repo)
-  claude-box work --net       policed egress via the netd door (${NETD_SOCK})
+  claude-box work --net       policed egress via the netd door ($XDG_RUNTIME_DIR/netd.sock)
   claude-box work --net <sock> netd door at a custom socket path
   claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
+  claude-box work --keeper    git writes via the keeperd door (no creds in the box)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label`;
 
@@ -117,8 +147,12 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
  *  unsafe ambient-egress escape; otherwise the netd door at `sock`. */
 type Net = { open: true } | { sock: string };
 
-async function run(account: string, args: string[], repo?: string, net?: Net): Promise<number> {
+/** The per-launch capability grants (each opt-in; see CAPABILITIES.md). */
+type Grants = { repo?: string; net?: Net; keeper?: string };
+
+async function run(account: string, args: string[], grants: Grants): Promise<number> {
   assertAccount(account);
+  const { repo, net, keeper } = grants;
   const argv = [
     "podman", "run", "-it", "--rm",
     // Defense-in-depth: the box needs no Linux caps and never escalates; cap a
@@ -141,12 +175,19 @@ async function run(account: string, args: string[], repo?: string, net?: Net): P
       // Forward the netd door + point in-box clients at the relay it exposes.
       // The box holds no egress capability of its own — it can only ASK netd,
       // which owns the allowlist (the network twin of keeperd/beadsd).
+      assertSocketDir(net.sock);
       argv.push("-v", `${net.sock}:/run/netd.sock`);
       argv.push(
         "-e", `HTTPS_PROXY=${NETD_PROXY}`, "-e", `HTTP_PROXY=${NETD_PROXY}`,
         "-e", `ALL_PROXY=${NETD_PROXY}`, "-e", "NO_PROXY=localhost,127.0.0.1",
       );
     }
+  }
+  // Git writes are a DOOR too: the box holds no keys, so commit/push routes
+  // through keeperd (which owns the keys + signs). Forward the door, not creds.
+  if (keeper) {
+    assertSocketDir(keeper);
+    argv.push("-v", `${keeper}:/run/keeperd.sock`);
   }
   if (repo) {
     const abs = resolve(repo);
@@ -166,30 +207,38 @@ async function run(account: string, args: string[], repo?: string, net?: Net): P
   return proc.exited;
 }
 
-/** Resolve the `--net [sock]` / `--net-open` flags into a Net grant. A bare
- *  `--net` (no path, or followed by another flag) uses the default socket. */
-function parseNet(tokens: string[]): { net?: Net; rest: string[] } {
-  let net: Net | undefined;
-  const rest: string[] = [];
+/** Split claude-box grant flags out of the arg list; the rest pass through to
+ *  claude. `--net`/`--keeper` take an optional socket path — bare (or followed
+ *  by another flag) means the default door socket under $XDG_RUNTIME_DIR. */
+function parseGrants(tokens: string[]): { grants: Grants; claudeArgs: string[] } {
+  const grants: Grants = {};
+  const claudeArgs: string[] = [];
+  // Optional socket arg: the next token, unless it's missing or another flag.
+  const sockArg = (tokens: string[], i: number, name: string): { sock: string; consumed: boolean } => {
+    const next = tokens[i + 1];
+    return next !== undefined && !next.startsWith("-")
+      ? { sock: next, consumed: true }
+      : { sock: doorSock(name), consumed: false };
+  };
   for (let i = 0; i < tokens.length; i++) {
     const a = tokens[i]!;
-    if (a === "--net-open") {
-      net = { open: true };
-      continue;
+    if (a === "--repo") {
+      grants.repo = tokens[++i];
+    } else if (a === "--net-open") {
+      grants.net = { open: true };
+    } else if (a === "--net") {
+      const { sock, consumed } = sockArg(tokens, i, "netd");
+      grants.net = { sock };
+      if (consumed) i++;
+    } else if (a === "--keeper") {
+      const { sock, consumed } = sockArg(tokens, i, "keeperd");
+      grants.keeper = sock;
+      if (consumed) i++;
+    } else {
+      claudeArgs.push(a);
     }
-    if (a === "--net") {
-      const next = tokens[i + 1];
-      if (next !== undefined && !next.startsWith("-")) {
-        net = { sock: next };
-        i++;
-      } else {
-        net = { sock: NETD_SOCK };
-      }
-      continue;
-    }
-    rest.push(a);
   }
-  return { net, rest };
+  return { grants, claudeArgs };
 }
 
 const [first, ...rest] = Bun.argv.slice(2);
@@ -216,17 +265,8 @@ const named = first !== undefined && !first.startsWith("-");
 const account = named ? first : "personal";
 const tail = named ? rest : first !== undefined ? [first, ...rest] : [];
 
-// `--repo <path>` / `--net [sock]` / `--net-open` are claude-box grant flags;
-// everything else passes through to claude.
-const { net, rest: afterNet } = parseNet(tail);
-let repo: string | undefined;
-const claudeArgs: string[] = [];
-for (let i = 0; i < afterNet.length; i++) {
-  if (afterNet[i] === "--repo") {
-    repo = afterNet[++i];
-    continue;
-  }
-  claudeArgs.push(afterNet[i]!);
-}
+// `--repo <path>` / `--net [sock]` / `--net-open` / `--keeper [sock]` are
+// claude-box grant flags; everything else passes through to claude.
+const { grants, claudeArgs } = parseGrants(tail);
 
-process.exit(await run(account, claudeArgs, repo, net));
+process.exit(await run(account, claudeArgs, grants));

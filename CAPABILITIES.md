@@ -7,6 +7,17 @@ gets *exactly* the authority a launch grants it, and nothing ambient. This is
 the concrete instance of the capability-profile → sandbox projection (one
 declaration, projected onto the `podman run` mounts/sockets).
 
+> **A container bounds what the box can *write*, not what it can *reach*.** That
+> is the gap most "Claude in Docker" setups leave open — and the one that
+> actually bites. A bind-mount stops the box touching the rest of the host, but
+> with ambient network + forwarded credentials a prompt-injected or runaway box
+> can still exfiltrate the mounted repo (and any `.env` in it) or push with your
+> keys. It never touches your home dir and still leaks everything that matters.
+> So claude-box treats **both halves of reach** as grants, not ambient: *egress*
+> goes through the **netd** door (`--net`, `--network=none` by default) and *git
+> writes* go through the **keeperd** door (no keys in the box). Confining where
+> it writes is necessary; confining what it can talk to is the rest of the job.
+
 ## The grants
 
 | Grant | What it gives | How |

@@ -8,9 +8,10 @@ container itself is credential-free (see [CAPABILITIES.md](./CAPABILITIES.md)).
 ## Use
 
 ```sh
-claude-box                 # 'personal' account
+claude-box                 # 'personal' account (no network — see --net)
 claude-box work            # 'work' account — separate auth/history
 claude-box work --resume   # flags pass through to claude
+claude-box work --net      # policed egress via the netd door (allowlist)
 claude-box ls              # list accounts (+ descriptions)
 claude-box name work "Acme, Inc. — billing@acme"   # friendly label
 ```
@@ -18,6 +19,12 @@ claude-box name work "Acme, Inc. — billing@acme"   # friendly label
 First run of an account → `/login` once; it persists in that account's volume
 (`claude-<account>-config`). Names are free-form; labels live in
 `~/.config/claude-box/accounts.json`.
+
+A container bounds what the box can *write*, not what it can *reach* — so
+**egress is a grant**: the box runs `--network=none` by default and reaches the
+network only through the **netd** door (`--net`), which enforces an allowlist
+(`--net-open` is an explicit, unsafe full-egress escape). See
+[CAPABILITIES.md](./CAPABILITIES.md).
 
 ## Install (home-manager)
 

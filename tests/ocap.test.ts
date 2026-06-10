@@ -17,8 +17,14 @@ const IMAGE = "localhost/claude-personal:dev";
 
 /** Run a shell line inside the box (default profile, no grants) and capture it. */
 function box(script: string): { code: number; out: string } {
+  return boxNet([], script);
+}
+
+/** Run a shell line inside the box under explicit podman flags (e.g. a network
+ *  mode), so egress-grant profiles can be asserted, not eyeballed. */
+function boxNet(podmanArgs: string[], script: string): { code: number; out: string } {
   const p = Bun.spawnSync(
-    ["podman", "run", "--rm", "--entrypoint", "sh", IMAGE, "-c", script],
+    ["podman", "run", "--rm", ...podmanArgs, "--entrypoint", "sh", IMAGE, "-c", script],
     { stdout: "pipe", stderr: "pipe" },
   );
   return {
@@ -64,7 +70,22 @@ test("default: --network=none has no egress (exfil has no route)", () => {
   expect(`${p.stdout.toString()}${p.stderr.toString()}`.trim()).toContain("offline");
 });
 
+// ── egress is a grant: a container bounds what the box WRITES, not what it
+//    REACHES, so no door ⇒ no network (--network=none, the launcher default).
+//    socat is in the box only to RELAY the netd door — it grants no egress. ──
+test("no door ⇒ no egress (api.anthropic.com unreachable under --network=none)", () => {
+  const r = boxNet(
+    ["--network=none"],
+    `bun -e 'fetch("https://api.anthropic.com").then(()=>process.exit(0)).catch(()=>process.exit(7))'`,
+  );
+  expect(r.code).not.toBe(0); // no route off the box — nothing to exfiltrate THROUGH
+});
+
 // ── grant profiles — pending the pod (prx-asr) ──
+// --net: the netd door is the ONLY egress; an allowlisted host is reachable
+// THROUGH it (loopback relay → /run/netd.sock), an arbitrary host (evil.com) is
+// refused by netd. Pending netd + the pod.
+test.todo("--net: egress only via the netd door (allowlist enforced, arbitrary host refused)");
 // --net: the netd door is the ONLY egress; the allowlist permits api.anthropic.com
 // but a curl to an off-allowlist host is refused (netd policy, no other route).
 test.todo("--net: egress only via the netd door, off-allowlist host refused");

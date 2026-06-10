@@ -1,9 +1,17 @@
 # ocap-provenance — the shared provenance contract
 
-**Status:** authored in-tree under `claude-box/contract/` because the session
-that wrote it could not create a standalone repo. **Destined to be extracted
-verbatim** into `github.com/bounded-systems/ocap-provenance` — nothing here
-imports from claude-box, so the move is a copy, not a rewrite.
+**Pinned mirror.** This directory mirrors
+[`github.com/bounded-systems/ocap-provenance`](https://github.com/bounded-systems/ocap-provenance)
+— the canonical home of the `CapabilityProvenance/v0.1` contract. `types.ts` and
+`capability-provenance.v0.1.schema.json` are kept **byte-for-byte identical** to
+upstream so every consumer pins the same bytes; **do not edit them here** —
+change upstream, then re-vendor and bump the pin below. A local copy exists only
+so offline tooling (`bun test`, `nix run .#provenance`) resolves the types
+without a network fetch.
+
+**Pinned at:** `ocap-provenance@<commit>` — _not yet locked; set this to
+`git -C ocap-provenance rev-parse HEAD` when re-vendoring from a shell that has
+the repo (see `HANDOFF.md`, Task A)._
 
 ## Why this is its own thing
 

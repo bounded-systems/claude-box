@@ -44,6 +44,15 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
 
 type Meta = Record<string, { desc?: string }>;
 
+/** Account names land in a volume name and a `-v` mount spec, so a stray `:`
+ *  or `/` could malform or redirect the mount. Keep them boring. */
+function assertAccount(account: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(account)) {
+    console.error(`claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`);
+    process.exit(2);
+  }
+}
+
 async function loadMeta(): Promise<Meta> {
   try {
     return (await Bun.file(META_PATH).json()) as Meta;
@@ -85,6 +94,7 @@ async function setName(account: string, desc: string): Promise<number> {
     console.error("usage: claude-box name <account> <description…>");
     return 1;
   }
+  assertAccount(account);
   const meta = await loadMeta();
   meta[account] = { ...meta[account], desc };
   await saveMeta(meta);
@@ -108,8 +118,14 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 type Net = { open: true } | { sock: string };
 
 async function run(account: string, args: string[], repo?: string, net?: Net): Promise<number> {
+  assertAccount(account);
   const argv = [
     "podman", "run", "-it", "--rm",
+    // Defense-in-depth: the box needs no Linux caps and never escalates; cap a
+    // runaway/forky agent so it can't fork-bomb or privilege-escalate the host.
+    "--security-opt", "no-new-privileges",
+    "--cap-drop", "all",
+    "--pids-limit", "2048",
     "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
   ];
   // Network is a DOOR, not a NIC (CAPABILITIES.md). The box gets NO ambient

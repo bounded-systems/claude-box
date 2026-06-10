@@ -23,7 +23,7 @@ declaration, projected onto the `podman run` mounts/sockets).
 | Grant | What it gives | How |
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
-| **`--repo <path>`** | work on a real project | bind-mount a worktree, read-write only that path |
+| **`--repo <path>`** | work on a real project | *today:* bind-mount a worktree RW — becoming the **repod** read door + in-box overlay, see [REPOD.md](./REPOD.md) |
 | **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--beads`** | beads reads/writes | forward the **beadsd** door (socket) |
@@ -32,6 +32,11 @@ Each grant is opt-in per launch. No grant ⇒ the box can think and read its
 mounted repo, but cannot mutate anything outside its volume **and has no
 network at all** (`--network=none`). `--net-open` is an explicit, unsafe escape
 hatch (full ambient egress, no allowlist).
+
+Underneath every launch the box also runs **`--cap-drop=all
+--security-opt=no-new-privileges --pids-limit`** as non-root uid 1000: it needs
+no Linux capabilities and never escalates, so a runaway agent can't fork-bomb or
+privilege-escalate the host. These are floor, not grants.
 
 ## Network is a door — not a NIC
 

@@ -125,6 +125,15 @@ runtime (**prx**) to read `$CLAUDE_BOX_CAPABILITIES` and **not expose a tool for
 denied door at all** — absence becomes unforgeable at the tool layer, not merely
 stated. That lives in prx, not this launcher; tracked as a follow-up.
 
+**Follow-up — provenance (capability-aware).** The manifest is also a hashable
+record of the authority a launch held, so it can be *attested*: a SLSA/in-toto
+chain from **reproducible image → the doors a launch held → the keeper-signed
+commit** (L1→L2→L3). The shared predicate schema both claude-box and keeperd pin
+is authored under [`contract/`](./contract/) (`CapabilityProvenance/v0.1`),
+destined for its own repo (`bounded-systems/ocap-provenance`); see
+[`contract/CHAIN.md`](./contract/CHAIN.md). L1 (sign + SLSA-attest the box image)
+is the self-contained next step in this flake; L2/L3 land in keeperd.
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a

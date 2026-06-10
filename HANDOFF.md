@@ -40,6 +40,12 @@ capabilities empty); L2 = launch (keeper signs, binds `$CLAUDE_BOX_CAPABILITIES`
 Goal: declare `claude-box/contract/` a *pinned mirror* of the now-canonical
 `ocap-provenance`, without breaking offline tests.
 
+> **Partly done:** `contract/README.md` has already been reframed as a
+> pinned-mirror note. **Remaining:** (1) confirm `types.ts` + schema are
+> byte-identical to upstream, (2) lock the real commit SHA in
+> `contract/README.md` (`**Pinned at:** ocap-provenance@<commit>`), (3) the
+> optional CI drift-guard below.
+
 ```bash
 cd claude-box && git checkout claude/fervent-sagan-1eiu17-provenance
 SHA=$(git -C ../ocap-provenance rev-parse HEAD)

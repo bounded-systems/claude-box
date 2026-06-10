@@ -165,8 +165,23 @@
               in pkgs.writeShellScriptBin "claude-box" ''
                 exec ${pkgs.bun}/bin/bun ${./claude-box.ts} "$@"
               '';
+
+            # L1 provenance generator (capability-aware, see contract/). Emits
+            # the CapabilityProvenance image attestation for a built image:
+            #   nix run .#provenance -- --image-digest sha256:<hex>
+            # Sign the emitted statement downstream (e.g. `cosign attest`).
+            provenance =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "provenance" ''
+                exec ${pkgs.bun}/bin/bun ${./provenance.ts} "$@"
+              '';
           };
         };
+
+      apps.aarch64-darwin.provenance = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
+      };
 
       # Option A builder (prx-9yp), prepared so we can build LATER.
       # Determinate Nix owns /etc/nix/nix.conf and sets nix.enable=false in

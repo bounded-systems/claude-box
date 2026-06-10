@@ -18,13 +18,50 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { resolve } from "node:path";
+import { statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
+// The loopback proxy the in-box relay exposes; the image entrypoint forwards it
+// to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
+const NETD_PROXY = "http://127.0.0.1:3128";
 
 type Env = Record<string, string | undefined>;
+
+/** Account names land in a volume name and a `-v` mount spec, so a stray `:` or
+ *  `/` could malform or redirect the mount. Keep them boring. */
+function assertAccount(account: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(account)) {
+    console.error(`claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`);
+    process.exit(2);
+  }
+}
+
+/** Default host socket for a daemon, private-dir-first. Pure (no I/O) so door
+ *  resolution stays testable; run() enforces the fail-closed check below. */
+function defaultHostSock(daemon: string, env: Env): string {
+  return `${env.XDG_RUNTIME_DIR ?? "/tmp"}/${daemon}.sock`;
+}
+
+/** A door socket's dir must not be world-writable, or another host user can
+ *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
+ *  for EVERY door — so the /tmp default is refused unless a private path is set. */
+function assertSocketDir(sock: string): void {
+  const dir = dirname(sock);
+  let mode: number;
+  try {
+    mode = statSync(dir).mode;
+  } catch {
+    console.error(`claude-box: door socket dir ${dir} does not exist`);
+    process.exit(2);
+  }
+  if (mode & 0o002) {
+    console.error(`claude-box: refusing door socket in world-writable ${dir} (hijack risk) — set a private path (e.g. under $XDG_RUNTIME_DIR)`);
+    process.exit(2);
+  }
+}
 
 // ── The OCAP surface ─────────────────────────────────────────────────────────
 // A *door* is the whole capability mechanism: a single (name, socket) pair. The
@@ -57,7 +94,7 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       flag: "--keeper",
       inBox: "/run/keeperd.sock",
       env: "KEEPERD_SOCK",
-      hostDefault: env.KEEPERD_SOCK ?? "/tmp/keeperd.sock",
+      hostDefault: env.KEEPERD_SOCK ?? defaultHostSock("keeperd", env),
       grants: "signed git writes (commit/push/refs) via keeperd",
       use: "Route every git write through keeperd at /run/keeperd.sock ($KEEPERD_SOCK). You hold NO git credentials and NO signing key — request a signed write and keeperd performs it. A raw `git push` cannot work; there is nothing in the box to push with.",
       deny: "No git-write authority in this box. Do not push, mutate refs, or claim a commit landed on a remote — it will fail. If the task needs it, it must be RELAUNCHED with --keeper.",
@@ -66,10 +103,23 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       flag: "--beads",
       inBox: "/run/beadsd.sock",
       env: "BEADSD_SOCK",
-      hostDefault: env.BEADSD_SOCK ?? "/tmp/beadsd.sock",
+      hostDefault: env.BEADSD_SOCK ?? defaultHostSock("beadsd", env),
       grants: "beads reads/writes via beadsd",
       use: "Route beads operations through beadsd at /run/beadsd.sock ($BEADSD_SOCK).",
       deny: "No beads access in this box. Do not attempt bd reads/writes; relaunch with --beads if the task needs them.",
+    },
+    // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box runs
+    // --network=none and routes HTTPS_PROXY → the relay → this socket, so netd's
+    // allowlist is the only way out (see run() + CAPABILITIES.md "Network is a
+    // door — not a NIC"). The daemon is the network twin of keeperd/beadsd.
+    net: {
+      flag: "--net",
+      inBox: "/run/netd.sock",
+      env: "NETD_SOCK",
+      hostDefault: env.NETD_SOCK ?? defaultHostSock("netd", env),
+      grants: "policed network egress via the netd allowlist proxy",
+      use: "All egress goes through the netd door at /run/netd.sock ($NETD_SOCK); HTTPS_PROXY is set for you. You can reach ONLY hosts netd's allowlist permits — there is no other route off the box. A blocked host is final; do not retry or tunnel around it.",
+      deny: "No network. This box runs --network=none with no egress door — you cannot reach any host. Do not attempt network calls or claim they worked; relaunch with --net for policed egress (or --net-open for unrestricted, unsafe egress).",
     },
   };
 }
@@ -103,7 +153,7 @@ function resolveDoor(name: string, host: string | undefined, env: Env = process.
     name,
     inBox,
     env: ENV,
-    host: host ?? `/tmp/${name}.sock`,
+    host: host ?? env[ENV] ?? defaultHostSock(name, env),
     grants: `service door "${name}"`,
     use: `Reach the ${name} service at ${inBox} ($${ENV}). You hold the door, not the service's keys.`,
   };
@@ -115,6 +165,8 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
   claude-box work --repo .    mount the current worktree at /work (work on a repo)
+  claude-box work --net       forward the netd door — policed egress (default: no network)
+  claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
   claude-box work --keeper    forward the keeperd door (signed git writes)
   claude-box work --beads     forward the beadsd door (beads reads/writes)
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
@@ -184,12 +236,15 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 
 // ── Launch planning + the capability manifest ────────────────────────────────
 
-type Launch = { repo?: string; doors: DoorGrant[]; claudeArgs: string[] };
+type Launch = { repo?: string; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
-/** Split a launch's tail into claude-box flags (--repo / --keeper / --beads /
- *  --door) and the claude passthrough args. */
+/** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
+ *  / --beads / --door) and the claude passthrough args. `--net` takes an
+ *  optional socket path (bare ⇒ the default netd door); `--net-open` is the
+ *  unsafe ambient-egress escape (no door). */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
+  let netOpen = false;
   const doors = new Map<string, DoorGrant>();
   const claudeArgs: string[] = [];
   const add = (d: DoorGrant) => doors.set(d.name, d);
@@ -197,6 +252,16 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     const t = tail[i]!;
     if (t === "--repo") {
       repo = tail[++i];
+      continue;
+    }
+    if (t === "--net-open") {
+      netOpen = true;
+      continue;
+    }
+    if (t === "--net") {
+      const next = tail[i + 1];
+      const host = next !== undefined && !next.startsWith("-") ? tail[++i] : undefined;
+      add(resolveDoor("net", host, env));
       continue;
     }
     if (t === "--keeper") {
@@ -217,32 +282,39 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     claudeArgs.push(t);
   }
-  return { repo, doors: [...doors.values()], claudeArgs };
+  return { repo, doors: [...doors.values()], netOpen, claudeArgs };
 }
 
 type Manifest = {
   account: string;
   repo?: string;
   doors: DoorGrant[];
+  netOpen: boolean;
   denied: { name: string; flag: string; deny: string }[];
 };
 
 /** The honest surface for THIS launch: what's granted AND what's denied. Built
- *  from the actual grants, so it cannot drift from reality. */
+ *  from the actual grants, so it cannot drift from reality. `--net-open` opens
+ *  ambient egress WITHOUT the net door, so it suppresses the "net" denial — the
+ *  manifest must not claim there's no network when there is. */
 function buildManifest(account: string, launch: Launch, env: Env = process.env): Manifest {
   const granted = new Set(launch.doors.map((d) => d.name));
   const denied = Object.entries(knownDoors(env))
-    .filter(([name]) => !granted.has(name))
+    .filter(([name]) => !granted.has(name) && !(name === "net" && launch.netOpen))
     .map(([name, p]) => ({ name, flag: p.flag, deny: p.deny }));
-  return { account, repo: launch.repo, doors: launch.doors, denied };
+  return { account, repo: launch.repo, doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
  *  — the surface the in-box runtime (prx) will gate its tools on. */
 function capabilityJson(m: Manifest): string {
+  const netDoor = m.doors.some((d) => d.name === "net");
   return JSON.stringify({
     workcell: "claude-box",
     account: m.account,
+    // Network posture is explicit: policed (netd door), open (unsafe escape), or
+    // none (--network=none, the default). Egress is a capability, not ambient.
+    network: m.netOpen ? "open" : netDoor ? "policed" : "none",
     granted: {
       config: true,
       repo: m.repo ?? null,
@@ -268,6 +340,9 @@ function capabilityPrompt(m: Manifest): string {
   for (const d of m.doors) {
     lines.push(`- ${d.name}: ${d.grants}. ${d.use}`);
   }
+  if (m.netOpen) {
+    lines.push("- network: UNRESTRICTED ambient egress (--net-open) — NO allowlist. Unsafe escape hatch; anything you send can reach any host.");
+  }
   lines.push("");
   if (m.denied.length) {
     lines.push("DENIED (the capability is physically absent from this box — do not attempt):");
@@ -281,15 +356,43 @@ function capabilityPrompt(m: Manifest): string {
 }
 
 async function run(account: string, launch: Launch, env: Env = process.env): Promise<number> {
-  const { repo, doors, claudeArgs } = launch;
+  assertAccount(account);
+  const { repo, doors, netOpen, claudeArgs } = launch;
   const manifest = buildManifest(account, launch, env);
   const argv = [
     "podman", "run", "-it", "--rm",
+    // Defense-in-depth floor (not a grant): the box needs no Linux caps and
+    // never escalates, so cap a runaway/forky agent from fork-bombing or
+    // privilege-escalating the host.
+    "--security-opt", "no-new-privileges",
+    "--cap-drop", "all",
+    "--pids-limit", "2048",
     "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
   ];
+  // Network is a DOOR, not a NIC. Default to NO interface (nothing to exfiltrate
+  // through, even with a repo mounted); the netd door (below) is the only
+  // policed way out. `--net-open` is the loud, explicit, unsafe ambient-egress
+  // escape — used only when no netd is running.
+  const netDoor = doors.find((d) => d.name === "net");
+  if (netOpen) {
+    console.error("claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)");
+  } else {
+    argv.push("--network=none");
+    if (netDoor) {
+      // The image entrypoint relays 127.0.0.1:3128 → the netd door; point every
+      // egress client at it. The box holds no egress of its own — it can only
+      // ASK netd, which owns the allowlist.
+      argv.push(
+        "--env", `HTTPS_PROXY=${NETD_PROXY}`, "--env", `HTTP_PROXY=${NETD_PROXY}`,
+        "--env", `ALL_PROXY=${NETD_PROXY}`, "--env", "NO_PROXY=localhost,127.0.0.1",
+      );
+    }
+  }
   // Forward each granted door (host socket → fixed in-box path) and export its
-  // env so the box finds it — never the daemon's keys.
+  // env so the box finds it — never the daemon's keys. Fail closed if the host
+  // socket sits in a world-writable dir (hijack risk), for EVERY door.
   for (const d of doors) {
+    assertSocketDir(d.host);
     argv.push("-v", `${d.host}:${d.inBox}`, "--env", `${d.env}=${d.inBox}`);
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).

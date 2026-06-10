@@ -7,18 +7,63 @@ gets *exactly* the authority a launch grants it, and nothing ambient. This is
 the concrete instance of the capability-profile → sandbox projection (one
 declaration, projected onto the `podman run` mounts/sockets).
 
+> **A container bounds what the box can *write*, not what it can *reach*.** That
+> is the gap most "Claude in Docker" setups leave open — and the one that
+> actually bites. A bind-mount stops the box touching the rest of the host, but
+> with ambient network + forwarded credentials a prompt-injected or runaway box
+> can still exfiltrate the mounted repo (and any `.env` in it) or push with your
+> keys. It never touches your home dir and still leaks everything that matters.
+> So claude-box treats **both halves of reach** as grants, not ambient: *egress*
+> goes through the **netd** door (`--net`, `--network=none` by default) and *git
+> writes* go through the **keeperd** door (no keys in the box). Confining where
+> it writes is necessary; confining what it can talk to is the rest of the job.
+
 ## The grants
 
 | Grant | What it gives | How |
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
-| **`--repo <path>`** | work on a real project | bind-mount a worktree, read-write only that path |
+| **`--repo <path>`** | work on a real project | *today:* bind-mount a worktree RW — becoming the **repod** read door + in-box overlay, see [REPOD.md](./REPOD.md) |
+| **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--beads`** | beads reads/writes | forward the **beadsd** door (socket) |
 | **`--door <name>[=<sock>]`** | attach any other service | the **generic door** — mount a host socket at `/run/<name>.sock`, export `<NAME>_SOCK` |
 
 Each grant is opt-in per launch. No grant ⇒ the box can think and read its
-mounted repo, but cannot mutate anything outside its volume.
+mounted repo, but cannot mutate anything outside its volume **and has no
+network at all** (`--network=none`). `--net-open` is an explicit, unsafe escape
+hatch (full ambient egress, no allowlist).
+
+Underneath every launch the box also runs **`--cap-drop=all
+--security-opt=no-new-privileges --pids-limit`** as non-root uid 1000: it needs
+no Linux capabilities and never escalates, so a runaway agent can't fork-bomb or
+privilege-escalate the host. These are floor, not grants.
+
+## Network is a door — not a NIC
+
+The box runs **`--network=none`**: it has no network interface, so there is no
+ambient egress to exfiltrate *through* — even with a repo mounted. Its only way
+out is the forwarded **netd** door: a unix socket whose daemon owns the egress
+**allowlist** (the network twin of keeperd/beadsd). The box holds no egress
+capability of its own; it can only *ask* netd, which decides what's reachable.
+
+```
+claude-box work --net --repo .
+# → --network=none  -v <netd.sock>:/run/netd.sock  -e HTTPS_PROXY=http://127.0.0.1:3128 …
+# In-box, the entrypoint relays loopback:3128 → /run/netd.sock (standard tooling
+# can't proxy straight to a unix socket). Claude reaches api.anthropic.com ONLY
+# because netd's allowlist permits it; a curl to evil.com has no route — netd
+# refuses, and there's no other path off the box.
+```
+
+This is why the model API (mandatory, unlike git) still works under a door: the
+grant isn't "no network", it's "no *unmediated* network". A prompt-injected or
+runaway box can't POST your repo to an arbitrary host — there is nothing to
+POST it through except netd, which enforces policy. `--net-open` (full ambient
+egress) exists only as a loud, explicit fallback for when no netd is running.
+
+netd's contract — socket protocol, default allowlist, no-MITM destination
+gating, audit log — is [NETD.md](./NETD.md).
 
 **One primitive, named presets.** A *door* is the whole capability mechanism: a
 single `(name, socket)` pair. `--keeper` / `--beads` are just **named presets**
@@ -49,6 +94,25 @@ This mirrors how beads writes go through **beadsd** (GH-296). keeperd is the git
 twin; both are doors, not credentials in the box. That's the ocap win: a
 compromised or runaway box can only *ask* a daemon that enforces policy and
 holds the keys — it cannot exfiltrate keys or force-push.
+
+### Credential hygiene — the tools are present, the creds are not (GH-5)
+
+The image ships `git`, `gh`, and `openssh`. "Credential-free" is about what's
+*reachable*, not what's installed:
+
+- **Nothing ambient is forwarded.** Unlike agent-forwarding setups, the launcher
+  passes no SSH agent, no keys, no `GH_TOKEN`. The box starts with zero push
+  capability; the *only* sanctioned write path is the keeperd door.
+- **In-box creds don't persist.** Only `~/.config/claude` is the volume; `gh`'s
+  config (`~/.config/gh`) and `~/.ssh` are **outside** it, so anything a session
+  authenticates is thrown away with the `--rm` container — it can't silently
+  become a standing credential.
+- **So the one way to defeat the model is to *hand* the box a credential** —
+  `gh auth login` with a real token, mounting a key, or `-e GH_TOKEN=…`. Don't.
+  That re-creates a direct push path that bypasses keeperd's policy + signing.
+
+The enforced version (GH-5) is to retire the in-box auth path entirely so
+keeperd is the *only* way to write history, not merely the recommended one.
 
 ## Transport is interchangeable — the door is the capability
 

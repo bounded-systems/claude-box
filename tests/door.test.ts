@@ -67,7 +67,33 @@ test("manifest is honest about what is denied, not just granted", () => {
 test("a no-grant box still names its denials (knows what it cannot do)", () => {
   const m = buildManifest("personal", planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
-  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper"]);
+  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "net"]);
+});
+
+// ── network is a door, with launch effects ──
+test("preset door: --net resolves to the canonical netd door", () => {
+  const d = resolveDoor("net", undefined, EMPTY);
+  expect(d.inBox).toBe("/run/netd.sock");
+  expect(d.env).toBe("NETD_SOCK");
+  expect(d.host).toBe("/tmp/netd.sock"); // default; run() fails closed on world-writable dirs
+});
+
+test("--net grants the net door; default posture is no network", () => {
+  const granted = buildManifest("work", planLaunch(["--net"], EMPTY), EMPTY);
+  expect(granted.doors.map((d) => d.name)).toContain("net");
+  expect(JSON.parse(capabilityJson(granted)).network).toBe("policed");
+
+  const none = buildManifest("work", planLaunch([], EMPTY), EMPTY);
+  expect(JSON.parse(capabilityJson(none)).network).toBe("none");
+  expect(none.denied.map((d) => d.name)).toContain("net"); // honest: no network
+});
+
+test("--net-open opens egress WITHOUT a door, and the manifest says so", () => {
+  const m = buildManifest("work", planLaunch(["--net-open"], EMPTY), EMPTY);
+  expect(m.doors.map((d) => d.name)).not.toContain("net"); // no door granted
+  expect(m.denied.map((d) => d.name)).not.toContain("net"); // but NOT denied — network is open
+  expect(JSON.parse(capabilityJson(m)).network).toBe("open");
+  expect(capabilityPrompt(m)).toMatch(/UNRESTRICTED ambient egress/);
 });
 
 test("injected prompt states authority is EXACTLY the granted set", () => {

@@ -13,11 +13,37 @@ declaration, projected onto the `podman run` mounts/sockets).
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
 | **`--repo <path>`** | work on a real project | bind-mount a worktree, read-write only that path |
+| **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--beads`** | beads reads/writes | forward the **beadsd** door (socket) |
 
 Each grant is opt-in per launch. No grant ⇒ the box can think and read its
-mounted repo, but cannot mutate anything outside its volume.
+mounted repo, but cannot mutate anything outside its volume **and has no
+network at all** (`--network=none`). `--net-open` is an explicit, unsafe escape
+hatch (full ambient egress, no allowlist).
+
+## Network is a door — not a NIC
+
+The box runs **`--network=none`**: it has no network interface, so there is no
+ambient egress to exfiltrate *through* — even with a repo mounted. Its only way
+out is the forwarded **netd** door: a unix socket whose daemon owns the egress
+**allowlist** (the network twin of keeperd/beadsd). The box holds no egress
+capability of its own; it can only *ask* netd, which decides what's reachable.
+
+```
+claude-box work --net --repo .
+# → --network=none  -v <netd.sock>:/run/netd.sock  -e HTTPS_PROXY=http://127.0.0.1:3128 …
+# In-box, the entrypoint relays loopback:3128 → /run/netd.sock (standard tooling
+# can't proxy straight to a unix socket). Claude reaches api.anthropic.com ONLY
+# because netd's allowlist permits it; a curl to evil.com has no route — netd
+# refuses, and there's no other path off the box.
+```
+
+This is why the model API (mandatory, unlike git) still works under a door: the
+grant isn't "no network", it's "no *unmediated* network". A prompt-injected or
+runaway box can't POST your repo to an arbitrary host — there is nothing to
+POST it through except netd, which enforces policy. `--net-open` (full ambient
+egress) exists only as a loud, explicit fallback for when no netd is running.
 
 ## Git writes go through keeper — not raw git
 

@@ -52,7 +52,22 @@ test("prx is really prx (not bare bun — patchelf-corruption regression guard)"
   expect(box("prx --version").out).toContain("v0.8");
 });
 
+// ── network is a door, not a NIC ──
+// Default profile launches with --network=none: no ambient egress to exfiltrate
+// through. (box() runs the image directly, so assert under that flag here.)
+test("default: --network=none has no egress (exfil has no route)", () => {
+  const p = Bun.spawnSync(
+    ["podman", "run", "--rm", "--network=none", "--entrypoint", "sh", IMAGE,
+     "-c", "getent hosts api.anthropic.com >/dev/null 2>&1 && echo reachable || echo offline"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(`${p.stdout.toString()}${p.stderr.toString()}`.trim()).toContain("offline");
+});
+
 // ── grant profiles — pending the pod (prx-asr) ──
+// --net: the netd door is the ONLY egress; the allowlist permits api.anthropic.com
+// but a curl to an off-allowlist host is refused (netd policy, no other route).
+test.todo("--net: egress only via the netd door, off-allowlist host refused");
 // --repo: the mounted worktree is RW; nothing else on the host is writable.
 test.todo("--repo: only the mounted worktree is writable");
 // --keeper: the keeperd door is reachable; a RAW git push fails (no creds in

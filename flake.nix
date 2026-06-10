@@ -67,6 +67,7 @@
             fd
             bun                # agent/runtime (also what prx is built with)
             openssh            # git-over-ssh, gh auth
+            socat              # netd-door relay (loopback proxy → /run/netd.sock)
             cacert             # TLS roots
             coreutils
             gnugrep
@@ -82,6 +83,21 @@
             paths = toolchain;
             pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
           };
+
+          # netd door relay (CAPABILITIES.md "Network is a door — not a NIC").
+          # The box runs --network=none; if the launcher forwarded the netd door
+          # (`--net`), expose it as a loopback proxy (127.0.0.1:3128) so the
+          # HTTPS_PROXY the launcher set reaches netd, which owns the allowlist.
+          # No door ⇒ no relay ⇒ the box is offline. The box holds no egress of
+          # its own — standard tooling can't proxy straight to a unix socket, so
+          # socat bridges loopback-TCP → /run/netd.sock. Flags still pass through
+          # to claude (`exec claude "$@"`); a bare run launches the TUI.
+          entrypoint = pkgs.writeShellScript "claude-box-entrypoint" ''
+            if [ -S /run/netd.sock ]; then
+              ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/netd.sock &
+            fi
+            exec claude "$@"
+          '';
         in
         {
           # `nix build .#claude-image` → ./result is the image TARBALL (data),
@@ -126,7 +142,9 @@
             config = {
               # Entrypoint (not Cmd) so `podman run IMG --resume`/`-p …` pass
               # flags THROUGH to claude; bare `podman run IMG` launches the TUI.
-              Entrypoint = [ "claude" ];
+              # The wrapper starts the netd-door relay first (iff the door is
+              # mounted), then `exec claude "$@"` — flag passthrough unchanged.
+              Entrypoint = [ "${entrypoint}" ];
               WorkingDir = home;
               User = user; # ocap: never run as root (see ADR "ocap fit")
               Env = [

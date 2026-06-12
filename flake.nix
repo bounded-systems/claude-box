@@ -197,12 +197,29 @@
               in pkgs.writeShellScriptBin "provenance" ''
                 exec ${pkgs.bun}/bin/bun ${./provenance.ts} "$@"
               '';
+
+            # keeperd — the git-signing daemon behind the `--keeper` door (KEEPERD.md).
+            # A pinned bun process that holds the Ed25519 signing key and performs
+            # signed commits/pushes on behalf of boxes. The box holds no keys — it
+            # requests signed writes through the /run/keeperd.sock door.
+            #   nix run .#keeperd                  # listen on $KEEPERD_SOCK or default
+            #   nix run .#keeperd -- --help        # show usage
+            keeperd =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "keeperd" ''
+                exec ${pkgs.bun}/bin/bun ${./keeperd.ts} "$@"
+              '';
           };
         };
 
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
+      };
+
+      apps.aarch64-darwin.keeperd = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.keeperd}/bin/keeperd";
       };
 
       # peercred — SO_PEERCRED injector for launcherd (Rust)

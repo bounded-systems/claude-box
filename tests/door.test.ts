@@ -125,7 +125,7 @@ test("manifest is honest about what is denied, not just granted", () => {
 test("a no-grant box still names its denials (knows what it cannot do)", () => {
   const m = buildManifest("personal", planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
-  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "net", "scout"]);
+  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "launcher", "net", "scout"]);
 });
 
 // ── network is a door, with launch effects ──
@@ -168,4 +168,26 @@ test("machine-readable surface (for prx tool-gating) reflects the grants", () =>
   expect(json.granted.repo).toBe(".");
   expect(json.granted.doors[0]).toMatchObject({ name: "keeper", socket: "/run/keeperd.sock", env: "KEEPERD_SOCK" });
   expect(json.denied.map((d: { name: string }) => d.name)).toContain("beads");
+});
+
+// ── launcher door (spawn sub-boxes) ──
+test("preset door: --launcher resolves to the canonical launcherd door", () => {
+  const d = resolveDoor("launcher", undefined, EMPTY);
+  expect(d.inBox).toBe("/run/launcherd.sock");
+  expect(d.env).toBe("LAUNCHERD_SOCK");
+  expect(d.host).toBe("/tmp/launcherd.sock");
+});
+
+test("--launcher grants spawn authority and is reflected in manifest", () => {
+  const m = buildManifest("work", planLaunch(["--launcher"], EMPTY), EMPTY);
+  expect(m.doors.map((d) => d.name)).toContain("launcher");
+  expect(m.denied.map((d) => d.name)).not.toContain("launcher");
+  expect(capabilityPrompt(m)).toMatch(/launcher:.*spawn sub-boxes/i);
+});
+
+test("without --launcher, spawn is explicitly denied", () => {
+  const m = buildManifest("work", planLaunch([], EMPTY), EMPTY);
+  expect(m.doors.map((d) => d.name)).not.toContain("launcher");
+  expect(m.denied.map((d) => d.name)).toContain("launcher");
+  expect(capabilityPrompt(m)).toMatch(/launcher:.*No spawn authority/i);
 });

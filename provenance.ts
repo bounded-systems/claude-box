@@ -2,16 +2,15 @@
 /**
  * provenance.ts — emit the L1 image-provenance attestation for the box image.
  *
- * Produces a `CapabilityProvenance/v0.1` in-toto Statement (see contract/) for
- * the built OCI image:
+ * Produces a SLSA Provenance v1 in-toto Statement (see contract/SLSA-MAPPING.md)
+ * for the built OCI image:
  *   - subject      = the image digest
- *   - producer     = the nix flake rev (the build is a pinned, reproducible
+ *   - buildType    = https://claude.ai/buildTypes/ocap-image/v1
+ *   - builder      = the nix flake rev (the build is a pinned, reproducible
  *                    dockerTools.buildLayeredImage — hermetic by construction)
- *   - materials    = the pinned inputs: nixpkgs (flake.lock) + the prx release
- *   - capabilities = EMPTY — a freshly built image holds no granted doors;
- *                    authority is only ever added at launch (L2). This is the
- *                    honest baseline surface: "config volume only, nothing
- *                    ambient."
+ *   - resolvedDependencies = the pinned inputs: nixpkgs (flake.lock) + prx
+ *   - externalParameters.capabilities = EMPTY — a freshly built image holds no
+ *                    granted doors; authority is only ever added at launch (L2)
  *
  * The statement is written to stdout (sign it downstream, e.g. `cosign
  * attest`). The image digest is supplied by the caller (it only exists after
@@ -19,9 +18,12 @@
  *
  *   nix run .#provenance -- --image-digest sha256:<hex>
  *   # or derive it:  --image-digest "$(skopeo inspect ... | jq -r .Digest)"
+ *
+ * Use --format=ocap for the legacy CapabilityProvenance/v0.1 format.
  */
 
 import { statement, type CapabilityProvenanceStatement, type Material } from "./contract/types.ts";
+import { toSLSA, type SLSAStatement } from "./contract/slsa.ts";
 
 const DEFAULT_IMAGE = "claude-personal:dev";
 
@@ -31,6 +33,7 @@ type Opts = {
   imageName?: string;
   flakeRev?: string; // default: git HEAD of root
   now?: string;
+  format?: "slsa" | "ocap"; // default: slsa
 };
 
 /** sha256:<hex> | <hex> -> 64-char lowercase hex (validated). */
@@ -74,7 +77,8 @@ async function materials(root: string): Promise<Material[]> {
   return out;
 }
 
-export async function buildImageProvenance(opts: Opts): Promise<CapabilityProvenanceStatement> {
+/** Build the internal CapabilityProvenance statement (can be converted to SLSA). */
+export async function buildImageProvenanceOCAP(opts: Opts): Promise<CapabilityProvenanceStatement> {
   const root = opts.root ?? ".";
   const rev = opts.flakeRev ?? (await gitHead(root));
   const name = opts.imageName ?? DEFAULT_IMAGE;
@@ -91,20 +95,39 @@ export async function buildImageProvenance(opts: Opts): Promise<CapabilityProven
   );
 }
 
+/** Build the L1 image provenance in SLSA Provenance v1 format (default). */
+export async function buildImageProvenance(opts: Opts): Promise<SLSAStatement | CapabilityProvenanceStatement> {
+  const ocapStmt = await buildImageProvenanceOCAP(opts);
+  if (opts.format === "ocap") {
+    return ocapStmt;
+  }
+  return toSLSA(ocapStmt);
+}
+
 async function main(argv: string[]): Promise<number> {
   let imageDigest: string | undefined;
   let imageName: string | undefined;
   let root: string | undefined;
+  let format: "slsa" | "ocap" = "slsa";
+
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--image-digest") imageDigest = argv[++i];
     else if (argv[i] === "--image-name") imageName = argv[++i];
     else if (argv[i] === "--root") root = argv[++i];
+    else if (argv[i] === "--format") {
+      const f = argv[++i];
+      if (f === "slsa" || f === "ocap") format = f;
+      else {
+        console.error(`invalid format: ${f} (expected: slsa, ocap)`);
+        return 2;
+      }
+    }
   }
   if (!imageDigest) {
-    console.error("usage: provenance --image-digest sha256:<hex> [--image-name NAME] [--root DIR]");
+    console.error("usage: provenance --image-digest sha256:<hex> [--image-name NAME] [--root DIR] [--format slsa|ocap]");
     return 2;
   }
-  const stmt = await buildImageProvenance({ imageDigest, imageName, root });
+  const stmt = await buildImageProvenance({ imageDigest, imageName, root, format });
   console.log(JSON.stringify(stmt, null, 2));
   return 0;
 }

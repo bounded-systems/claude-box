@@ -135,6 +135,19 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       use: "All egress goes through the netd door at /run/netd.sock ($NETD_SOCK); HTTPS_PROXY is set for you. You can reach ONLY hosts netd's allowlist permits — there is no other route off the box. A blocked host is final; do not retry or tunnel around it.",
       deny: "No network. This box runs --network=none with no egress door — you cannot reach any host. Do not attempt network calls or claim they worked; relaunch with --net for policed egress (or --net-open for unrestricted, unsafe egress).",
     },
+    // The launcher door — spawn sub-boxes without holding podman. The box asks
+    // launcherd to spawn; launcherd owns the runtime and enforces policy. This
+    // enables the self-hosting loop (Claude launching Claude) without privilege
+    // escalation. See LAUNCHERD.md.
+    launcher: {
+      flag: "--launcher",
+      inBox: "/run/launcherd.sock",
+      env: "LAUNCHERD_SOCK",
+      hostDefault: env.LAUNCHERD_SOCK ?? defaultHostSock("launcherd", env),
+      grants: "spawn sub-boxes via launcherd (you hold no runtime)",
+      use: "Spawn sub-boxes by requesting through launcherd at /run/launcherd.sock ($LAUNCHERD_SOCK). You hold NO podman, NO runtime — request a spawn with a capability profile and launcherd performs it. Send JSON requests: {op:'spawn', profile:'work', doors:['keeper','net']}. The sub-box inherits doors you specify (if policy permits).",
+      deny: "No spawn authority in this box. Do not attempt to launch containers or claim spawns succeeded — there is nothing in the box to spawn with. If the task needs sub-boxes, it must be RELAUNCHED with --launcher.",
+    },
   };
 }
 
@@ -204,10 +217,17 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --keeper    forward the keeperd door (signed git writes)
   claude-box work --beads     forward the beadsd door (beads reads/writes)
   claude-box work --scout     forward the scoutd door (external reads: repos/PRs/URLs)
+  claude-box work --launcher  forward the launcherd door (spawn sub-boxes)
   claude-box work --room NAME  forward a named door bundle (read | dev) — see ROOM.md
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
-  claude-box name <acct> <description…>   set a friendly label`;
+  claude-box name <acct> <description…>   set a friendly label
+  claude-box status           show launcherd status (requires daemon)
+  claude-box ps               list running boxes (requires daemon)
+  claude-box kill <id>        terminate a running box (requires daemon)
+  claude-box attach <id>      reconnect to a running box (requires daemon)
+  claude-box keeper-status    show keeperd status (requires daemon)
+  claude-box keeper-key       show keeperd signing public key (requires daemon)`;
 
 type Meta = Record<string, { desc?: string }>;
 
@@ -319,6 +339,10 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--scout") {
       add(resolveDoor("scout", undefined, env));
+      continue;
+    }
+    if (t === "--launcher") {
+      add(resolveDoor("launcher", undefined, env));
       continue;
     }
     if (t === "--room") {
@@ -505,6 +529,235 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   return proc.exited;
 }
 
+// ── Launcherd client ─────────────────────────────────────────────────────────
+
+function launcherdSocketPath(): string {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime) return `${runtime}/launcherd.sock`;
+  const home = process.env.HOME ?? "/tmp";
+  return `${home}/.claude-box/launcherd.sock`;
+}
+
+async function launcherdRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  const socketPath = launcherdSocketPath();
+  const id = crypto.randomUUID();
+
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    Bun.connect({
+      unix: socketPath,
+      socket: {
+        open(sock) {
+          sock.write(JSON.stringify({ id, method, params }) + "\n");
+        },
+        data(_sock, data) {
+          buffer += data.toString();
+          const newline = buffer.indexOf("\n");
+          if (newline >= 0) {
+            const line = buffer.slice(0, newline);
+            try {
+              const resp = JSON.parse(line) as { id: string; ok: boolean; result?: unknown; error?: { message: string } };
+              if (resp.ok) {
+                resolve(resp.result);
+              } else {
+                reject(new Error(resp.error?.message ?? "launcherd error"));
+              }
+            } catch {
+              reject(new Error("invalid response from launcherd"));
+            }
+          }
+        },
+        error(_sock, err) {
+          reject(err);
+        },
+        close() {},
+      },
+    }).catch(reject);
+  });
+}
+
+// ── Keeperd client ────────────────────────────────────────────────────────────
+
+function keeperdSocketPath(): string {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime) return `${runtime}/keeperd.sock`;
+  const home = process.env.HOME ?? "/tmp";
+  return `${home}/.claude-box/keeperd.sock`;
+}
+
+async function keeperdRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  const socketPath = keeperdSocketPath();
+  const id = crypto.randomUUID();
+
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    Bun.connect({
+      unix: socketPath,
+      socket: {
+        open(sock) {
+          sock.write(JSON.stringify({ id, method, params }) + "\n");
+        },
+        data(_sock, data) {
+          buffer += data.toString();
+          const newline = buffer.indexOf("\n");
+          if (newline >= 0) {
+            const line = buffer.slice(0, newline);
+            try {
+              const resp = JSON.parse(line) as { id: string; ok: boolean; result?: unknown; error?: { message: string } };
+              if (resp.ok) {
+                resolve(resp.result);
+              } else {
+                reject(new Error(resp.error?.message ?? "keeperd error"));
+              }
+            } catch {
+              reject(new Error("invalid response from keeperd"));
+            }
+          }
+        },
+        error(_sock, err) {
+          reject(err);
+        },
+        close() {},
+      },
+    }).catch(reject);
+  });
+}
+
+async function cmdKeeperStatus(): Promise<number> {
+  try {
+    const status = await keeperdRequest("status") as Record<string, unknown>;
+    console.log("keeperd status:");
+    console.log(`  version: ${status.version}`);
+    console.log(`  uptime: ${status.uptime}s`);
+    if (status.signing) {
+      const signing = status.signing as { enabled: boolean; keyId?: string };
+      console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId})` : "disabled"}`);
+    }
+    return 0;
+  } catch (e) {
+    console.error(`keeperd not running: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdKeeperKey(): Promise<number> {
+  try {
+    const result = await keeperdRequest("getPublicKey") as { publicKey: string; keyId: string };
+    console.log(result.publicKey);
+    return 0;
+  } catch (e) {
+    console.error(`keeperd not running: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdStatus(): Promise<number> {
+  try {
+    const status = await launcherdRequest("status") as Record<string, unknown>;
+    console.log("launcherd status:");
+    console.log(`  version: ${status.version}`);
+    console.log(`  uptime: ${status.uptime}s`);
+    console.log(`  active launches: ${status.launches}`);
+    if (status.signing) {
+      const signing = status.signing as { enabled: boolean; keyId?: string };
+      console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId?.slice(0, 16)}...)` : "disabled"}`);
+    }
+    if (status.policy) {
+      const pol = status.policy as { enabled: boolean; defaultAllow?: string[]; rulesCount?: number };
+      if (pol.enabled) {
+        console.log(`  policy: enabled (${pol.rulesCount} rules, default: [${pol.defaultAllow?.join(", ") ?? "none"}])`);
+      } else {
+        console.log("  policy: disabled (all rooms permitted)");
+      }
+    }
+    console.log("  doors:");
+    const doors = status.doors as Record<string, { socket: string; reachable: boolean }>;
+    for (const [name, info] of Object.entries(doors)) {
+      console.log(`    ${name}: ${info.reachable ? "reachable" : "unreachable"} (${info.socket})`);
+    }
+    if (status.rooms) {
+      console.log("  rooms:");
+      const rooms = status.rooms as Record<string, string>;
+      for (const [name, desc] of Object.entries(rooms)) {
+        console.log(`    ${name}: ${desc}`);
+      }
+    }
+    return 0;
+  } catch (e) {
+    console.error(`launcherd not running: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdPs(): Promise<number> {
+  try {
+    const result = await launcherdRequest("list") as { launches: Array<{
+      launchId: string;
+      account: string;
+      pid: number;
+      startedAt: string;
+      doors: string[];
+      repo?: string;
+      status: string;
+    }> };
+
+    if (result.launches.length === 0) {
+      console.log("no running boxes");
+      return 0;
+    }
+
+    console.log("LAUNCH ID                    ACCOUNT     PID    DOORS              REPO");
+    for (const l of result.launches) {
+      const doors = l.doors.join(",") || "-";
+      const repo = l.repo ?? "-";
+      console.log(`${l.launchId.padEnd(28)} ${l.account.padEnd(11)} ${String(l.pid).padEnd(6)} ${doors.padEnd(18)} ${repo}`);
+    }
+    return 0;
+  } catch (e) {
+    console.error(`launcherd not running: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdKill(launchId: string): Promise<number> {
+  if (!launchId) {
+    console.error("usage: claude-box kill <launch-id>");
+    return 1;
+  }
+  try {
+    await launcherdRequest("kill", { launchId });
+    console.log(`killed ${launchId}`);
+    return 0;
+  } catch (e) {
+    console.error(`failed to kill ${launchId}: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdAttach(launchId: string): Promise<number> {
+  if (!launchId) {
+    console.error("usage: claude-box attach <launch-id>");
+    return 1;
+  }
+  try {
+    const result = await launcherdRequest("attach", { launchId }) as {
+      launchId: string;
+      container: string;
+      command: string;
+      hint: string;
+    };
+    console.log(result.hint);
+    console.log(`\n  ${result.command}\n`);
+    // Optionally, we could exec the command directly:
+    // const proc = Bun.spawn(["podman", "attach", result.container], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    // return proc.exited;
+    return 0;
+  } catch (e) {
+    console.error(`failed to attach: ${e}`);
+    return 1;
+  }
+}
+
 async function main(): Promise<number> {
   const [first, ...rest] = Bun.argv.slice(2);
 
@@ -516,6 +769,18 @@ async function main(): Promise<number> {
     case "name":
     case "label":
       return setName(rest[0] ?? "", rest.slice(1).join(" "));
+    case "status":
+      return cmdStatus();
+    case "ps":
+      return cmdPs();
+    case "kill":
+      return cmdKill(rest[0] ?? "");
+    case "attach":
+      return cmdAttach(rest[0] ?? "");
+    case "keeper-status":
+      return cmdKeeperStatus();
+    case "keeper-key":
+      return cmdKeeperKey();
     case "-h":
     case "--help":
       console.log(HELP);

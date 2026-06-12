@@ -549,6 +549,14 @@ async function cmdStatus(): Promise<number> {
       const signing = status.signing as { enabled: boolean; keyId?: string };
       console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId?.slice(0, 16)}...)` : "disabled"}`);
     }
+    if (status.policy) {
+      const pol = status.policy as { enabled: boolean; defaultAllow?: string[]; rulesCount?: number };
+      if (pol.enabled) {
+        console.log(`  policy: enabled (${pol.rulesCount} rules, default: [${pol.defaultAllow?.join(", ") ?? "none"}])`);
+      } else {
+        console.log("  policy: disabled (all rooms permitted)");
+      }
+    }
     console.log("  doors:");
     const doors = status.doors as Record<string, { socket: string; reachable: boolean }>;
     for (const [name, info] of Object.entries(doors)) {

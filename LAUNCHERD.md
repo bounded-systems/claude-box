@@ -150,34 +150,51 @@ at all — there is nothing in the box to spawn with.
 
 ## Status
 
-**Implemented** (`launcherd.ts`). The daemon is functional with:
+**Implemented** (`launcherd.ts`). The daemon is fully functional:
 
 - Socket server (NDJSON over unix socket at `$XDG_RUNTIME_DIR/launcherd.sock`)
-- Methods: `status`, `list`, `kill`, `launch`, `rooms`
-- Room presets: `dev`, `readonly`, `offline`, `bootstrap`
+- Methods: `status`, `list`, `kill`, `attach`, `launch`, `rooms`
+- Room presets: `dev`, `dev-spawn`, `readonly`, `offline`, `bootstrap`
 - Door prerequisite checking (fail-fast if keeperd/netd not reachable)
 - L2 launch attestation (Ed25519 signing, `CapabilityProvenance/v0.1` statements)
 - Key management (auto-generate at `~/.claude-box/launcherd.key`)
-- CLI thin-client in `claude-box.ts` (`status`, `ps`, `kill`, `--room`)
+- `--launcher` door preset (spawn sub-boxes without holding podman)
+- PTY attach support (named containers, `podman attach` command)
+- Policy file support (JSON, controls which rooms callers may request)
+- CLI thin-client in `claude-box.ts` (`status`, `ps`, `kill`, `attach`, `--room`)
 
 **Run it:**
 ```sh
 launcherd serve                           # start daemon
 launcherd serve --key /path/to/key        # custom signing key
+launcherd serve --policy /path/to/policy  # load policy file
 launcherd serve --no-sign                 # disable L2 attestation
 
-claude-box status                         # daemon health + door status
+claude-box status                         # daemon health + door/policy status
 claude-box ps                             # list running boxes
+claude-box attach <id>                    # get attach command for a box
+claude-box kill <id>                      # terminate a box
 claude-box work --room dev --repo .       # launch via daemon with room
+claude-box work --launcher --repo .       # grant spawn authority to the box
+```
+
+**Policy file format** (`~/.claude-box/policy.json`):
+```json
+{
+  "defaultAllow": ["dev", "readonly"],
+  "rules": [
+    { "uid": 1000, "allow": ["dev", "dev-spawn"] },
+    { "socket": "/run/launcherd.sock", "allow": ["readonly"] }
+  ]
+}
 ```
 
 **Not yet implemented:**
-- `--launcher` preset (spawn-as-a-door for in-box use)
-- PTY attach (reconnect to running boxes)
-- Policy file (which callers may request which profiles)
+- SO_PEERCRED for caller UID identification
 - Rate limiting / recursion caps
+- Streaming status during launch
 
-The `--launcher` door (in-box spawn) is the next step for self-hosting. This doc
-is the target; the existing implementation covers the host-side daemon. Pairs
-with CAPABILITIES.md (the door model), PRX-DAEMON-HANDOFF.md (the daemon work),
-and the provenance chain in `contract/CHAIN.md`.
+The `--launcher` door enables the self-hosting loop: a box can spawn sub-boxes
+through launcherd without holding podman. This doc is the design target; the
+implementation covers the host-side daemon. Pairs with CAPABILITIES.md (the door
+model), PRX-DAEMON-HANDOFF.md (the daemon work), and `contract/CHAIN.md`.

@@ -61,7 +61,7 @@ function defaultPolicyPath(): string {
 
 type PolicyRule = {
   // Match conditions (all must match)
-  uid?: number;           // Unix UID of the caller
+  uid?: number;           // Unix UID of the caller (requires SO_PEERCRED - not yet implemented)
   socket?: string;        // Socket path the request came from (for in-box callers)
   // Permissions
   allow: string[];        // Rooms/profiles this caller may request
@@ -70,10 +70,19 @@ type PolicyRule = {
 
 type Policy = {
   defaultAllow?: string[];  // Rooms allowed if no rule matches (default: none)
+  maxConcurrent?: number;   // Global max concurrent boxes (default: unlimited)
+  maxDepth?: number;        // Max spawn depth (nested boxes) - default: 3
+  rateLimit?: {             // Rate limiting
+    window: number;         // Time window in seconds
+    max: number;            // Max launches in window
+  };
   rules: PolicyRule[];
 };
 
 let policy: Policy | null = null;
+
+// Rate limiting state
+const launchTimes: number[] = [];  // Timestamps of recent launches
 
 function loadPolicy(path: string): Policy | null {
   try {
@@ -113,6 +122,76 @@ function isRoomAllowed(roomName: string): boolean {
 
   // For now, if there's a policy but no matching rule and no default, deny
   return false;
+}
+
+/** Check rate limit. Returns true if launch is allowed. */
+function checkRateLimit(): { allowed: boolean; reason?: string } {
+  if (!policy?.rateLimit) {
+    return { allowed: true };
+  }
+
+  const now = Date.now();
+  const windowMs = policy.rateLimit.window * 1000;
+  const cutoff = now - windowMs;
+
+  // Remove old timestamps
+  while (launchTimes.length > 0 && launchTimes[0]! < cutoff) {
+    launchTimes.shift();
+  }
+
+  if (launchTimes.length >= policy.rateLimit.max) {
+    const oldest = launchTimes[0]!;
+    const waitSec = Math.ceil((oldest + windowMs - now) / 1000);
+    return {
+      allowed: false,
+      reason: `rate limit exceeded (${policy.rateLimit.max} per ${policy.rateLimit.window}s). Try again in ${waitSec}s`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/** Record a launch for rate limiting. */
+function recordLaunch(): void {
+  launchTimes.push(Date.now());
+}
+
+/** Check concurrent launch limit. Returns true if launch is allowed. */
+function checkConcurrentLimit(): { allowed: boolean; reason?: string } {
+  if (!policy?.maxConcurrent) {
+    return { allowed: true };
+  }
+
+  // Count active launches
+  let active = 0;
+  for (const rec of launches.values()) {
+    if (rec.proc.exitCode === null) {
+      active++;
+    }
+  }
+
+  if (active >= policy.maxConcurrent) {
+    return {
+      allowed: false,
+      reason: `concurrent limit exceeded (max ${policy.maxConcurrent} boxes)`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/** Check spawn depth (for nested boxes). Returns true if allowed. */
+function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: string } {
+  const maxDepth = policy?.maxDepth ?? 3;  // Default max depth
+
+  if (requestedDepth > maxDepth) {
+    return {
+      allowed: false,
+      reason: `spawn depth exceeded (max ${maxDepth} levels)`,
+    };
+  }
+
+  return { allowed: true };
 }
 
 // ── L2 Attestation + Key Management ──────────────────────────────────────────
@@ -283,6 +362,7 @@ type LaunchRecord = {
   startedAt: Date;
   doors: string[];
   repo?: string;
+  depth: number;
   manifest: Manifest;
   attestation?: L2Attestation;
   proc: ReturnType<typeof Bun.spawn>;
@@ -372,15 +452,28 @@ async function handleStatus(_params: Record<string, unknown>): Promise<unknown> 
     };
   }
 
+  // Count active launches
+  let activeLaunches = 0;
+  for (const rec of launches.values()) {
+    if (rec.proc.exitCode === null) activeLaunches++;
+  }
+
   return {
     version: VERSION,
     uptime: Math.floor((Date.now() - startedAt.getTime()) / 1000),
-    launches: launches.size,
+    launches: activeLaunches,
     signing: signingKey
       ? { enabled: true, keyId: signingKey.keyId }
       : { enabled: false },
     policy: policy
-      ? { enabled: true, defaultAllow: policy.defaultAllow ?? [], rulesCount: policy.rules.length }
+      ? {
+          enabled: true,
+          defaultAllow: policy.defaultAllow ?? [],
+          rulesCount: policy.rules.length,
+          maxConcurrent: policy.maxConcurrent ?? null,
+          maxDepth: policy.maxDepth ?? 3,
+          rateLimit: policy.rateLimit ?? null,
+        }
       : { enabled: false },
     doors: doorStatus,
     rooms: Object.fromEntries(
@@ -408,6 +501,7 @@ async function handleList(params: Record<string, unknown>): Promise<unknown> {
       startedAt: rec.startedAt.toISOString(),
       doors: rec.doors,
       repo: rec.repo,
+      depth: rec.depth,
       status: rec.proc.exitCode === null ? "running" : "exited",
     }));
 
@@ -468,11 +562,30 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const roomName = params.room as string | undefined;
   const netOpen = (params.netOpen as boolean) ?? false;
   const claudeArgs = (params.claudeArgs as string[]) ?? [];
+  const depth = (params.depth as number) ?? 0;  // Spawn depth (0 = root, 1 = first child, etc.)
   let doorSpecs = (params.doors as string[]) ?? [];
 
   // Validate account
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
     throw { code: "INVALID_ACCOUNT", message: `invalid account name: ${account}` };
+  }
+
+  // Check rate limit
+  const rateCheck = checkRateLimit();
+  if (!rateCheck.allowed) {
+    throw { code: "RATE_LIMITED", message: rateCheck.reason };
+  }
+
+  // Check concurrent limit
+  const concurrentCheck = checkConcurrentLimit();
+  if (!concurrentCheck.allowed) {
+    throw { code: "CONCURRENT_LIMIT", message: concurrentCheck.reason };
+  }
+
+  // Check depth limit
+  const depthCheck = checkDepthLimit(depth);
+  if (!depthCheck.allowed) {
+    throw { code: "DEPTH_LIMIT", message: depthCheck.reason };
   }
 
   // Expand room to doors
@@ -543,11 +656,15 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     startedAt: new Date(),
     doors: doors.map((d) => d.name),
     repo,
+    depth,
     manifest,
     attestation,
     proc,
   };
   launches.set(launchId, record);
+
+  // Record for rate limiting
+  recordLaunch();
 
   // Clean up when process exits
   proc.exited.then(() => {
@@ -777,13 +894,24 @@ Usage:
   launcherd serve                     start daemon (foreground)
   launcherd serve --socket PATH       custom socket path
   launcherd serve --key PATH          signing key path (Ed25519, auto-generated if absent)
+  launcherd serve --policy PATH       policy file path (JSON, optional)
   launcherd serve --no-sign           disable L2 attestation signing
 
 Options:
   --socket PATH    socket path (default: $XDG_RUNTIME_DIR/launcherd.sock)
   --key PATH       signing key (default: ~/.claude-box/launcherd.key)
+  --policy PATH    policy file (default: ~/.claude-box/policy.json)
   --no-sign        skip key loading, disable attestation
-  -h, --help       show this help`;
+  -h, --help       show this help
+
+Policy file format (JSON):
+  {
+    "defaultAllow": ["dev", "readonly"],  // rooms allowed by default
+    "rules": [
+      { "uid": 1000, "allow": ["dev", "dev-spawn"] },
+      { "socket": "/run/launcherd.sock", "allow": ["readonly"] }
+    ]
+  }`;
 
 async function main(): Promise<number> {
   const args = Bun.argv.slice(2);
@@ -795,7 +923,7 @@ async function main(): Promise<number> {
 
   const cmd = args[0];
   if (cmd !== "serve") {
-    console.error("usage: launcherd serve [--socket PATH] [--key PATH] [--no-sign]");
+    console.error("usage: launcherd serve [--socket PATH] [--key PATH] [--policy PATH] [--no-sign]");
     return 1;
   }
 
@@ -824,6 +952,19 @@ async function main(): Promise<number> {
     console.error("launcherd: signing disabled (--no-sign)");
   }
 
+  // Policy loading
+  let policyPath = defaultPolicyPath();
+  const policyIdx = args.indexOf("--policy");
+  if (policyIdx >= 0 && args[policyIdx + 1]) {
+    policyPath = args[policyIdx + 1]!;
+  }
+  policy = loadPolicy(policyPath);
+  if (policy) {
+    console.error(`launcherd: policy enabled (${policy.rules.length} rules, default: [${policy.defaultAllow?.join(", ") ?? "none"}])`);
+  } else {
+    console.error("launcherd: no policy file (all rooms permitted)");
+  }
+
   await serve(socketPath);
   return 0;
 }
@@ -838,8 +979,14 @@ export {
   loadOrCreateKey,
   setSigningKey,
   buildL2Attestation,
+  loadPolicy,
+  isRoomAllowed,
+  checkRateLimit,
+  checkConcurrentLimit,
+  checkDepthLimit,
+  recordLaunch,
 };
-export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey };
+export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule };
 
 if (import.meta.main) {
   process.exit(await main());

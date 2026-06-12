@@ -25,6 +25,20 @@ test("preset door: --keeper resolves to the canonical keeperd door", () => {
   expect(d.host).toBe("/tmp/keeperd.sock");
 });
 
+test("preset door: --scout resolves to the canonical scoutd read door", () => {
+  const d = resolveDoor("scout", undefined, EMPTY);
+  expect(d.inBox).toBe("/run/scoutd.sock");
+  expect(d.env).toBe("SCOUTD_SOCK");
+  expect(d.host).toBe("/tmp/scoutd.sock");
+});
+
+test("--scout grants the scout read door (content, not credential)", () => {
+  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY);
+  expect(m.doors.map((d) => d.name)).toContain("scout");
+  // a box can read external artifacts AND still have no network (scout ≠ netd)
+  expect(JSON.parse(capabilityJson(m)).network).toBe("none");
+});
+
 test("preset host socket is overridable via env (same launch, any transport)", () => {
   const d = resolveDoor("keeper", undefined, { KEEPERD_SOCK: "/relay/k.sock" });
   expect(d.host).toBe("/relay/k.sock");
@@ -81,7 +95,7 @@ test("manifest is honest about what is denied, not just granted", () => {
 test("a no-grant box still names its denials (knows what it cannot do)", () => {
   const m = buildManifest("personal", planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
-  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "net"]);
+  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "net", "scout"]);
 });
 
 // ── network is a door, with launch effects ──

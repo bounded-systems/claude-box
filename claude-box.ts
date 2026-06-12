@@ -108,6 +108,20 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       use: "Route beads operations through beadsd at /run/beadsd.sock ($BEADSD_SOCK).",
       deny: "No beads access in this box. Do not attempt bd reads/writes; relaunch with --beads if the task needs them.",
     },
+    // The read door (GH-5). Dropping `gh` unbundled its powers: writes → keeper,
+    // raw egress → net, and READS → scout. scoutd holds the read tokens + fetch
+    // policy and returns CONTENT, never a credential or live socket — a box can
+    // read repos/PRs/URLs with no token and even no NIC (--network=none). See
+    // SCOUT.md; the read twin of keeperd (writes).
+    scout: {
+      flag: "--scout",
+      inBox: "/run/scoutd.sock",
+      env: "SCOUTD_SOCK",
+      hostDefault: env.SCOUTD_SOCK ?? defaultHostSock("scoutd", env),
+      grants: "read external artifacts (repos/PRs/URLs) via scoutd (you hold no read tokens)",
+      use: "Read external content through the scout door at /run/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
+      deny: "No external reads in this box — do not assume you can clone, fetch, or browse; there is no token and no read route. Do not claim a fetch succeeded. If the task needs external reads, relaunch with --scout.",
+    },
     // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box runs
     // --network=none and routes HTTPS_PROXY → the relay → this socket, so netd's
     // allowlist is the only way out (see run() + CAPABILITIES.md "Network is a
@@ -170,6 +184,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
   claude-box work --keeper    forward the keeperd door (signed git writes)
   claude-box work --beads     forward the beadsd door (beads reads/writes)
+  claude-box work --scout     forward the scoutd door (external reads: repos/PRs/URLs)
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label`;
@@ -240,8 +255,8 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
- *  / --beads / --door) and the claude passthrough args. `--net` takes an
- *  optional socket path (bare ⇒ the default netd door); `--net-open` is the
+ *  / --beads / --scout / --door) and the claude passthrough args. `--net` takes
+ *  an optional socket path (bare ⇒ the default netd door); `--net-open` is the
  *  unsafe ambient-egress escape (no door). */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
@@ -279,6 +294,10 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--beads") {
       add(resolveDoor("beads", undefined, env));
+      continue;
+    }
+    if (t === "--scout") {
+      add(resolveDoor("scout", undefined, env));
       continue;
     }
     if (t === "--door") {

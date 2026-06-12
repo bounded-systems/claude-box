@@ -70,6 +70,35 @@ unsafe escapes (`--repo-rw` / `--net-open`) are the interim. See ROOM.md.
 5. **launcherd** → wire `--launcher`; self-hosting collapses to one room.
 6. **Provenance L2/L3** (HANDOFF.md) once the doors are real.
 
+## Spike — `wip/launcherd` (reference, do NOT merge)
+
+A box wrote a launcherd daemon directly into a checkout (a live instance of the
+working-tree-isolation gap below); it's preserved on the **`wip/launcherd`**
+branch. **Do not merge the branch** — its base is `d675eec` (pre-#12), so it has
+no scout/room/`--launcher` and a wholesale merge would revert #14/#15. The
+salvage is just `launcherd.ts` (~745 lines) + `tests/launcherd.test.ts`, which
+wire launch + door checks + L2 attestation + rooms — a useful reference. Before
+hardening it into a real daemon, resolve three things:
+
+- **Attenuation is missing (the safety blocker).** It `Bun.spawn`s `podman run`
+  with no parent/subset/ceiling check. That invariant — a child room's authority
+  ⊆ the parent's — is what makes a launch door safe rather than a
+  privilege-escalation hole (LAUNCHERD.md). Must be added.
+- **Location** — LAUNCHERD.md targets `prx`; the spike lives in claude-box (like
+  netd). Decide where launcherd belongs.
+- **L2 overlap** — the spike signs L2 launch attestations, but HANDOFF.md
+  earmarks L2 for keeperd. Decide who owns it.
+
+## Working-tree isolation (launcher gap, unblocked)
+
+`--repo .` bind-mounts the **live host worktree** RW at `/work` (only `.git` is
+`:ro`), so in-box edits mutate your real checkout and parallel boxes collide.
+Two layers fix this: (1) **ephemeral host worktree** — `--repo` does
+`git worktree add` a temp tree at the rev, mounts that, `worktree remove` on exit
+(launcher-only, **not blocked on a daemon**; still shares the one `.git`); and
+(2) **repod overlay** (REPOD.md) — full `.git` isolation, needs the daemon. (1)
+is a real shippable next step here.
+
 ## Dogfooding today
 
 - **Develop** claude-box (edit + test) on the host: `nix run nixpkgs#bun -- test

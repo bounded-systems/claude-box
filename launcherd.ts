@@ -33,6 +33,11 @@ import {
   type CapabilityProvenanceStatement,
   type DigestSet,
 } from "./contract/types";
+import {
+  toSLSA,
+  type SLSAStatement,
+  SLSA_PROVENANCE_V1,
+} from "./contract/slsa";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -61,11 +66,18 @@ function defaultPolicyPath(): string {
 
 type PolicyRule = {
   // Match conditions (all must match)
-  uid?: number;           // Unix UID of the caller (requires SO_PEERCRED - not yet implemented)
-  socket?: string;        // Socket path the request came from (for in-box callers)
+  uid?: number;           // Unix UID of the caller (via peercred SO_PEERCRED injection)
+  token?: string;         // Caller token (for in-box callers without peercred)
   // Permissions
   allow: string[];        // Rooms/profiles this caller may request
   maxConcurrent?: number; // Max concurrent boxes this caller can have
+};
+
+/** Caller info injected by peercred proxy (SO_PEERCRED) */
+type CallerInfo = {
+  uid: number;
+  gid: number;
+  pid: number;
 };
 
 type Policy = {
@@ -103,24 +115,31 @@ function loadPolicy(path: string): Policy | null {
   }
 }
 
-/** Check if a room is allowed for the current caller. Returns true if allowed. */
-function isRoomAllowed(roomName: string): boolean {
+/** Check if a room is allowed for the given caller. Returns true if allowed. */
+function isRoomAllowed(roomName: string, caller?: CallerInfo, token?: string): boolean {
   // No policy = allow all (permissive default for development)
   if (!policy) {
     return true;
   }
 
-  // Check rules in order
-  // For now, we can't identify callers by UID over unix socket in Bun easily,
-  // so we just check the default allow list
-  // TODO: Use SO_PEERCRED to get caller UID
+  // Check rules in order (first matching rule wins)
+  for (const rule of policy.rules) {
+    // Match by UID (from peercred SO_PEERCRED injection)
+    if (rule.uid !== undefined && caller?.uid === rule.uid) {
+      return rule.allow.includes(roomName);
+    }
+    // Match by token (for in-box callers)
+    if (rule.token !== undefined && token === rule.token) {
+      return rule.allow.includes(roomName);
+    }
+  }
 
   // Check default allow
   if (policy.defaultAllow?.includes(roomName)) {
     return true;
   }
 
-  // For now, if there's a policy but no matching rule and no default, deny
+  // No matching rule and no default = deny
   return false;
 }
 
@@ -260,13 +279,13 @@ function signData(data: string): string {
 }
 
 type L2Attestation = {
-  statement: CapabilityProvenanceStatement;
+  statement: SLSAStatement;  // SLSA Provenance v1 format
   statementDigest: string;
   signature: string;
   keyId: string;
 };
 
-/** Build and sign an L2 launch attestation. */
+/** Build and sign an L2 launch attestation (SLSA Provenance v1 format). */
 function buildL2Attestation(
   launchId: string,
   imageDigest: string,
@@ -276,8 +295,8 @@ function buildL2Attestation(
   const manifestDigest = sha256(manifestJson);
   const now = new Date().toISOString();
 
-  // Build the L2 statement per contract/CHAIN.md
-  const stmt = statement(
+  // Build the L2 statement per contract/CHAIN.md (OCAP format first)
+  const ocapStmt = statement(
     // Subject: the launch (identified by launchId, tied to image)
     [{ name: launchId, digest: { sha256: sha256(launchId) } }],
     {
@@ -311,6 +330,9 @@ function buildL2Attestation(
       },
     },
   );
+
+  // Convert to SLSA Provenance v1 format
+  const stmt = toSLSA(ocapStmt);
 
   // Canonicalize and sign
   const stmtJson = JSON.stringify(stmt);
@@ -363,6 +385,7 @@ type LaunchRecord = {
   doors: string[];
   repo?: string;
   depth: number;
+  caller?: CallerInfo;  // SO_PEERCRED info from peercred proxy
   manifest: Manifest;
   attestation?: L2Attestation;
   proc: ReturnType<typeof Bun.spawn>;
@@ -502,6 +525,7 @@ async function handleList(params: Record<string, unknown>): Promise<unknown> {
       doors: rec.doors,
       repo: rec.repo,
       depth: rec.depth,
+      caller: rec.caller,  // SO_PEERCRED info (uid/gid/pid of spawner)
       status: rec.proc.exitCode === null ? "running" : "exited",
     }));
 
@@ -565,6 +589,13 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const depth = (params.depth as number) ?? 0;  // Spawn depth (0 = root, 1 = first child, etc.)
   let doorSpecs = (params.doors as string[]) ?? [];
 
+  // Extract caller info (injected by peercred proxy via SO_PEERCRED)
+  const callerRaw = params._caller as { uid?: number; gid?: number; pid?: number } | undefined;
+  const caller: CallerInfo | undefined = callerRaw?.uid !== undefined
+    ? { uid: callerRaw.uid, gid: callerRaw.gid ?? 0, pid: callerRaw.pid ?? 0 }
+    : undefined;
+  const token = params._token as string | undefined;
+
   // Validate account
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
     throw { code: "INVALID_ACCOUNT", message: `invalid account name: ${account}` };
@@ -594,8 +625,8 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     if (!room) {
       throw { code: "UNKNOWN_ROOM", message: `unknown room: ${roomName}. Available: ${Object.keys(ROOMS).join(", ")}` };
     }
-    // Check policy
-    if (!isRoomAllowed(roomName)) {
+    // Check policy (using caller UID from peercred or token)
+    if (!isRoomAllowed(roomName, caller, token)) {
       throw { code: "POLICY_DENIED", message: `room '${roomName}' not permitted by policy` };
     }
     doorSpecs = [...room.doors, ...doorSpecs];
@@ -657,6 +688,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     doors: doors.map((d) => d.name),
     repo,
     depth,
+    caller,
     manifest,
     attestation,
     proc,
@@ -969,6 +1001,11 @@ async function main(): Promise<number> {
   return 0;
 }
 
+// For testing: set the active policy directly
+function setPolicy(p: Policy | null): void {
+  policy = p;
+}
+
 // Exports for testing
 export {
   ROOMS,
@@ -980,13 +1017,14 @@ export {
   setSigningKey,
   buildL2Attestation,
   loadPolicy,
+  setPolicy,
   isRoomAllowed,
   checkRateLimit,
   checkConcurrentLimit,
   checkDepthLimit,
   recordLaunch,
 };
-export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule };
+export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };
 
 if (import.meta.main) {
   process.exit(await main());

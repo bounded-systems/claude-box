@@ -1,51 +1,55 @@
-# ocap-provenance — the shared provenance contract
+# ocap-provenance — SLSA Provenance v1 with OCAP extensions
 
-**Pinned mirror.** This directory mirrors
-[`github.com/bounded-systems/ocap-provenance`](https://github.com/bounded-systems/ocap-provenance)
-— the canonical home of the `CapabilityProvenance/v0.1` contract. `types.ts` and
-`capability-provenance.v0.1.schema.json` are kept **byte-for-byte identical** to
-upstream so every consumer pins the same bytes; **do not edit them here** —
-change upstream, then re-vendor and bump the pin below. A local copy exists only
-so offline tooling (`bun test`, `nix run .#provenance`) resolves the types
-without a network fetch.
+**Format:** [SLSA Provenance v1](https://slsa.dev/spec/v1.0/provenance) with OCAP
+capability extensions. Uses the standard `https://slsa.dev/provenance/v1` predicate
+type for tooling compatibility, with OCAP-specific fields in `externalParameters`
+and the `ocap_links` extension.
 
-**Pinned at:** `ocap-provenance@95167a4a9c77777fa331b967001ca5b24669acec`. When the
-contract changes, edit upstream first, then re-vendor `types.ts` + the schema here
-and bump this SHA — never edit them here directly.
+## Why SLSA Provenance v1
 
-## Why this is its own thing
-
-claude-box and keeperd must agree, byte-for-byte, on one schema:
-
-- **claude-box** is the *producer* — it builds the box image (L1) and emits the
-  capability manifest at launch (L2).
-- **keeperd** is the *signer / verifier* — it signs the launch attestation (L2)
-  and binds it into every git-write attestation (L3).
-
-If the schema lived in claude-box, keeperd (a key-holding security daemon) would
-depend on a launcher; if it lived in keeperd, claude-box would import the daemon.
-Both are backwards. The contract is a **third thing both pin** — which is also
-the SLSA-idiomatic shape: predicate types are published as standalone, versioned
-specs so verifiers can pin them independently of any producer.
+- **Tooling compatibility:** cosign, sigstore, and SLSA verification tools understand it
+- **Standard envelope:** in-toto Statement v1 (`https://in-toto.io/Statement/v1`)
+- **Extension-friendly:** SLSA allows vendor extensions like `ocap_links`
 
 ## What's novel: capability-aware provenance
 
 Standard provenance answers *"who/what produced this artifact, and how."*
 claude-box adds a dimension: *"what authority did the producing actor hold."*
 The `$CLAUDE_BOX_CAPABILITIES` manifest (the OCAP surface — which doors were
-granted, which were denied) becomes part of the attestation. A verifier can then
-check not just "nix built this image" / "keeper signed this commit," but **"the
-box that asked for this write held exactly these doors and no others."**
+granted, which were denied) lives in `externalParameters.capabilities`. A verifier
+can check not just "nix built this image" / "keeper signed this commit," but
+**"the box that asked for this write held exactly these doors and no others."**
 
-## The predicate
+## buildType URIs
 
-- **predicateType:** `https://github.com/bounded-systems/ocap-provenance/predicate/CapabilityProvenance/v0.1`
-- Wraps the standard in-toto Statement v1 envelope (`subject` + `predicate`).
-- Schema: [`capability-provenance.v0.1.schema.json`](./capability-provenance.v0.1.schema.json)
-- Types: [`types.ts`](./types.ts)
-- The chain (how the three levels link): [`CHAIN.md`](./CHAIN.md)
+Each level in the chain has its own buildType:
 
-## Versioning
+| Level | buildType | Producer |
+|-------|-----------|----------|
+| L1 image | `https://claude.ai/buildTypes/ocap-image/v1` | nix flake |
+| L2 launch | `https://claude.ai/buildTypes/ocap-launch/v1` | launcherd |
+| L3 write | `https://claude.ai/buildTypes/ocap-write/v1` | keeperd |
 
-The predicateType URI carries the version (`/v0.1`). Breaking changes bump it;
-producers and verifiers pin a URI. `v0.x` is pre-stable — fields may change.
+## OCAP extensions
+
+- **`externalParameters.capabilities`** — the OCAP surface: `doors[]`, `denied[]`,
+  `manifestDigest`, `workcell`
+- **`runDetails.ocap_links`** — chain back-references (L2→L1, L3→L2)
+
+## Files
+
+- **[`CHAIN.md`](./CHAIN.md)** — how the three levels link
+- **[`SLSA-MAPPING.md`](./SLSA-MAPPING.md)** — mapping from legacy format
+- **[`slsa.ts`](./slsa.ts)** — SLSA conversion functions (`toSLSA`, `fromSLSA`)
+- **[`types.ts`](./types.ts)** — internal OCAP types (used before conversion)
+- **[`capability-provenance.v0.1.schema.json`](./capability-provenance.v0.1.schema.json)** — legacy schema
+
+## References
+
+- [SLSA Specification v1.0](https://slsa.dev/spec/v1.0/)
+- [SLSA Provenance v1.0](https://slsa.dev/spec/v1.0/provenance)
+- [slsa-framework/slsa](https://github.com/slsa-framework/slsa)
+- [in-toto](https://github.com/in-toto/in-toto) — software supply chain integrity
+- [in-toto Attestation Framework](https://github.com/in-toto/attestation)
+- [in-toto Statement v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)
+- [in-toto.io](https://in-toto.io/)

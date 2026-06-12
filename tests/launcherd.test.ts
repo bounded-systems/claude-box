@@ -285,7 +285,7 @@ describe("L2 attestation", () => {
     // The test already loaded a key above, but buildL2Attestation uses the global
     // For testing, we'll import and set it via a workaround
 
-    test("produces valid in-toto statement", () => {
+    test("produces valid SLSA Provenance v1 statement", () => {
       // Re-load key to set the module-level signingKey
       const launcherd = require("../launcherd");
       // Set the module's signingKey by re-calling loadOrCreateKey
@@ -295,42 +295,47 @@ describe("L2 attestation", () => {
       const attestation = launcherd.buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
 
       expect(attestation.statement._type).toBe(IN_TOTO_STATEMENT_TYPE);
-      expect(attestation.statement.predicateType).toBe(PREDICATE_TYPE);
-      expect(attestation.statement.predicate.level).toBe("launch");
+      expect(attestation.statement.predicateType).toBe("https://slsa.dev/provenance/v1");
+      expect(attestation.statement.predicate.buildDefinition.buildType).toBe(
+        "https://claude.ai/buildTypes/ocap-launch/v1"
+      );
     });
 
-    test("includes correct manifest digest", () => {
+    test("includes correct manifest digest in externalParameters", () => {
       const launcherd = require("../launcherd");
       launcherd.loadOrCreateKey(keyPath);
 
       const attestation = launcherd.buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
       const expectedDigest = sha256(manifestJson);
+      const caps = attestation.statement.predicate.buildDefinition.externalParameters.capabilities as any;
 
-      expect(attestation.statement.predicate.capabilities?.manifestDigest?.sha256).toBe(expectedDigest);
+      expect(caps?.manifestDigest?.sha256).toBe(expectedDigest);
     });
 
-    test("links to image digest", () => {
+    test("links to image digest via ocap_links extension", () => {
       const launcherd = require("../launcherd");
       launcherd.loadOrCreateKey(keyPath);
 
       const attestation = launcherd.buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
+      const links = attestation.statement.predicate.runDetails.ocap_links;
 
-      expect(attestation.statement.predicate.links).toHaveLength(1);
-      expect(attestation.statement.predicate.links![0].level).toBe("image");
-      expect(attestation.statement.predicate.links![0].digest.sha256).toBe(
+      expect(links).toHaveLength(1);
+      expect(links![0].level).toBe("image");
+      expect(links![0].digest.sha256).toBe(
         imageDigest.replace(/^sha256:/, "")
       );
     });
 
-    test("includes doors in capabilities", () => {
+    test("includes doors in externalParameters.capabilities", () => {
       const launcherd = require("../launcherd");
       launcherd.loadOrCreateKey(keyPath);
 
       const attestation = launcherd.buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
+      const caps = attestation.statement.predicate.buildDefinition.externalParameters.capabilities as any;
 
-      expect(attestation.statement.predicate.capabilities?.doors).toBeDefined();
-      expect(attestation.statement.predicate.capabilities?.doors?.length).toBeGreaterThan(0);
-      expect(attestation.statement.predicate.capabilities?.doors?.[0].name).toBe("keeper");
+      expect(caps?.doors).toBeDefined();
+      expect(caps?.doors?.length).toBeGreaterThan(0);
+      expect(caps?.doors?.[0].name).toBe("keeper");
     });
 
     test("signature is base64 encoded", () => {
@@ -385,5 +390,89 @@ describe("L2 attestation", () => {
   // Cleanup
   test.skip("cleanup temp dir", () => {
     rmSync(tempDir, { recursive: true, force: true });
+  });
+});
+
+describe("caller-based policy (SO_PEERCRED)", () => {
+  const { setPolicy, isRoomAllowed } = require("../launcherd");
+  type CallerInfo = import("../launcherd").CallerInfo;
+
+  test("no policy = allow all", () => {
+    setPolicy(null);
+    expect(isRoomAllowed("dev")).toBe(true);
+    expect(isRoomAllowed("readonly")).toBe(true);
+    expect(isRoomAllowed("admin")).toBe(true); // even nonexistent rooms
+  });
+
+  test("defaultAllow permits listed rooms", () => {
+    setPolicy({
+      defaultAllow: ["dev", "readonly"],
+      rules: [],
+    });
+    expect(isRoomAllowed("dev")).toBe(true);
+    expect(isRoomAllowed("readonly")).toBe(true);
+    expect(isRoomAllowed("dev-spawn")).toBe(false); // not in default
+  });
+
+  test("UID rule matches caller.uid", () => {
+    setPolicy({
+      defaultAllow: [],
+      rules: [{ uid: 1000, allow: ["dev", "dev-spawn"] }],
+    });
+
+    const caller: CallerInfo = { uid: 1000, gid: 1000, pid: 12345 };
+
+    expect(isRoomAllowed("dev", caller)).toBe(true);
+    expect(isRoomAllowed("dev-spawn", caller)).toBe(true);
+    expect(isRoomAllowed("readonly", caller)).toBe(false); // not in allow list
+
+    // Different UID = no match
+    const otherCaller: CallerInfo = { uid: 1001, gid: 1001, pid: 99999 };
+    expect(isRoomAllowed("dev", otherCaller)).toBe(false);
+  });
+
+  test("token rule matches _token param", () => {
+    const secretToken = "abc123secret";
+    setPolicy({
+      defaultAllow: [],
+      rules: [{ token: secretToken, allow: ["readonly"] }],
+    });
+
+    // With matching token
+    expect(isRoomAllowed("readonly", undefined, secretToken)).toBe(true);
+    expect(isRoomAllowed("dev", undefined, secretToken)).toBe(false); // not in allow
+
+    // Without token = no match
+    expect(isRoomAllowed("readonly")).toBe(false);
+    expect(isRoomAllowed("readonly", undefined, "wrong-token")).toBe(false);
+  });
+
+  test("first matching rule wins", () => {
+    setPolicy({
+      defaultAllow: ["bootstrap"],
+      rules: [
+        { uid: 1000, allow: ["dev"] },      // UID 1000 can only do dev
+        { uid: 1001, allow: ["readonly"] }, // UID 1001 can only do readonly
+      ],
+    });
+
+    const caller1000: CallerInfo = { uid: 1000, gid: 1000, pid: 1 };
+    const caller1001: CallerInfo = { uid: 1001, gid: 1001, pid: 2 };
+
+    // UID 1000 rule matches first
+    expect(isRoomAllowed("dev", caller1000)).toBe(true);
+    expect(isRoomAllowed("readonly", caller1000)).toBe(false);
+
+    // UID 1001 rule matches
+    expect(isRoomAllowed("readonly", caller1001)).toBe(true);
+    expect(isRoomAllowed("dev", caller1001)).toBe(false);
+
+    // No caller = falls through to defaultAllow
+    expect(isRoomAllowed("bootstrap")).toBe(true);
+  });
+
+  // Reset policy after tests
+  test("cleanup policy", () => {
+    setPolicy(null);
   });
 });

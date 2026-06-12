@@ -189,9 +189,25 @@ claude-box work --launcher --repo .       # grant spawn authority to the box
 }
 ```
 
+**peercred — SO_PEERCRED helper (Rust)**
+
+launcherd can't get peer credentials directly (Bun doesn't expose SO_PEERCRED).
+The `peercred` binary is a tiny Rust proxy that sits in front of launcherd:
+
+```sh
+# peercred wraps the launcherd socket, injecting _caller info
+peercred --frontend /run/launcherd.sock --backend /tmp/launcherd-backend.sock
+```
+
+When a client connects, peercred:
+1. Gets the caller's UID/GID/PID via SO_PEERCRED
+2. Injects `{"_caller":{"uid":1000,"gid":1000,"pid":12345},...}` into the request
+3. Forwards to the real launcherd backend
+4. Returns the response unchanged
+
+This enables policy rules like `{"uid": 1000, "allow": ["dev", "dev-spawn"]}`.
+
 **Not yet implemented:**
-- SO_PEERCRED for caller UID identification
-- Rate limiting / recursion caps
 - Streaming status during launch
 
 The `--launcher` door enables the self-hosting loop: a box can spawn sub-boxes

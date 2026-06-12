@@ -13,13 +13,17 @@ For the agent running **inside claude-box** (or any session scoped to
 - **Caution:** `--repo-rw` reopens the #4 host-RCE (a planted `.git/hooks`
   runs on the host). Don't paste untrusted prompts here; once keeperd serves,
   relaunch with `--repo --keeper`.
-- You have network, so **pull the authoritative specs** rather than trusting
-  this summary:
+- The box is **credential-free** (#5: no `gh`, no token), so it **cannot clone
+  the private `claude-box` repo** — `git clone` fails with *"could not read
+  Username"*. That's the hardening working, not a bug; the real fix is **scoutd**
+  (a read door — itself on the list below). Until then, bring the specs in **from
+  the host** (which has `claude-box`) through the prx mount. On the HOST:
   ```
-  git clone https://github.com/bounded-systems/claude-box /tmp/cb
+  mkdir -p ~/prx/_specs && cp ~/claude-box/{NETD.md,SCOUT.md,REPOD.md} ~/claude-box/netd/netd.ts ~/prx/_specs/
   ```
-  Specs: `/tmp/cb/NETD.md`, `/tmp/cb/netd/squid.conf`, `/tmp/cb/SCOUT.md`,
-  `/tmp/cb/REPOD.md`. Capability model: `/tmp/cb/CAPABILITIES.md`.
+  Then read them in-box at `/work/_specs/`. (Delete `_specs/` or gitignore it.)
+  Authoritative specs: `NETD.md`, `SCOUT.md`, `REPOD.md`; capability model:
+  `CAPABILITIES.md`.
 
 ## The model (already shipped in claude-box — don't rebuild it)
 

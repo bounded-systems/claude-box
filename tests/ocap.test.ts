@@ -110,3 +110,7 @@ test.todo("--repo-rw: .git is writable (escape hatch, warned)");
 test.todo("--keeper: signed writes via the keeperd door, raw push refused");
 // --beads: the beadsd door is reachable; bd writes route through it.
 test.todo("--beads: beads ops via the beadsd door");
+// --scout: the scoutd door is reachable; the box reads external artifacts
+// (repos/PRs/URLs) through it while holding NO read token and NO NIC — scoutd
+// returns CONTENT, never a credential, and nothing write-capable is exposed.
+test.todo("--scout: external reads via the scoutd door, no credential in the box");

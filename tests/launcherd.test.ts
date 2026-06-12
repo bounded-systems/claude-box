@@ -195,28 +195,10 @@ describe("launcherd", () => {
   });
 });
 
-describe("CLI --room parsing", () => {
-  // Import planLaunch to test --room flag parsing
-  const { planLaunch } = require("../claude-box");
-
-  test("--room is captured in launch", () => {
-    const launch = planLaunch(["--room", "dev", "--repo", "."]);
-    expect(launch.room).toBe("dev");
-    expect(launch.repo).toBe(".");
-  });
-
-  test("--room can combine with explicit doors", () => {
-    const launch = planLaunch(["--room", "readonly", "--keeper"]);
-    expect(launch.room).toBe("readonly");
-    // Explicit --keeper adds the door (room expansion happens in launcherd)
-    expect(launch.doors.some((d: { name: string }) => d.name === "keeper")).toBe(true);
-  });
-
-  test("--room without value is captured", () => {
-    const launch = planLaunch(["--room", "bootstrap"]);
-    expect(launch.room).toBe("bootstrap");
-  });
-});
+// NOTE: the CLI `--room` flag is an *in-process* door bundle expanded by
+// claude-box (knownRooms): see tests/door.test.ts. It does not route through
+// launcherd, so its parsing is covered there, not here. The daemon keeps its
+// own internal room presets (ROOMS), exercised by the "rooms" block above.
 
 describe("L2 attestation", () => {
   let tempDir: string;

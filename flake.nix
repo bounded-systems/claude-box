@@ -220,6 +220,17 @@
               in pkgs.writeShellScriptBin "keeperd" ''
                 exec ${pkgs.bun}/bin/bun ${./.}/keeperd.ts "$@"
               '';
+
+            # netd — the allowlist egress daemon behind the `--net` door (NETD.md).
+            # A pinned bun process replacing the squid+socat reference: enforces a
+            # destination allowlist via CONNECT, no TLS MITM, fails closed.
+            #   nix run .#netd -- --port 3128     # host/pod TCP (testable here)
+            #   nix run .#netd                     # listen on $NETD_SOCK door
+            netd =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "netd" ''
+                exec ${pkgs.bun}/bin/bun ${./netd/netd.ts} "$@"
+              '';
           };
         };
 
@@ -232,6 +243,31 @@
         type = "app";
         program = "${self.packages.aarch64-darwin.keeperd}/bin/keeperd";
       };
+
+      apps.aarch64-darwin.netd = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.netd}/bin/netd";
+      };
+
+      # peercred — SO_PEERCRED injector for launcherd (Rust)
+      # Wraps a unix socket to inject caller UID/GID/PID into requests.
+      packages.aarch64-linux.peercred =
+        let pkgs = pkgsFor "aarch64-linux";
+        in pkgs.rustPlatform.buildRustPackage {
+          pname = "peercred";
+          version = "0.1.0";
+          src = ./peercred;
+          cargoLock.lockFile = ./peercred/Cargo.lock;
+        };
+      packages.x86_64-linux.peercred =
+        let pkgs = pkgsFor "x86_64-linux";
+        in pkgs.rustPlatform.buildRustPackage {
+          pname = "peercred";
+          version = "0.1.0";
+          src = ./peercred;
+          cargoLock.lockFile = ./peercred/Cargo.lock;
+        };
+
 
       # Option A builder (prx-9yp), prepared so we can build LATER.
       # Determinate Nix owns /etc/nix/nix.conf and sets nix.enable=false in

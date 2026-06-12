@@ -73,7 +73,13 @@ governed.
 
 ## Status
 
-Design. `scoutd` is an external daemon (lives with keeperd/beadsd/netd in the
-pod, `prx-zj8`); the `--scout` preset is not yet wired in the launcher. This doc
-is the target so the read capability has a home the moment `gh` leaves the image.
-Pairs with NETD.md (egress) and REPOD.md (local repo).
+The `--scout` preset is **wired in the launcher** (`knownDoors()` in
+`claude-box.ts`): `claude-box … --scout` forwards `<scoutd.sock>` →
+`/run/scoutd.sock` and exports `SCOUTD_SOCK`, and the capability surface names it
+granted/denied like the other doors. Its ocap acceptance test
+(`tests/ocap.test.ts`) stays `test.todo` until `scoutd` + the pod land — the same
+posture as `--keeper`/`--net` (door registry exists before the daemon deploys).
+
+`scoutd` itself is an external daemon (lives with keeperd/beadsd/netd in the pod,
+`prx-zj8`) and is **still to build** — follow keeperd's framing (see
+`PRX-DAEMON-HANDOFF.md`). Pairs with NETD.md (egress) and REPOD.md (local repo).

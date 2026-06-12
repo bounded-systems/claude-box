@@ -184,6 +184,10 @@ keyed to exactly the doors present. He never needs ambient authority ("to
 understand Chinese") — he translates only via the card for the symbols he holds,
 and for symbols with no card there is no rule. He cannot "think he can."
 
+> The full **host / VM / room** topology — where the keys sit, where the room
+> sits, and why the host→VM virtiofs gap is the macOS door wall the pod closes —
+> is sketched in [ROOM.md](./ROOM.md).
+
 **Follow-up — enforce, don't just describe (prx tool-gating).** Injecting the
 manifest *tells* the agent its limits; the stronger form is for the in-box
 runtime (**prx**) to read `$CLAUDE_BOX_CAPABILITIES` and **not expose a tool for a
@@ -206,6 +210,11 @@ is the self-contained next step in this flake; L2/L3 land in keeperd.
 - **No ambient secrets** — keys live in keeperd (and 1Password upstream), never
   in a 855 MB image or a plaintext volume.
 - **Auditable** — every write is a keeperd-mediated, signed action.
+
+This is an **applied object-capability system**, not a loose analogy to one;
+where the doors, the credential-free box, and the attenuating launcher sit in the
+OCAP canon (POLA, no ambient authority, attenuation/delegation, Capsicum/seL4 as
+cousins) is mapped in [OCAP.md](./OCAP.md).
 
 Tracking: `prx-mlj` (keeper grant + this surface), `prx-8qj` (the builder
 actor), the workcell-sandbox-projection. `--repo`, `--keeper`, `--beads`, and the

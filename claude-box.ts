@@ -108,6 +108,20 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       use: "Route beads operations through beadsd at /run/beadsd.sock ($BEADSD_SOCK).",
       deny: "No beads access in this box. Do not attempt bd reads/writes; relaunch with --beads if the task needs them.",
     },
+    // The read door (GH-5). Dropping `gh` unbundled its powers: writes → keeper,
+    // raw egress → net, and READS → scout. scoutd holds the read tokens + fetch
+    // policy and returns CONTENT, never a credential or live socket — a box can
+    // read repos/PRs/URLs with no token and even no NIC (--network=none). See
+    // SCOUT.md; the read twin of keeperd (writes).
+    scout: {
+      flag: "--scout",
+      inBox: "/run/scoutd.sock",
+      env: "SCOUTD_SOCK",
+      hostDefault: env.SCOUTD_SOCK ?? defaultHostSock("scoutd", env),
+      grants: "read external artifacts (repos/PRs/URLs) via scoutd (you hold no read tokens)",
+      use: "Read external content through the scout door at /run/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
+      deny: "No external reads in this box — do not assume you can clone, fetch, or browse; there is no token and no read route. Do not claim a fetch succeeded. If the task needs external reads, relaunch with --scout.",
+    },
     // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box runs
     // --network=none and routes HTTPS_PROXY → the relay → this socket, so netd's
     // allowlist is the only way out (see run() + CAPABILITIES.md "Network is a
@@ -134,6 +148,25 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
       use: "Spawn sub-boxes by requesting through launcherd at /run/launcherd.sock ($LAUNCHERD_SOCK). You hold NO podman, NO runtime — request a spawn with a capability profile and launcherd performs it. Send JSON requests: {op:'spawn', profile:'work', doors:['keeper','net']}. The sub-box inherits doors you specify (if policy permits).",
       deny: "No spawn authority in this box. Do not attempt to launch containers or claim spawns succeeded — there is nothing in the box to spawn with. If the task needs sub-boxes, it must be RELAUNCHED with --launcher.",
     },
+  };
+}
+
+// ── Rooms: named bundles of doors ────────────────────────────────────────────
+// A *room* is the layer above the door registry the way a preset is the layer
+// above the door primitive: a named set of doors for a KIND of work, so a launch
+// reads as "the dev room" instead of a remembered pile of flags. The manifest
+// still falls out of the granted doors, so a room cannot drift from what it
+// grants. Doors only — `--repo <path>` stays explicit (it needs a path), and
+// flags after `--room` compose (add/override) over the bundle. See ROOM.md.
+type RoomPreset = { doors: string[]; about: string };
+
+function knownRooms(): Record<string, RoomPreset> {
+  return {
+    // Read-only research: reads via scout, no write key, no NIC of its own.
+    read: { doors: ["scout"], about: "external reads only (scout) — no writes, no egress NIC" },
+    // The development room (e.g. claude-box working on claude-box): read + write
+    // + policed egress. Pair with `--repo <path>` to mount a worktree.
+    dev: { doors: ["keeper", "net", "scout"], about: "keeper + net + scout — edit, commit (via keeper), read & policed egress" },
   };
 }
 
@@ -183,9 +216,10 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
   claude-box work --keeper    forward the keeperd door (signed git writes)
   claude-box work --beads     forward the beadsd door (beads reads/writes)
+  claude-box work --scout     forward the scoutd door (external reads: repos/PRs/URLs)
   claude-box work --launcher  forward the launcherd door (spawn sub-boxes)
+  claude-box work --room NAME  forward a named door bundle (read | dev) — see ROOM.md
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
-  claude-box work --room NAME expand a room preset (dev, readonly, offline, bootstrap)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label
   claude-box status           show launcherd status (requires daemon)
@@ -258,12 +292,13 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 
 // ── Launch planning + the capability manifest ────────────────────────────────
 
-type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[]; room?: string };
+type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
- *  / --beads / --door) and the claude passthrough args. `--net` takes an
- *  optional socket path (bare ⇒ the default netd door); `--net-open` is the
- *  unsafe ambient-egress escape (no door). */
+ *  / --beads / --scout / --room / --door) and the claude passthrough args.
+ *  `--net` takes an optional socket path (bare ⇒ the default netd door);
+ *  `--net-open` is the unsafe ambient-egress escape (no door); `--room` expands a
+ *  named door bundle that later flags compose over. */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
   let repoRw = false;
@@ -303,8 +338,23 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(resolveDoor("beads", undefined, env));
       continue;
     }
+    if (t === "--scout") {
+      add(resolveDoor("scout", undefined, env));
+      continue;
+    }
     if (t === "--launcher") {
       add(resolveDoor("launcher", undefined, env));
+      continue;
+    }
+    if (t === "--room") {
+      const name = tail[++i] ?? "";
+      const room = knownRooms()[name];
+      if (!room) {
+        throw new Error(`unknown room "${name}" (known: ${Object.keys(knownRooms()).join(", ")})`);
+      }
+      // Expand to the bundle's doors; later flags compose over them (the Map
+      // dedupes by name, so `--room dev --door dolt=…` just adds dolt).
+      for (const d of room.doors) add(resolveDoor(d, undefined, env));
       continue;
     }
     if (t === "--door") {
@@ -315,13 +365,9 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(resolveDoor(name, host, env));
       continue;
     }
-    if (t === "--room") {
-      room = tail[++i];
-      continue;
-    }
     claudeArgs.push(t);
   }
-  return { repo, repoRw, doors: [...doors.values()], netOpen, claudeArgs, room };
+  return { repo, repoRw, doors: [...doors.values()], netOpen, claudeArgs };
 }
 
 type Manifest = {
@@ -531,15 +577,6 @@ async function launcherdRequest(method: string, params: Record<string, unknown> 
   });
 }
 
-async function isLauncherdRunning(): Promise<boolean> {
-  try {
-    await launcherdRequest("status");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // ── Keeperd client ────────────────────────────────────────────────────────────
 
 function keeperdSocketPath(): string {
@@ -722,31 +759,6 @@ async function cmdAttach(launchId: string): Promise<number> {
   }
 }
 
-async function launchViaDaemon(account: string, launch: Launch): Promise<number> {
-  const params: Record<string, unknown> = {
-    account,
-    repo: launch.repo ? resolve(launch.repo) : undefined,
-    repoRw: launch.repoRw,
-    doors: launch.doors.map((d) => d.name),
-    room: launch.room,
-    netOpen: launch.netOpen,
-    claudeArgs: launch.claudeArgs,
-  };
-
-  try {
-    const result = await launcherdRequest("launch", params) as {
-      launchId: string;
-      pid: number;
-      manifest: { doors: string[]; denied: string[] };
-    };
-    console.error(`claude-box: launched ${result.launchId} (pid ${result.pid})`);
-    return 0;
-  } catch (e) {
-    console.error(`launch failed: ${e}`);
-    return 1;
-  }
-}
-
 async function main(): Promise<number> {
   const [first, ...rest] = Bun.argv.slice(2);
 
@@ -783,23 +795,12 @@ async function main(): Promise<number> {
   const tail = named ? rest : first !== undefined ? [first, ...rest] : [];
 
   const launch = planLaunch(tail);
-
-  // If launch uses a room or launcherd is running, try daemon mode
-  if (launch.room) {
-    if (await isLauncherdRunning()) {
-      return launchViaDaemon(account, launch);
-    }
-    console.error(`claude-box: --room requires launcherd (not running). Start with: launcherd serve`);
-    return 1;
-  }
-
-  // Direct mode fallback
   return run(account, launch);
 }
 
 // Importable by tests (planLaunch / resolveDoor / buildManifest / capability*),
 // runnable as a script.
-export { knownDoors, resolveDoor, planLaunch, buildManifest, capabilityJson, capabilityPrompt };
+export { knownDoors, knownRooms, resolveDoor, planLaunch, buildManifest, capabilityJson, capabilityPrompt };
 export type { DoorGrant, Manifest, Launch };
 
 if (import.meta.main) {

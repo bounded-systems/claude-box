@@ -27,6 +27,38 @@ The CLI remains for human use; launcherd is the policed service behind it. In
 the consolidated pod (`prx-zj8`) the CLI becomes a thin client that talks to
 launcherd rather than invoking podman directly.
 
+## Why launch is the most dangerous door — and the invariant that tames it
+
+podman is effectively root on the VM, so a naïve "launch" door is a
+**privilege-escalation** door: a box with launch could spawn a box with
+`--keeper` it was never granted, or a `--repo-rw` / `--net-open` escape, or a
+mount of an arbitrary host path — laundering authority it doesn't hold through a
+child. launcherd's defining invariant rules that out:
+
+> **Attenuation — a child box's authority is a subset of the parent's.**
+> launcherd never grants a door (or an escape, or a mount) the requesting box
+> doesn't already hold. Launch can only *narrow*, never widen.
+
+This is the OCAP delegation rule: you may pass on a capability you hold
+(attenuated), but you cannot mint one you lack. With attenuation, launch is safe
+to delegate — the worst a box can do is spawn a **weaker copy of itself**.
+Without it, launch is a master key. Concretely launcherd enforces:
+
+- **door attenuation** — child doors ⊆ parent doors; the parent's
+  `$CLAUDE_BOX_CAPABILITIES` is the ceiling. No `--keeper` for a child unless the
+  parent held keeper.
+- **no escape minting** — `--repo-rw` / `--net-open` only if the parent held
+  them; otherwise refused.
+- **pinned images only** — launches from a content-addressed allowlist (same
+  provenance posture as the box image), never an arbitrary image ref.
+- **the cap floor on every child** — `--cap-drop all`,
+  `--security-opt no-new-privileges`, `--pids-limit`, `--network=none` by default
+  — copied to children, non-negotiable.
+- **depth + resource limits** — a max nesting depth and per-caller caps, so
+  launch can't fork-bomb boxes.
+- **audit** — every launch logged `ts, caller, image, doors, ALLOW|DENY`.
+
+
 ## The grant
 
 A door, same model as the others — `--launcher` (preset) forwards the launcherd
@@ -42,6 +74,12 @@ claude-box work --launcher --repo .
 In the capability manifest it reads like the others: granted ⇒ "spawn sub-boxes
 via launcherd (you hold no runtime)"; denied ⇒ "no spawn authority — do not
 attempt to launch containers; relaunch with --launcher."
+
+> **Note on `--room`.** `--room NAME` is an **in-process** door bundle expanded
+> by `claude-box` itself (see [ROOM.md](./ROOM.md)) — it does *not* route through
+> launcherd. The daemon keeps its own internal room presets for the profiles it
+> can spawn; those are independent of the CLI `--room` flag.
+
 
 ## The wire protocol — reuse keeperd's framing
 
@@ -113,7 +151,7 @@ callers:
 Policy lives in a file launcherd reads at startup (not baked into the image),
 so it's auditable and changeable without rebuilding.
 
-## The self-hosting loop — one room
+## The self-hosting loop — one box
 
 With launcherd, the bootstrap becomes:
 
@@ -122,46 +160,30 @@ With launcherd, the bootstrap becomes:
 3. Worker does the task; commits go through keeperd (it holds no keys).
 4. Worker exits; root box (or launcherd) collects the result.
 
-Each spawn is a **request** launcherd audits and enforces. The root box never
-holds podman; it holds only the launcherd *door*. And launcherd can cap
-recursion, rate-limit spawns, or refuse profiles — all without the box knowing
-or caring.
-
-This is the "one room" for policed self-hosting: the box, the doors (keeperd /
-netd / scoutd / repod / launcherd), and the policy that binds them — all running
-in one pod, each a pinned OCI image, each a socket away.
-
-## Transport — same door model
-
-A unix-socket door (`-v <launcherd.sock>:/run/launcherd.sock`), interchangeable
-with the other transports in CAPABILITIES.md. End-state: launcherd is a pinned
-OCI image in the pod (`prx-zj8`), and the box joins the pod so the door is a
-direct local mount.
-
-## Launcher shape (design)
-
-```
-claude-box work --launcher --repo .   # + launcher door — can spawn sub-boxes
-claude-box work --repo .              # no launcher door — cannot spawn
-```
-
-`--launcher` adds the launcherd door. A box without it cannot spawn containers
-at all — there is nothing in the box to spawn with.
+Each spawn is a **request** launcherd audits and enforces — and **attenuation**
+makes the delegation edge sound: the worker's authority is provably ⊆ the root's.
+The root box never holds podman; it holds only the launcherd *door*. And
+launcherd can cap recursion, rate-limit spawns, or refuse profiles — all without
+the box knowing or caring. This also closes the **provenance** loop: a launch is
+the natural place to record "box X (manifest M) launched box Y (manifest N)" —
+the delegation edge in the capability-provenance chain
+([CAPABILITIES.md](./CAPABILITIES.md), [contract/CHAIN.md](./contract/CHAIN.md)).
 
 ## Status
 
 **Implemented** (`launcherd.ts`). The daemon is fully functional:
 
-- Socket server (NDJSON over unix socket at `$XDG_RUNTIME_DIR/launcherd.sock`)
+- Socket server (NDJSON over unix socket or TCP for VM relay)
 - Methods: `status`, `list`, `kill`, `attach`, `launch`, `rooms`
-- Room presets: `dev`, `dev-spawn`, `readonly`, `offline`, `bootstrap`
+- Daemon-internal room presets: `dev`, `dev-spawn`, `readonly`, `offline`,
+  `bootstrap`
 - Door prerequisite checking (fail-fast if keeperd/netd not reachable)
 - L2 launch attestation (Ed25519 signing, `CapabilityProvenance/v0.1` statements)
 - Key management (auto-generate at `~/.claude-box/launcherd.key`)
 - `--launcher` door preset (spawn sub-boxes without holding podman)
 - PTY attach support (named containers, `podman attach` command)
 - Policy file support (JSON, controls which rooms callers may request)
-- CLI thin-client in `claude-box.ts` (`status`, `ps`, `kill`, `attach`, `--room`)
+- CLI thin-client in `claude-box.ts` (`status`, `ps`, `kill`, `attach`)
 
 **Run it:**
 ```sh
@@ -174,7 +196,6 @@ claude-box status                         # daemon health + door/policy status
 claude-box ps                             # list running boxes
 claude-box attach <id>                    # get attach command for a box
 claude-box kill <id>                      # terminate a box
-claude-box work --room dev --repo .       # launch via daemon with room
 claude-box work --launcher --repo .       # grant spawn authority to the box
 ```
 
@@ -210,7 +231,5 @@ This enables policy rules like `{"uid": 1000, "allow": ["dev", "dev-spawn"]}`.
 **Not yet implemented:**
 - Streaming status during launch
 
-The `--launcher` door enables the self-hosting loop: a box can spawn sub-boxes
-through launcherd without holding podman. This doc is the design target; the
-implementation covers the host-side daemon. Pairs with CAPABILITIES.md (the door
-model), PRX-DAEMON-HANDOFF.md (the daemon work), and `contract/CHAIN.md`.
+Pairs with CAPABILITIES.md (the door model), ROOM.md (the topology + why),
+PRX-DAEMON-HANDOFF.md (the daemon work), and `contract/CHAIN.md`.

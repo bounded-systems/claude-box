@@ -1,0 +1,34 @@
+# netd.container — allowlist egress proxy (the --net door)
+#
+# Boxes route HTTPS_PROXY through /run/doors/netd.sock.
+# netd enforces the destination allowlist; boxes have no direct egress.
+#
+# Install:
+#   systemctl --user enable --now netd
+#
+# Logs:
+#   journalctl --user -u netd -f
+
+[Unit]
+Description=netd — allowlist egress proxy for claude-box
+After=claude-doors-volume.service
+
+[Container]
+Image=localhost/netd:dev
+ContainerName=netd
+
+# Socket volume (shared with boxes)
+Volume=claude-doors.volume:/run/doors:U
+
+# netd DOES need network (it's the egress door)
+# Network=slirp4netns  # or bridge, depending on setup
+
+# Security hardening
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

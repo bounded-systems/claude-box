@@ -1,0 +1,14 @@
+# claude-doors.volume — shared socket volume for door daemons
+#
+# All doors write their sockets here; boxes mount it read-only.
+# The volume is the rendezvous point — doors don't need to know about each other.
+#
+# Install: cp *.volume *.container ~/.config/containers/systemd/
+#          systemctl --user daemon-reload
+
+[Volume]
+# No special options needed - just a named volume
+# Podman creates it on first use
+
+[Install]
+WantedBy=default.target

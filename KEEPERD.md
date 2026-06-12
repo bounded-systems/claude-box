@@ -157,10 +157,77 @@ The box never sees these keys — it only has the socket.
 
 ## Status
 
-**Not yet implemented.** This doc is the design target.
+**Implemented.** keeperd is working with two deployment modes:
 
-## Future: claude-room
+### Mode 1: Host-side TCP relay (current macOS workaround)
 
-All doors (keeperd, launcherd, netd, scoutd, repod) become pinned OCI images in
-a shared pod. The box joins the pod; each door is a local socket mount. One room,
-many doors, all auditable.
+```bash
+# Terminal 1 - start keeperd on host
+./run-keeperd.sh up
+# OR: nix run .#keeperd -- serve --port 9999
+
+# Terminal 2 - launch box with TCP relay
+claude-box work --repo . --net-open
+# Inside box:
+export KEEPERD_HOST=host.containers.internal:9999
+bun run lib/keeper.ts commit /work "message"
+```
+
+Path translation (`/work` → host path) handled by `CLAUDE_BOX_HOST_REPO`.
+
+### Mode 2: VM-native container (target architecture)
+
+```bash
+# Build and load keeperd image
+nix build .#keeperd-image && podman load -i result
+
+# Using compose (recommended)
+REPO=/path/to/repo podman-compose up -d keeperd
+REPO=/path/to/repo podman-compose run --rm box
+
+# Or manually
+./run-keeperd-container.sh up
+podman run -it --rm \
+  -v claude-doors:/run/doors:ro \
+  -v /path/to/repo:/work \
+  -e KEEPERD_SOCK=/run/doors/keeperd.sock \
+  localhost/claude-personal:dev
+```
+
+No path translation needed — both containers see `/work` directly.
+
+## Architecture
+
+```
+# Host-side (macOS workaround)
+Host (macOS)
+├── ~/repo (worktree)
+├── keeperd --port 9999 (TCP)
+└── podman VM
+    └── box container
+        ├── KEEPERD_HOST=host.containers.internal:9999
+        └── /work → host repo mount
+
+# VM-native (target)
+podman VM
+├── keeperd container
+│   ├── /run/doors/keeperd.sock (listening)
+│   ├── /keys (signing key volume)
+│   └── /work (repo volume)
+└── box container
+    ├── /run/doors/keeperd.sock (mounted)
+    └── /work (same repo volume)
+```
+
+## Future: Stateless boxes
+
+The endgame removes repo mounts entirely:
+
+```
+box (stateless)
+├── scout door → read files on demand
+├── keeper door → submit diffs/commits
+└── /work (tmpfs scratch only)
+```
+
+No mounts, no repos, no files — just doors.

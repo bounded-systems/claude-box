@@ -1,0 +1,9 @@
+# claude-keys.volume — persistent signing keys for keeperd
+#
+# Ed25519 key generated on first run, persists across restarts.
+# Only keeperd mounts this volume.
+
+[Volume]
+
+[Install]
+WantedBy=default.target

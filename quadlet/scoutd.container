@@ -1,0 +1,39 @@
+# scoutd.container — external read daemon (the --scout door)
+#
+# Boxes request repo/PR/URL content through /run/doors/scoutd.sock.
+# scoutd holds read tokens; boxes hold nothing and have no network.
+#
+# STATUS: Not yet implemented - this is the target unit file.
+#
+# Install:
+#   systemctl --user enable --now scoutd
+#
+# Logs:
+#   journalctl --user -u scoutd -f
+
+[Unit]
+Description=scoutd — external read daemon for claude-box
+After=claude-doors-volume.service
+
+[Container]
+Image=localhost/scoutd:dev
+ContainerName=scoutd
+
+# Socket volume (shared with boxes)
+Volume=claude-doors.volume:/run/doors:U
+
+# Token/credential volume (scoutd-only)
+# Volume=claude-scout-creds.volume:/creds:ro
+
+# scoutd needs network (it fetches external content)
+# Network=slirp4netns
+
+# Security hardening
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

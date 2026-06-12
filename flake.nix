@@ -169,6 +169,90 @@
 
           default = self.packages.${system}.claude-image;
 
+          # keeperd-image — the git-signing daemon as a container.
+          # Runs alongside the box container in the VM, sharing:
+          #   - /run/doors/ volume (where keeperd writes its socket)
+          #   - /work volume (the repo both containers access)
+          #   - /keys volume (persistent Ed25519 signing key, keeperd-only)
+          # No path translation needed — both see /work directly.
+          #   nix build .#keeperd-image && podman load -i result
+          #   podman run -v doors:/run/doors -v keys:/keys -v repo:/work keeperd
+          keeperd-image =
+            let
+              # Minimal toolchain for keeperd: bun + git + ssh
+              keeperdTools = with pkgs; [
+                bun
+                git
+                openssh
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              keeperdEnv = pkgs.buildEnv {
+                name = "keeperd-image-root";
+                paths = keeperdTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # Bundle the keeperd source (keeperd.ts + contract/ + lib/)
+              keeperdSrc = pkgs.runCommand "keeperd-src" {} ''
+                mkdir -p $out/app
+                cp ${./keeperd.ts} $out/app/keeperd.ts
+                cp -r ${./contract} $out/app/contract
+                mkdir -p $out/app/lib
+                cp ${./lib/keeper.ts} $out/app/lib/keeper.ts
+              '';
+
+              keeperdEntrypoint = pkgs.writeShellScript "keeperd-entrypoint" ''
+                exec bun /app/keeperd.ts serve \
+                  --socket /run/doors/keeperd.sock \
+                  --key /keys/keeper.key \
+                  "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "keeperd";
+              tag = "dev";
+
+              contents = [ keeperdEnv keeperdSrc ];
+
+              extraCommands = ''
+                mkdir -p etc tmp run/doors keys work
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                keeper:x:${toString uid}:${toString uid}:keeper:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                keeper:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                chown -R ${toString uid}:${toString uid} run/doors keys work
+              '';
+
+              config = {
+                Entrypoint = [ "${keeperdEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "keeper";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "GIT_SSL_CAINFO=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                  "/keys" = {};
+                  "/work" = {};
+                };
+              };
+            };
+
           # peercred — SO_PEERCRED injector for launcherd (Rust)
           # Wraps a unix socket to inject caller UID/GID/PID into requests.
           peercred = pkgs.rustPlatform.buildRustPackage {
@@ -183,6 +267,7 @@
           # Linux builder (prx-9yp) instead of erroring "attribute not found".
           aarch64-darwin = {
             claude-image = self.packages.aarch64-linux.claude-image;
+            keeperd-image = self.packages.aarch64-linux.keeperd-image;
             default = self.packages.aarch64-linux.claude-image;
 
             # The host launcher: a typed Bun CLI, nix-built, run via PINNED bun.

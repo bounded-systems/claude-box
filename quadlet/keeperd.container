@@ -1,0 +1,46 @@
+# keeperd.container — git-signing daemon (the --keeper door)
+#
+# Boxes request signed commits/pushes through /run/doors/keeperd.sock.
+# keeperd holds the signing key; boxes hold nothing.
+#
+# Install:
+#   cp *.volume *.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now keeperd
+#
+# Logs:
+#   journalctl --user -u keeperd -f
+
+[Unit]
+Description=keeperd — git-signing daemon for claude-box
+After=claude-doors-volume.service claude-keys-volume.service
+
+[Container]
+Image=localhost/keeperd:dev
+ContainerName=keeperd
+
+# Socket volume (shared with boxes)
+Volume=claude-doors.volume:/run/doors:U
+
+# Key volume (keeperd-only, persistent)
+Volume=claude-keys.volume:/keys:U
+
+# Repo volume - uncomment and set for your setup
+# Volume=/path/to/repos:/repos:U
+
+# Or mount a specific repo
+# Volume=%h/code/myproject:/work:U
+
+# No network needed - communication via socket only
+Network=none
+
+# Security hardening
+SecurityLabelDisable=true
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

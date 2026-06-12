@@ -496,6 +496,9 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
     // uid so host-owned files line up (writable + no git "dubious ownership"),
     // WITHOUT chowning the repo.
     argv.push("-v", `${abs}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
+    // Tell the box what the host path is, so keeperd requests can translate
+    // /work → the actual host path (keeperd runs on the host, not in the box).
+    argv.push("--env", `CLAUDE_BOX_HOST_REPO=${abs}`);
     // A worktree's git dir lives in a bare repo OUTSIDE the worktree; mount that
     // common dir at its host path so `git` resolves inside the box.
     const common = await gitCommonDir(abs);

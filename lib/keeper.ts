@@ -196,6 +196,34 @@ async function request<T>(method: string, params: Record<string, unknown> = {}):
   });
 }
 
+// ── Path translation ──────────────────────────────────────────────────────────
+// The box sees the repo at /work, but keeperd runs on the host where the repo
+// is at a different path (e.g., /Users/bobby/claude-box). CLAUDE_BOX_HOST_REPO
+// tells us the host path so we can translate /work → the actual host path.
+
+/**
+ * Translate a repo path from in-box (/work) to host path.
+ * If CLAUDE_BOX_HOST_REPO is set and repo starts with /work, translate it.
+ */
+export function translateRepoPath(repo: string): string {
+  const hostRepo = process.env.CLAUDE_BOX_HOST_REPO;
+  if (!hostRepo) return repo;
+
+  // Translate /work or /work/... to the host path
+  if (repo === "/work" || repo === "/work/") {
+    return hostRepo;
+  }
+  if (repo.startsWith("/work/")) {
+    return hostRepo + repo.slice(5); // replace /work with hostRepo
+  }
+  // Also handle "." when cwd is /work
+  if (repo === "." && process.cwd() === "/work") {
+    return hostRepo;
+  }
+
+  return repo;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -205,7 +233,7 @@ async function request<T>(method: string, params: Record<string, unknown> = {}):
  */
 export async function commit(options: CommitOptions): Promise<CommitResult> {
   return request<CommitResult>("commit", {
-    repo: options.repo,
+    repo: translateRepoPath(options.repo),
     message: options.message,
     author: options.author,
     files: options.files,
@@ -221,7 +249,7 @@ export async function commit(options: CommitOptions): Promise<CommitResult> {
  */
 export async function push(options: PushOptions): Promise<PushResult> {
   return request<PushResult>("push", {
-    repo: options.repo,
+    repo: translateRepoPath(options.repo),
     remote: options.remote ?? "origin",
     branch: options.branch,
     force: options.force ?? false,

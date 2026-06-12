@@ -322,3 +322,60 @@ describe("gitExec", () => {
     expect(result.code).not.toBe(0);
   });
 });
+
+describe("path translation (lib/keeper.ts)", () => {
+  // Import using dynamic import since lib/keeper.ts has async exports
+  let translateRepoPath: (repo: string) => string;
+
+  beforeAll(async () => {
+    const keeper = await import("../lib/keeper");
+    translateRepoPath = keeper.translateRepoPath;
+  });
+
+  test("returns repo unchanged when CLAUDE_BOX_HOST_REPO is not set", () => {
+    const original = process.env.CLAUDE_BOX_HOST_REPO;
+    delete process.env.CLAUDE_BOX_HOST_REPO;
+    try {
+      expect(translateRepoPath("/work")).toBe("/work");
+      expect(translateRepoPath("/some/other/path")).toBe("/some/other/path");
+    } finally {
+      if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
+    }
+  });
+
+  test("translates /work to host path", () => {
+    const original = process.env.CLAUDE_BOX_HOST_REPO;
+    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    try {
+      expect(translateRepoPath("/work")).toBe("/Users/bobby/claude-box");
+      expect(translateRepoPath("/work/")).toBe("/Users/bobby/claude-box");
+    } finally {
+      if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
+      else delete process.env.CLAUDE_BOX_HOST_REPO;
+    }
+  });
+
+  test("translates /work/subdir to host path/subdir", () => {
+    const original = process.env.CLAUDE_BOX_HOST_REPO;
+    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    try {
+      expect(translateRepoPath("/work/src")).toBe("/Users/bobby/claude-box/src");
+      expect(translateRepoPath("/work/deep/nested/path")).toBe("/Users/bobby/claude-box/deep/nested/path");
+    } finally {
+      if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
+      else delete process.env.CLAUDE_BOX_HOST_REPO;
+    }
+  });
+
+  test("does not translate other paths", () => {
+    const original = process.env.CLAUDE_BOX_HOST_REPO;
+    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    try {
+      expect(translateRepoPath("/tmp/repo")).toBe("/tmp/repo");
+      expect(translateRepoPath("/workspace")).toBe("/workspace"); // not /work
+    } finally {
+      if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
+      else delete process.env.CLAUDE_BOX_HOST_REPO;
+    }
+  });
+});

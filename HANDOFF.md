@@ -44,9 +44,10 @@ capabilities empty); L2 = launch (keeper signs, binds `$CLAUDE_BOX_CAPABILITIES`
 
 ## Done — Task A / A+ / B (for the record)
 
-- **Task A — pin `contract/` as a mirror of `ocap-provenance`.** Done; shipped
-  as **PR #8**. `contract/README.md` is the pinned-mirror note; `types.ts` + the
-  schema are kept byte-identical to upstream.
+- **Task A — pin `contract/` as a mirror of `ocap-provenance`.** Done. Reframe
+  shipped as **PR #8**; the pin is now **locked** to
+  `ocap-provenance@95167a4a9c77777fa331b967001ca5b24669acec` in
+  `contract/README.md`. `types.ts` + the schema are byte-identical to upstream.
 - **Task A+ — CI drift-guard.** Optional `flake = false` input + `nix flake
   check` that diffs the vendored copy against the pinned upstream. Kept here as a
   reference sketch in case it's wanted later (needs a networked machine to

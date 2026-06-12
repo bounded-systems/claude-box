@@ -8,10 +8,17 @@ pod); wire it into the pinned-image pod (`prx-zj8`) for real use.
 
 ## What's here
 
-- [`squid.conf`](./squid.conf) — allowlist-only, no TLS MITM, fail-closed, with
-  an audit `access_log`. Default profile allows **anthropic only**; workload
-  profiles (npm / clone / pypi) are commented and opt-in, **fetch hosts only**
-  (GH-6: never `api.github.com`/gists/pastebins by default).
+- [`netd.ts`](./netd.ts) — **the daemon** (recommended): a pinned `bun` process
+  that enforces the destination allowlist via `CONNECT`, no TLS MITM, fails
+  closed, audits every decision. Replaces the squid + socat + brew chain with one
+  process. Run it `nix run .#netd` (door socket) or `nix run .#netd -- --port
+  3128` (host/pod TCP). **Verified host-side** (allow tunnels, deny → refused);
+  default allowlist `api.anthropic.com,.anthropic.com`, override with
+  `NETD_ALLOW`.
+- [`squid.conf`](./squid.conf) — the **alternative** reference (squid +
+  [`run-netd.sh`](./run-netd.sh)). Same policy; heavier (a container + a socat
+  bridge). On macOS its container tends to exit and the port hop is fragile —
+  `netd.ts` avoids both by running as a plain host/pod process.
 
 ## Run it (reference)
 

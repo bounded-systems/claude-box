@@ -168,6 +168,15 @@
           };
 
           default = self.packages.${system}.claude-image;
+
+          # peercred — SO_PEERCRED injector for launcherd (Rust)
+          # Wraps a unix socket to inject caller UID/GID/PID into requests.
+          peercred = pkgs.rustPlatform.buildRustPackage {
+            pname = "peercred";
+            version = "0.1.0";
+            src = ./peercred;
+            cargoLock.lockFile = ./peercred/Cargo.lock;
+          };
         }) // {
           # Expose the (linux) image under the darwin host too, so a plain
           # `nix build .#claude-image` on this Mac resolves and offloads to the
@@ -204,10 +213,12 @@
             # requests signed writes through the /run/keeperd.sock door.
             #   nix run .#keeperd                  # listen on $KEEPERD_SOCK or default
             #   nix run .#keeperd -- --help        # show usage
+            # Note: runs from the source tree (not just keeperd.ts) because the
+            # daemon imports ./contract/types and ./contract/slsa.
             keeperd =
               let pkgs = pkgsFor "aarch64-darwin";
               in pkgs.writeShellScriptBin "keeperd" ''
-                exec ${pkgs.bun}/bin/bun ${./keeperd.ts} "$@"
+                exec ${pkgs.bun}/bin/bun ${./.}/keeperd.ts "$@"
               '';
           };
         };
@@ -221,25 +232,6 @@
         type = "app";
         program = "${self.packages.aarch64-darwin.keeperd}/bin/keeperd";
       };
-
-      # peercred — SO_PEERCRED injector for launcherd (Rust)
-      # Wraps a unix socket to inject caller UID/GID/PID into requests.
-      packages.aarch64-linux.peercred =
-        let pkgs = pkgsFor "aarch64-linux";
-        in pkgs.rustPlatform.buildRustPackage {
-          pname = "peercred";
-          version = "0.1.0";
-          src = ./peercred;
-          cargoLock.lockFile = ./peercred/Cargo.lock;
-        };
-      packages.x86_64-linux.peercred =
-        let pkgs = pkgsFor "x86_64-linux";
-        in pkgs.rustPlatform.buildRustPackage {
-          pname = "peercred";
-          version = "0.1.0";
-          src = ./peercred;
-          cargoLock.lockFile = ./peercred/Cargo.lock;
-        };
 
       # Option A builder (prx-9yp), prepared so we can build LATER.
       # Determinate Nix owns /etc/nix/nix.conf and sets nix.enable=false in

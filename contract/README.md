@@ -53,3 +53,4 @@ Each level in the chain has its own buildType:
 - [in-toto Attestation Framework](https://github.com/in-toto/attestation)
 - [in-toto Statement v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)
 - [in-toto.io](https://in-toto.io/)
+- [in-toto/friends](https://github.com/in-toto/friends) — ecosystem integrations

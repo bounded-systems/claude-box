@@ -191,7 +191,9 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box status           show launcherd status (requires daemon)
   claude-box ps               list running boxes (requires daemon)
   claude-box kill <id>        terminate a running box (requires daemon)
-  claude-box attach <id>      reconnect to a running box (requires daemon)`;
+  claude-box attach <id>      reconnect to a running box (requires daemon)
+  claude-box keeper-status    show keeperd status (requires daemon)
+  claude-box keeper-key       show keeperd signing public key (requires daemon)`;
 
 type Meta = Record<string, { desc?: string }>;
 
@@ -538,6 +540,81 @@ async function isLauncherdRunning(): Promise<boolean> {
   }
 }
 
+// ── Keeperd client ────────────────────────────────────────────────────────────
+
+function keeperdSocketPath(): string {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime) return `${runtime}/keeperd.sock`;
+  const home = process.env.HOME ?? "/tmp";
+  return `${home}/.claude-box/keeperd.sock`;
+}
+
+async function keeperdRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  const socketPath = keeperdSocketPath();
+  const id = crypto.randomUUID();
+
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    Bun.connect({
+      unix: socketPath,
+      socket: {
+        open(sock) {
+          sock.write(JSON.stringify({ id, method, params }) + "\n");
+        },
+        data(_sock, data) {
+          buffer += data.toString();
+          const newline = buffer.indexOf("\n");
+          if (newline >= 0) {
+            const line = buffer.slice(0, newline);
+            try {
+              const resp = JSON.parse(line) as { id: string; ok: boolean; result?: unknown; error?: { message: string } };
+              if (resp.ok) {
+                resolve(resp.result);
+              } else {
+                reject(new Error(resp.error?.message ?? "keeperd error"));
+              }
+            } catch {
+              reject(new Error("invalid response from keeperd"));
+            }
+          }
+        },
+        error(_sock, err) {
+          reject(err);
+        },
+        close() {},
+      },
+    }).catch(reject);
+  });
+}
+
+async function cmdKeeperStatus(): Promise<number> {
+  try {
+    const status = await keeperdRequest("status") as Record<string, unknown>;
+    console.log("keeperd status:");
+    console.log(`  version: ${status.version}`);
+    console.log(`  uptime: ${status.uptime}s`);
+    if (status.signing) {
+      const signing = status.signing as { enabled: boolean; keyId?: string };
+      console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId})` : "disabled"}`);
+    }
+    return 0;
+  } catch (e) {
+    console.error(`keeperd not running: ${e}`);
+    return 1;
+  }
+}
+
+async function cmdKeeperKey(): Promise<number> {
+  try {
+    const result = await keeperdRequest("getPublicKey") as { publicKey: string; keyId: string };
+    console.log(result.publicKey);
+    return 0;
+  } catch (e) {
+    console.error(`keeperd not running: ${e}`);
+    return 1;
+  }
+}
+
 async function cmdStatus(): Promise<number> {
   try {
     const status = await launcherdRequest("status") as Record<string, unknown>;
@@ -689,6 +766,10 @@ async function main(): Promise<number> {
       return cmdKill(rest[0] ?? "");
     case "attach":
       return cmdAttach(rest[0] ?? "");
+    case "keeper-status":
+      return cmdKeeperStatus();
+    case "keeper-key":
+      return cmdKeeperKey();
     case "-h":
     case "--help":
       console.log(HELP);

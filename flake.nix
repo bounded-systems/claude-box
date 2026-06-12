@@ -249,26 +249,6 @@
         program = "${self.packages.aarch64-darwin.netd}/bin/netd";
       };
 
-      # peercred — SO_PEERCRED injector for launcherd (Rust)
-      # Wraps a unix socket to inject caller UID/GID/PID into requests.
-      packages.aarch64-linux.peercred =
-        let pkgs = pkgsFor "aarch64-linux";
-        in pkgs.rustPlatform.buildRustPackage {
-          pname = "peercred";
-          version = "0.1.0";
-          src = ./peercred;
-          cargoLock.lockFile = ./peercred/Cargo.lock;
-        };
-      packages.x86_64-linux.peercred =
-        let pkgs = pkgsFor "x86_64-linux";
-        in pkgs.rustPlatform.buildRustPackage {
-          pname = "peercred";
-          version = "0.1.0";
-          src = ./peercred;
-          cargoLock.lockFile = ./peercred/Cargo.lock;
-        };
-
-
       # Option A builder (prx-9yp), prepared so we can build LATER.
       # Determinate Nix owns /etc/nix/nix.conf and sets nix.enable=false in
       # nix-darwin, so the turnkey `nix.linux-builder` module is unavailable

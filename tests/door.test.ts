@@ -9,6 +9,7 @@
 import { test, expect } from "bun:test";
 import {
   resolveDoor,
+  knownRooms,
   planLaunch,
   buildManifest,
   capabilityJson,
@@ -69,6 +70,35 @@ test("planLaunch separates doors/repo from claude args", () => {
   expect(l.claudeArgs).toEqual(["--resume"]);
   expect(l.doors.map((d) => d.name).sort()).toEqual(["dolt", "keeper"]);
   expect(l.doors.find((d) => d.name === "dolt")!.host).toBe("/var/run/dolt.sock");
+});
+
+// ── rooms: named door bundles, the layer above presets ──
+test("--room dev expands to its door bundle (keeper + net + scout)", () => {
+  const l = planLaunch(["--room", "dev"], EMPTY);
+  expect(l.doors.map((d) => d.name).sort()).toEqual(["keeper", "net", "scout"]);
+});
+
+test("--room read is reads-only: scout door, still no network", () => {
+  const m = buildManifest("work", planLaunch(["--room", "read"], EMPTY), EMPTY);
+  expect(m.doors.map((d) => d.name)).toEqual(["scout"]);
+  expect(JSON.parse(capabilityJson(m)).network).toBe("none"); // scout ≠ a NIC
+});
+
+test("flags compose over a room (add a door, dedup the overlap)", () => {
+  const l = planLaunch(["--room", "read", "--keeper", "--scout", "--resume"], EMPTY);
+  expect(l.doors.map((d) => d.name).sort()).toEqual(["keeper", "scout"]); // scout not doubled
+  expect(l.claudeArgs).toEqual(["--resume"]);
+});
+
+test("every room references only known doors (no drift from the registry)", () => {
+  const doorNames = new Set(["keeper", "beads", "scout", "net"]);
+  for (const room of Object.values(knownRooms())) {
+    for (const d of room.doors) expect(doorNames.has(d)).toBe(true);
+  }
+});
+
+test("an unknown room is refused (fail closed, not a silent empty launch)", () => {
+  expect(() => planLaunch(["--room", "nope"], EMPTY)).toThrow(/unknown room/);
 });
 
 // ── --repo is safe-by-default: .git read-only (writes via keeper); --repo-rw escapes ──

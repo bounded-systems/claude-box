@@ -103,15 +103,18 @@ nix run .#claude-box -- work --repo-rw . --net-open   # no doors ⇒ no socket
 
 — exactly what the bootstrap box uses until the pod lands.
 
-## The room as a first-class idea (forward-looking)
+## The room as a first-class idea
 
-The topology suggests two moves the launcher doesn't make yet:
+The topology suggests two moves above the door registry:
 
-1. **room = a named bundle of doors.** A launch is a pile of flags
-   (`--repo . --keeper --net --scout`). A *room* would be the layer above the
-   door registry the way `--keeper` is a preset over the door primitive:
-   `claude-box room dev` → the door-set + repo posture for a *kind* of work. The
-   rulebook still falls out of `knownDoors()`, so it can't drift. Cheap, additive.
+1. **room = a named bundle of doors** — *implemented* (`knownRooms()`, `--room`).
+   A launch was a pile of flags (`--keeper --net --scout`); a *room* is the layer
+   above the door registry the way `--keeper` is a preset over the door primitive:
+   `claude-box work --room dev` expands to a named door-set for a *kind* of work
+   (`dev` = keeper + net + scout; `read` = scout only). Doors only — `--repo
+   <path>` stays explicit (it needs a path) — and flags after `--room` compose
+   over the bundle (the door Map dedupes by name). The manifest still falls out of
+   the granted doors, so a room can't drift from what it grants.
 
 2. **launch itself as a door (`launcherd`) — collapses the host/box split.**
    "Edit code in the room, but run `podman` on the host" is a split forced by one
@@ -123,11 +126,30 @@ The topology suggests two moves the launcher doesn't make yet:
    host/box tier split. The same OCAP move that put writes behind keeperd and
    egress behind netd, applied to launch itself.
 
+## `guest-rooms` — the name for the model, when it's extracted
+
+"Guest room" is the right name for the *abstraction*, not necessarily this repo.
+The layering already separates a runtime-agnostic core from a Claude-specific
+product:
+
+| Layer | Generic primitive | Named preset |
+|---|---|---|
+| capability | the **door** | `--keeper` / `--net` / `--scout` |
+| launch | the **room** (`--room`) | `dev` / `read` |
+| **product** | **`guest-rooms`** (the workcell framework) | **`claude-box`** (its first consumer) |
+
+So `bounded-systems/guest-rooms` is the eventual home for the generic room+door
+runtime (no mention of Claude); `claude-box` becomes one launcher built on it,
+the way `--keeper` is one preset over the door primitive. **No rename now** — the
+existing `claude-box` command / nix package / prx image build / provenance chain
+reference it; the model graduates to `guest-rooms` *if* the core is extracted.
+Concept now, extraction later.
+
 ## Status
 
-This doc is the **mental model**. The work that makes the middle boundary the
-home of the doors is the **pod (`prx-zj8`)** — the highest-leverage next step,
-because it's what makes every door (starting with `--net`) reachable on macOS.
-The first-class `room` profile and the `launcherd` door are **design sketches**,
-recorded here so the topology has a home. Pairs with CAPABILITIES.md (the model)
-and NETD.md / SCOUT.md / REPOD.md (the individual doors).
+This doc is the **mental model**. The `room` profile (move 1) is **implemented**;
+the work that makes the middle boundary the home of the doors is the **pod
+(`prx-zj8`)** — the highest-leverage next step, because it's what makes every door
+(starting with `--net`) reachable on macOS. The `launcherd` door (move 2) is a
+**design sketch**, recorded so the topology has a home. Pairs with
+CAPABILITIES.md (the model) and NETD.md / SCOUT.md / REPOD.md (the doors).

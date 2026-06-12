@@ -138,6 +138,25 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
   };
 }
 
+// ── Rooms: named bundles of doors ────────────────────────────────────────────
+// A *room* is the layer above the door registry the way a preset is the layer
+// above the door primitive: a named set of doors for a KIND of work, so a launch
+// reads as "the dev room" instead of a remembered pile of flags. The manifest
+// still falls out of the granted doors, so a room cannot drift from what it
+// grants. Doors only — `--repo <path>` stays explicit (it needs a path), and
+// flags after `--room` compose (add/override) over the bundle. See ROOM.md.
+type RoomPreset = { doors: string[]; about: string };
+
+function knownRooms(): Record<string, RoomPreset> {
+  return {
+    // Read-only research: reads via scout, no write key, no NIC of its own.
+    read: { doors: ["scout"], about: "external reads only (scout) — no writes, no egress NIC" },
+    // The development room (e.g. claude-box working on claude-box): read + write
+    // + policed egress. Pair with `--repo <path>` to mount a worktree.
+    dev: { doors: ["keeper", "net", "scout"], about: "keeper + net + scout — edit, commit (via keeper), read & policed egress" },
+  };
+}
+
 /** A door actually granted to this launch (preset or generic). */
 type DoorGrant = {
   name: string;
@@ -185,6 +204,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --keeper    forward the keeperd door (signed git writes)
   claude-box work --beads     forward the beadsd door (beads reads/writes)
   claude-box work --scout     forward the scoutd door (external reads: repos/PRs/URLs)
+  claude-box work --room NAME  forward a named door bundle (read | dev) — see ROOM.md
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label`;
@@ -255,9 +275,10 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
- *  / --beads / --scout / --door) and the claude passthrough args. `--net` takes
- *  an optional socket path (bare ⇒ the default netd door); `--net-open` is the
- *  unsafe ambient-egress escape (no door). */
+ *  / --beads / --scout / --room / --door) and the claude passthrough args.
+ *  `--net` takes an optional socket path (bare ⇒ the default netd door);
+ *  `--net-open` is the unsafe ambient-egress escape (no door); `--room` expands a
+ *  named door bundle that later flags compose over. */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
   let repoRw = false;
@@ -298,6 +319,17 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--scout") {
       add(resolveDoor("scout", undefined, env));
+      continue;
+    }
+    if (t === "--room") {
+      const name = tail[++i] ?? "";
+      const room = knownRooms()[name];
+      if (!room) {
+        throw new Error(`unknown room "${name}" (known: ${Object.keys(knownRooms()).join(", ")})`);
+      }
+      // Expand to the bundle's doors; later flags compose over them (the Map
+      // dedupes by name, so `--room dev --door dolt=…` just adds dolt).
+      for (const d of room.doors) add(resolveDoor(d, undefined, env));
       continue;
     }
     if (t === "--door") {
@@ -502,7 +534,7 @@ async function main(): Promise<number> {
 
 // Importable by tests (planLaunch / resolveDoor / buildManifest / capability*),
 // runnable as a script.
-export { knownDoors, resolveDoor, planLaunch, buildManifest, capabilityJson, capabilityPrompt };
+export { knownDoors, knownRooms, resolveDoor, planLaunch, buildManifest, capabilityJson, capabilityPrompt };
 export type { DoorGrant, Manifest, Launch };
 
 if (import.meta.main) {

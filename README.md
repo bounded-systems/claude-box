@@ -24,7 +24,8 @@ A container bounds what the box can *write*, not what it can *reach* — so
 **egress is a grant**: the box runs `--network=none` by default and reaches the
 network only through the **netd** door (`--net`), which enforces an allowlist
 (`--net-open` is an explicit, unsafe full-egress escape). See
-[CAPABILITIES.md](./CAPABILITIES.md).
+[CAPABILITIES.md](./CAPABILITIES.md) — and [OCAP.md](./OCAP.md) for where this
+applied object-capability design sits in the established canon.
 
 ## Install (home-manager)
 

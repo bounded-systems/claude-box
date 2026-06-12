@@ -29,10 +29,12 @@ up() {
   command -v socat  >/dev/null || die "socat not found (brew install socat)"
   [ -f "$CONF" ] || die "missing $CONF"
 
-  # Precheck: netd can only forward what the HOST can reach. If the host itself
-  # can't get out, --net (and --net-open) will look like 'poor connection'.
-  curl -fsS -o /dev/null --max-time 8 https://api.anthropic.com \
-    || die "the HOST cannot reach api.anthropic.com — fix host/VM egress first (this is why the box sees 'poor internet')"
+  # Precheck: netd can only forward what the HOST can reach. ANY HTTP status
+  # (even 404 — api.anthropic.com/ has no homepage) proves egress works; only a
+  # connection/DNS/TLS failure (curl code 000) means the host truly can't get out.
+  if [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 https://api.anthropic.com 2>/dev/null || echo 000)" = "000" ]; then
+    die "the HOST cannot reach api.anthropic.com (no response at all) — fix host/VM egress first (this is why the box sees 'poor internet')"
+  fi
 
   mkdir -p "$(dirname "$SOCK")"; chmod 700 "$(dirname "$SOCK")"
 
@@ -43,9 +45,9 @@ up() {
     "$SQUID_IMAGE" >/dev/null
   echo "netd: squid up on 127.0.0.1:${PROXY_PORT}"
 
-  # Wait for squid to accept proxied requests.
+  # Wait for squid to accept proxied requests (any status back = tunnel works).
   for _ in $(seq 1 30); do
-    curl -fsS -o /dev/null --max-time 3 -x "http://127.0.0.1:${PROXY_PORT}" https://api.anthropic.com && break
+    [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -x "http://127.0.0.1:${PROXY_PORT}" https://api.anthropic.com 2>/dev/null || echo 000)" != "000" ] && break
     sleep 1
   done
 
@@ -61,8 +63,8 @@ up() {
 test_() {
   local px="http://127.0.0.1:${PROXY_PORT}"
   printf 'allowed (api.anthropic.com): '
-  curl -s -o /dev/null -w '%{http_code}\n' --max-time 8 -x "$px" https://api.anthropic.com \
-    || echo "unreachable (BAD — should connect)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -x "$px" https://api.anthropic.com || true)
+  { [ -n "$code" ] && [ "$code" != "000" ]; } && echo "reachable ✓ ($code)" || echo "unreachable ✗ (BAD — should connect)"
   printf 'denied  (example.com):       '
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -x "$px" https://example.com || true)
   if [ "$code" = "403" ] || [ -z "$code" ] || [ "$code" = "000" ]; then

@@ -35,19 +35,26 @@ The `--net` door already has its **launch effects wired** in claude-box:
 relays `127.0.0.1:3128 → /run/netd.sock` via socat (`flake.nix`). So netd only
 has to **serve an HTTP proxy on the unix socket** — the box plumbing is done.
 
-## Task 1 — netd (#6)  ·  spec: `NETD.md` + `netd/squid.conf`
+## Task 1 — netd (#6)  ·  ✅ DONE (daemon) — `netd/netd.ts`, `nix run .#netd`
 
-An HTTP forward-proxy on a unix socket (`/run/netd.sock`):
-- **allowlist-by-destination**, **no TLS MITM** (CONNECT-tunnel to allowlisted
-  hosts; do not decrypt), **fail-closed**, **audit log** of every allow/deny.
-- **Default allowlist = fetch hosts only:** `api.anthropic.com`, `.anthropic.com`;
-  a `js`/clone profile may add `codeload.github.com`,
-  `objects.githubusercontent.com`, `registry.npmjs.org` — **never**
-  `api.github.com` / gists / pastebins by default (issue #6: no writable sinks).
-- Reference impl in the repo: Squid allowlist-only + `socat
-  UNIX-LISTEN:/run/netd.sock,fork → TCP:127.0.0.1:<squid>`.
-- **Acceptance:** with a box's `--net` door pointed at netd, `api.anthropic.com`
-  is reachable; `curl https://evil.com` is refused; no other route off the box.
+Implemented as a **pinned bun process**: allowlist-by-destination via `CONNECT`,
+**no TLS MITM**, **fail-closed**, **audit log**. Default allowlist
+`api.anthropic.com,.anthropic.com` (override with `NETD_ALLOW`). **Verified
+host-side** — allow → tunnels to a real `404`, deny (`example.com`) → refused.
+It replaces the squid+socat reference (`netd/squid.conf` + `run-netd.sh`), which
+kept dying on macOS (squid container exits, fragile published-port hop).
+
+**Remaining (pod-side):**
+- Package `netd.ts` as a **pinned OCI image** in the pod (`prx-zj8`) — it runs
+  from source today; the pod wants a content-addressed image like the box.
+- **The `--net` door itself only works once netd + the box share the pod.** On
+  macOS a host unix socket can't be bind-mounted into the box's VM (`statfs:
+  operation not supported`), so `--net` is unusable solo — `--net-open` is the
+  interim. The pod makes `/run/netd.sock` a shared local mount; that's the door's
+  real fix, and the concrete reason the pod isn't optional.
+- Un-`todo` the two `--net` cases in `tests/ocap.test.ts` once the pod runs netd.
+- Optional: add the `js`/clone allowlist profiles (fetch hosts only: never
+  `api.github.com`/gists/pastebins — #6).
 
 ## Task 2 — scoutd (#5)  ·  spec: `SCOUT.md`
 
@@ -89,10 +96,13 @@ For every new daemon, a small change back in `bounded-systems/claude-box`:
 
 ## Suggested order
 
-netd (#6, smallest + plumbing already wired) → un-todo `--net` tests → scoutd
-(#5) → repod (#4-proper) → the pod (`prx-zj8`). Then revisit the provenance
-chain (L2 binds `$CLAUDE_BOX_CAPABILITIES`) in `ocap-provenance` once the doors
-are real — see `/tmp/cb/contract/CHAIN.md`.
+netd is **done** (the daemon). Next: **the pod (`prx-zj8`)** — it's the highest
+leverage, because it's what makes the `--net` door actually work (co-locate netd
++ box) *and* the template for scoutd/repod. So: pod (package netd as a pinned
+image, run box + netd in it) → un-todo `--net` tests → scoutd (#5) → repod
+(#4-proper). Then revisit the provenance chain (L2 binds
+`$CLAUDE_BOX_CAPABILITIES`) in `ocap-provenance` once the doors are real — see
+`/tmp/cb/contract/CHAIN.md`.
 
 ## State pointers
 

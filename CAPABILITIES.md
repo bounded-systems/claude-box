@@ -211,6 +211,11 @@ is the self-contained next step in this flake; L2/L3 land in keeperd.
   in a 855 MB image or a plaintext volume.
 - **Auditable** — every write is a keeperd-mediated, signed action.
 
+This is an **applied object-capability system**, not a loose analogy to one;
+where the doors, the credential-free box, and the attenuating launcher sit in the
+OCAP canon (POLA, no ambient authority, attenuation/delegation, Capsicum/seL4 as
+cousins) is mapped in [OCAP.md](./OCAP.md).
+
 Tracking: `prx-mlj` (keeper grant + this surface), `prx-8qj` (the builder
 actor), the workcell-sandbox-projection. `--repo`, `--keeper`, `--beads`, and the
 generic `--door` are **implemented** in the launcher over one door registry (each

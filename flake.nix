@@ -197,12 +197,28 @@
               in pkgs.writeShellScriptBin "provenance" ''
                 exec ${pkgs.bun}/bin/bun ${./provenance.ts} "$@"
               '';
+
+            # netd — the allowlist egress daemon behind the `--net` door (NETD.md).
+            # A pinned bun process replacing the squid+socat reference: enforces a
+            # destination allowlist via CONNECT, no TLS MITM, fails closed.
+            #   nix run .#netd -- --port 3128     # host/pod TCP (testable here)
+            #   nix run .#netd                     # listen on $NETD_SOCK door
+            netd =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "netd" ''
+                exec ${pkgs.bun}/bin/bun ${./netd/netd.ts} "$@"
+              '';
           };
         };
 
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
+      };
+
+      apps.aarch64-darwin.netd = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.netd}/bin/netd";
       };
 
       # Option A builder (prx-9yp), prepared so we can build LATER.

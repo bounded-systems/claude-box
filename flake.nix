@@ -61,12 +61,16 @@
           toolchain = with pkgs; [
             prx                # the box's sanctioned tool (pinned v0.10.0)
             claude-code        # the star — pinned by the locked nixpkgs rev
-            git
-            gh                 # GitHub CLI
+            git                # local VCS ops (read/diff/status); pushes go via keeperd
+            # NB: `gh` is deliberately ABSENT (GH-5). It was a latent direct-push
+            # credential path — `gh auth login` + a token bypasses keeperd. With it
+            # gone, the box has no tool that can establish push rights; writes go
+            # only through the keeper door, and external READS go through the scout
+            # door (see SCOUT.md), not an ambient CLI holding creds + network.
             ripgrep
             fd
             bun                # agent/runtime (also what prx is built with)
-            openssh            # git-over-ssh, gh auth
+            openssh            # git-over-ssh transport (no keys shipped; agent not forwarded)
             socat              # netd-door relay (loopback proxy → /run/netd.sock)
             cacert             # TLS roots
             coreutils

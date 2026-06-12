@@ -99,8 +99,12 @@ test.todo("--net: egress only via the netd door (allowlist enforced, arbitrary h
 // --net: the netd door is the ONLY egress; the allowlist permits api.anthropic.com
 // but a curl to an off-allowlist host is refused (netd policy, no other route).
 test.todo("--net: egress only via the netd door, off-allowlist host refused");
-// --repo: the mounted worktree is RW; nothing else on the host is writable.
-test.todo("--repo: only the mounted worktree is writable");
+// --repo (default): worktree files are writable, but .git is READ-ONLY — the box
+// can't plant a hook / rewrite config that would run on the host (the host-RCE
+// escape is closed). Writing /work/.git/* must fail; editing /work/<file> works.
+test.todo("--repo: .git is read-only (no host-RCE), worktree files writable");
+// --repo-rw: the unsafe escape — .git is writable again (today's behaviour).
+test.todo("--repo-rw: .git is writable (escape hatch, warned)");
 // --keeper: the keeperd door is reachable; a RAW git push fails (no creds in
 // the box); a keeperd-mediated signed write succeeds.
 test.todo("--keeper: signed writes via the keeperd door, raw push refused");

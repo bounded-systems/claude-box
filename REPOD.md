@@ -70,14 +70,20 @@ writes. Read and write are now two flags, two doors, two grants.
 
 ## Status
 
-Design. Today `--repo` is still the raw RW bind-mount (the hole this doc
-describes). Migration:
+Migration in progress:
 
-1. **interim, now:** drop the `${common}:${common}` RW mount; mount the worktree
-   `:ro`; route commits through keeperd. Closes the escape; degrades in-box git
-   (documented).
-2. **repod, next:** stand up repod (read projection) + the in-box overlay so the
-   working tree is usable again and Scout/other consumers share one door.
+1. **interim — DONE (GH-4):** `--repo` keeps the worktree **writable** (the agent
+   edits code) but mounts **`.git` read-only** — the bare/common dir `:ro` for a
+   worktree, or `.git` overlaid `:ro` for a normal repo. The box can no longer
+   write `.git/config`/hooks, so the host-RCE escape is closed; history writes go
+   through the keeper door. `--repo-rw` is the explicit, warned escape that keeps
+   `.git` writable for the no-keeper case. (Launcher only; `ocap.test.ts`
+   `--repo`/`--repo-rw` cases are `test.todo` pending a podman host. Read-only
+   `.git` degrades in-box git ergonomics — see step 2.)
+2. **repod — next:** stand up repod (read projection) + the in-box **overlay** so
+   the working tree is fully usable again (git index/refs writable in an
+   ephemeral layer, never the host store) and Scout/other consumers share one
+   read door.
 
-Pairs with NETD.md (egress door) and the keeperd/beadsd doors — the repo is the
-last raw-fs grant to become a capability.
+Pairs with NETD.md (egress), SCOUT.md (external reads), and the keeperd/beadsd
+doors — the repo is the last raw-fs grant to become a capability.

@@ -164,7 +164,8 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box                  personal account
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
-  claude-box work --repo .    mount the current worktree at /work (work on a repo)
+  claude-box work --repo .    mount the worktree at /work (.git read-only; commits via --keeper)
+  claude-box work --repo-rw . UNSAFE: worktree AND host .git writable (no-keeper escape)
   claude-box work --net       forward the netd door — policed egress (default: no network)
   claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
   claude-box work --keeper    forward the keeperd door (signed git writes)
@@ -236,7 +237,7 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 
 // ── Launch planning + the capability manifest ────────────────────────────────
 
-type Launch = { repo?: string; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
+type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
  *  / --beads / --door) and the claude passthrough args. `--net` takes an
@@ -244,6 +245,7 @@ type Launch = { repo?: string; doors: DoorGrant[]; netOpen: boolean; claudeArgs:
  *  unsafe ambient-egress escape (no door). */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
+  let repoRw = false;
   let netOpen = false;
   const doors = new Map<string, DoorGrant>();
   const claudeArgs: string[] = [];
@@ -252,6 +254,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     const t = tail[i]!;
     if (t === "--repo") {
       repo = tail[++i];
+      continue;
+    }
+    if (t === "--repo-rw") {
+      // The unsafe escape: the host .git is WRITABLE in the box (today's
+      // behaviour). For when there's no keeperd and you must commit in-box.
+      repo = tail[++i];
+      repoRw = true;
       continue;
     }
     if (t === "--net-open") {
@@ -282,12 +291,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     claudeArgs.push(t);
   }
-  return { repo, doors: [...doors.values()], netOpen, claudeArgs };
+  return { repo, repoRw, doors: [...doors.values()], netOpen, claudeArgs };
 }
 
 type Manifest = {
   account: string;
   repo?: string;
+  repoRw: boolean;
   doors: DoorGrant[];
   netOpen: boolean;
   denied: { name: string; flag: string; deny: string }[];
@@ -302,7 +312,7 @@ function buildManifest(account: string, launch: Launch, env: Env = process.env):
   const denied = Object.entries(knownDoors(env))
     .filter(([name]) => !granted.has(name) && !(name === "net" && launch.netOpen))
     .map(([name, p]) => ({ name, flag: p.flag, deny: p.deny }));
-  return { account, repo: launch.repo, doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, repo: launch.repo, repoRw: launch.repoRw, doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -318,6 +328,9 @@ function capabilityJson(m: Manifest): string {
     granted: {
       config: true,
       repo: m.repo ?? null,
+      // Honest about the .git posture: read-only (writes via keeper) unless the
+      // unsafe --repo-rw escape was used.
+      repoGit: m.repo ? (m.repoRw ? "rw" : "ro") : null,
       doors: m.doors.map((d) => ({ name: d.name, socket: d.inBox, env: d.env, grants: d.grants })),
     },
     denied: m.denied.map((d) => ({ name: d.name, flag: d.flag })),
@@ -335,7 +348,11 @@ function capabilityPrompt(m: Manifest): string {
     "- config: your own account's auth/history (a private volume).",
   ];
   if (m.repo) {
-    lines.push(`- repo: ${m.repo} mounted read-write at /work. Only this worktree is writable; nothing else on the host is.`);
+    lines.push(
+      m.repoRw
+        ? `- repo: ${m.repo} at /work — worktree AND .git WRITABLE (--repo-rw, unsafe). Only this worktree on the host is writable.`
+        : `- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`,
+    );
   }
   for (const d of m.doors) {
     lines.push(`- ${d.name}: ${d.grants}. ${d.use}`);
@@ -357,7 +374,7 @@ function capabilityPrompt(m: Manifest): string {
 
 async function run(account: string, launch: Launch, env: Env = process.env): Promise<number> {
   assertAccount(account);
-  const { repo, doors, netOpen, claudeArgs } = launch;
+  const { repo, repoRw, doors, netOpen, claudeArgs } = launch;
   const manifest = buildManifest(account, launch, env);
   const argv = [
     "podman", "run", "-it", "--rm",
@@ -403,11 +420,31 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
     // uid so host-owned files line up (writable + no git "dubious ownership"),
     // WITHOUT chowning the repo.
     argv.push("-v", `${abs}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
-    // A worktree's git dir lives in a bare repo outside the worktree; mount that
+    // A worktree's git dir lives in a bare repo OUTSIDE the worktree; mount that
     // common dir at its host path so `git` resolves inside the box.
     const common = await gitCommonDir(abs);
-    if (common && !common.startsWith(`${abs}/`)) {
-      argv.push("-v", `${common}:${common}`);
+    const external = common && !common.startsWith(`${abs}/`);
+    if (repoRw) {
+      // UNSAFE escape: leave .git WRITABLE (today's behaviour). A box that writes
+      // .git/hooks or .git/config gets host code execution when you next run git.
+      console.error(
+        "claude-box: --repo-rw — host .git is WRITABLE in the box; a planted hook/config runs on YOUR host. Prefer --repo (read-only .git) + --keeper.",
+      );
+      if (external) argv.push("-v", `${common}:${common}`);
+    } else {
+      // SAFE default: worktree files stay writable (the agent edits code), but
+      // .git is READ-ONLY — the box can't plant a hook or rewrite config that
+      // executes on the host. History writes go through the keeper door, not the
+      // mount. (Closes the host-RCE escape; see REPOD.md for the overlay that
+      // restores in-box git ergonomics.)
+      if (external) {
+        // worktree: the bare/common dir (config + hooks + this worktree's gitdir)
+        // is outside /work — mount it read-only at its host path.
+        argv.push("-v", `${common}:${common}:ro`);
+      } else {
+        // normal repo: .git is inside the worktree — overlay it :ro over /work.
+        argv.push("-v", `${abs}/.git:/work/.git:ro`);
+      }
     }
   }
   // Inject the honest surface into the agent's context (granted AND denied), so

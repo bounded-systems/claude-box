@@ -23,9 +23,10 @@ declaration, projected onto the `podman run` mounts/sockets).
 | Grant | What it gives | How |
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
-| **`--repo <path>`** | work on a real project | *today:* bind-mount a worktree RW — becoming the **repod** read door + in-box overlay, see [REPOD.md](./REPOD.md) |
+| **`--repo <path>`** | work on a real project | worktree RW at `/work`, **`.git` read-only** (no host-RCE; commits via keeper). `--repo-rw` is the unsafe `.git`-writable escape. See [REPOD.md](./REPOD.md) |
 | **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
+| **`--scout`** | **external reads** (repos/PRs/URLs) | forward the **scoutd** door — content, not creds; the read twin of keeper, see [SCOUT.md](./SCOUT.md) |
 | **`--beads`** | beads reads/writes | forward the **beadsd** door (socket) |
 | **`--door <name>[=<sock>]`** | attach any other service | the **generic door** — mount a host socket at `/run/<name>.sock`, export `<NAME>_SOCK` |
 
@@ -95,24 +96,24 @@ twin; both are doors, not credentials in the box. That's the ocap win: a
 compromised or runaway box can only *ask* a daemon that enforces policy and
 holds the keys — it cannot exfiltrate keys or force-push.
 
-### Credential hygiene — the tools are present, the creds are not (GH-5)
+### Credential hygiene — `gh` removed; writes and reads are doors (GH-5)
 
-The image ships `git`, `gh`, and `openssh`. "Credential-free" is about what's
-*reachable*, not what's installed:
+`gh` bundled three things into one ambient tool: a **read** client, a **write**
+client (push / PR-create), and a **credential store**. A single `gh auth login`
+turned the box into a direct push path that bypassed keeperd. So **`gh` is gone
+from the image** (`flake.nix`), and its capabilities are unbundled into doors:
 
-- **Nothing ambient is forwarded.** Unlike agent-forwarding setups, the launcher
-  passes no SSH agent, no keys, no `GH_TOKEN`. The box starts with zero push
-  capability; the *only* sanctioned write path is the keeperd door.
-- **In-box creds don't persist.** Only `~/.config/claude` is the volume; `gh`'s
-  config (`~/.config/gh`) and `~/.ssh` are **outside** it, so anything a session
-  authenticates is thrown away with the `--rm` container — it can't silently
-  become a standing credential.
-- **So the one way to defeat the model is to *hand* the box a credential** —
-  `gh auth login` with a real token, mounting a key, or `-e GH_TOKEN=…`. Don't.
-  That re-creates a direct push path that bypasses keeperd's policy + signing.
+- **writes → keeperd** — the only sanctioned write path; the box holds no keys.
+- **external reads → scout** — repos/PRs/URLs come back as *content*, not a
+  token or a live connection ([SCOUT.md](./SCOUT.md)). Dropping `gh` without
+  scout would just *lose* the read capability; scout *relocates* it to a door.
+- **raw egress → netd** — and nothing ambient is forwarded (no SSH agent, no
+  keys, no `GH_TOKEN`); `git`/`openssh` remain only for local VCS + transport.
 
-The enforced version (GH-5) is to retire the in-box auth path entirely so
-keeperd is the *only* way to write history, not merely the recommended one.
+The result is the enforced version of "credential-free": there is no in-box tool
+that can establish push rights, so keeperd is the *only* way to write history —
+not merely the recommended one. (The remaining footgun is still *handing* the
+box a credential — mounting a key or `-e GH_TOKEN=…` — so don't.)
 
 ## Transport is interchangeable — the door is the capability
 

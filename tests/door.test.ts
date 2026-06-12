@@ -57,6 +57,20 @@ test("planLaunch separates doors/repo from claude args", () => {
   expect(l.doors.find((d) => d.name === "dolt")!.host).toBe("/var/run/dolt.sock");
 });
 
+// ── --repo is safe-by-default: .git read-only (writes via keeper); --repo-rw escapes ──
+test("--repo defaults to read-only .git; --repo-rw is the unsafe escape", () => {
+  const ro = buildManifest("work", planLaunch(["--repo", "."], EMPTY), EMPTY);
+  expect(ro.repo).toBe(".");
+  expect(ro.repoRw).toBe(false);
+  expect(JSON.parse(capabilityJson(ro)).granted.repoGit).toBe("ro");
+  expect(capabilityPrompt(ro)).toMatch(/\.git is READ-ONLY/);
+
+  const rw = buildManifest("work", planLaunch(["--repo-rw", "."], EMPTY), EMPTY);
+  expect(rw.repo).toBe(".");
+  expect(rw.repoRw).toBe(true);
+  expect(JSON.parse(capabilityJson(rw)).granted.repoGit).toBe("rw");
+});
+
 // ── the honest surface: granted AND denied, from the actual grants ──
 test("manifest is honest about what is denied, not just granted", () => {
   const m = buildManifest("work", planLaunch(["--keeper"], EMPTY), EMPTY);

@@ -9,9 +9,9 @@ change upstream, then re-vendor and bump the pin below. A local copy exists only
 so offline tooling (`bun test`, `nix run .#provenance`) resolves the types
 without a network fetch.
 
-**Pinned at:** `ocap-provenance@<commit>` — _not yet locked; set this to
-`git -C ocap-provenance rev-parse HEAD` when re-vendoring from a shell that has
-the repo (see `HANDOFF.md`, Task A)._
+**Pinned at:** `ocap-provenance@95167a4a9c77777fa331b967001ca5b24669acec`. When the
+contract changes, edit upstream first, then re-vendor `types.ts` + the schema here
+and bump this SHA — never edit them here directly.
 
 ## Why this is its own thing
 

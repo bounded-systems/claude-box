@@ -168,6 +168,15 @@
           };
 
           default = self.packages.${system}.claude-image;
+
+          # peercred — SO_PEERCRED injector for launcherd (Rust)
+          # Wraps a unix socket to inject caller UID/GID/PID into requests.
+          peercred = pkgs.rustPlatform.buildRustPackage {
+            pname = "peercred";
+            version = "0.1.0";
+            src = ./peercred;
+            cargoLock.lockFile = ./peercred/Cargo.lock;
+          };
         }) // {
           # Expose the (linux) image under the darwin host too, so a plain
           # `nix build .#claude-image` on this Mac resolves and offloads to the
@@ -198,6 +207,20 @@
                 exec ${pkgs.bun}/bin/bun ${./provenance.ts} "$@"
               '';
 
+            # keeperd — the git-signing daemon behind the `--keeper` door (KEEPERD.md).
+            # A pinned bun process that holds the Ed25519 signing key and performs
+            # signed commits/pushes on behalf of boxes. The box holds no keys — it
+            # requests signed writes through the /run/keeperd.sock door.
+            #   nix run .#keeperd                  # listen on $KEEPERD_SOCK or default
+            #   nix run .#keeperd -- --help        # show usage
+            # Note: runs from the source tree (not just keeperd.ts) because the
+            # daemon imports ./contract/types and ./contract/slsa.
+            keeperd =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "keeperd" ''
+                exec ${pkgs.bun}/bin/bun ${./.}/keeperd.ts "$@"
+              '';
+
             # netd — the allowlist egress daemon behind the `--net` door (NETD.md).
             # A pinned bun process replacing the squid+socat reference: enforces a
             # destination allowlist via CONNECT, no TLS MITM, fails closed.
@@ -214,6 +237,11 @@
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
+      };
+
+      apps.aarch64-darwin.keeperd = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.keeperd}/bin/keeperd";
       };
 
       apps.aarch64-darwin.netd = {
@@ -239,6 +267,7 @@
           src = ./peercred;
           cargoLock.lockFile = ./peercred/Cargo.lock;
         };
+
 
       # Option A builder (prx-9yp), prepared so we can build LATER.
       # Determinate Nix owns /etc/nix/nix.conf and sets nix.enable=false in

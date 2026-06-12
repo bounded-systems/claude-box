@@ -303,6 +303,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
   let repoRw = false;
   let netOpen = false;
+  let room: string | undefined;
   const doors = new Map<string, DoorGrant>();
   const claudeArgs: string[] = [];
   const add = (d: DoorGrant) => doors.set(d.name, d);

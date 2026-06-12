@@ -91,17 +91,33 @@ export class KeeperError extends Error {
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
-/** Get the keeperd socket path from environment or default. */
-function getSocketPath(): string {
-  // In-box: the socket is mounted at /run/keeperd.sock
-  const envPath = process.env.KEEPERD_SOCK;
-  if (envPath) return envPath;
+type KeeperTarget =
+  | { type: "unix"; path: string }
+  | { type: "tcp"; host: string; port: number };
+
+/** Get keeperd connection target from environment or default. */
+function getTarget(): KeeperTarget {
+  // TCP mode: KEEPERD_HOST=host:port (e.g., "host.containers.internal:9999")
+  const tcpHost = process.env.KEEPERD_HOST;
+  if (tcpHost) {
+    const [host, portStr] = tcpHost.split(":");
+    return { type: "tcp", host: host || "127.0.0.1", port: Number(portStr) || 9999 };
+  }
+
+  // Unix socket mode: KEEPERD_SOCK=/path/to/socket
+  const sockPath = process.env.KEEPERD_SOCK;
+  if (sockPath) return { type: "unix", path: sockPath };
+
+  // In-box default: socket at /run/keeperd.sock
+  if (Bun.file("/run/keeperd.sock").size !== undefined) {
+    return { type: "unix", path: "/run/keeperd.sock" };
+  }
 
   // Fallback for testing outside a box
   const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/keeperd.sock`;
+  if (runtime) return { type: "unix", path: `${runtime}/keeperd.sock` };
   const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/keeperd.sock`;
+  return { type: "unix", path: `${home}/.claude-box/keeperd.sock` };
 }
 
 type RequestEnvelope = {
@@ -119,56 +135,59 @@ type ResponseEnvelope = {
 
 /** Send a request to keeperd and wait for response. */
 async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const socketPath = getSocketPath();
+  const target = getTarget();
   const id = crypto.randomUUID();
 
   return new Promise((resolve, reject) => {
     let buffer = "";
     let resolved = false;
 
-    connect({
-      unix: socketPath,
-      socket: {
-        open(sock) {
-          const req: RequestEnvelope = { id, method, params };
-          sock.write(JSON.stringify(req) + "\n");
-        },
-        data(sock, data) {
-          buffer += data.toString();
-          const newline = buffer.indexOf("\n");
-          if (newline >= 0 && !resolved) {
-            resolved = true;
-            const line = buffer.slice(0, newline);
-            sock.end();
-            try {
-              const resp = JSON.parse(line) as ResponseEnvelope;
-              if (resp.ok) {
-                resolve(resp.result as T);
-              } else {
-                reject(new KeeperError(
-                  resp.error?.code ?? "UNKNOWN",
-                  resp.error?.message ?? "keeperd error"
-                ));
-              }
-            } catch (e) {
-              reject(new KeeperError("PARSE_ERROR", "invalid response from keeperd"));
-            }
-          }
-        },
-        error(_sock, err) {
-          if (!resolved) {
-            resolved = true;
-            reject(new KeeperError("CONNECTION_ERROR", `failed to connect to keeperd: ${err}`));
-          }
-        },
-        close() {
-          if (!resolved) {
-            resolved = true;
-            reject(new KeeperError("CONNECTION_CLOSED", "connection closed before response"));
-          }
-        },
+    const socketHandler = {
+      open(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never) {
+        const req: RequestEnvelope = { id, method, params };
+        sock.write(JSON.stringify(req) + "\n");
       },
-    }).catch((err) => {
+      data(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never, data: Buffer) {
+        buffer += data.toString();
+        const newline = buffer.indexOf("\n");
+        if (newline >= 0 && !resolved) {
+          resolved = true;
+          const line = buffer.slice(0, newline);
+          sock.end();
+          try {
+            const resp = JSON.parse(line) as ResponseEnvelope;
+            if (resp.ok) {
+              resolve(resp.result as T);
+            } else {
+              reject(new KeeperError(
+                resp.error?.code ?? "UNKNOWN",
+                resp.error?.message ?? "keeperd error"
+              ));
+            }
+          } catch (e) {
+            reject(new KeeperError("PARSE_ERROR", "invalid response from keeperd"));
+          }
+        }
+      },
+      error(_sock: unknown, err: Error) {
+        if (!resolved) {
+          resolved = true;
+          reject(new KeeperError("CONNECTION_ERROR", `failed to connect to keeperd: ${err}`));
+        }
+      },
+      close() {
+        if (!resolved) {
+          resolved = true;
+          reject(new KeeperError("CONNECTION_CLOSED", "connection closed before response"));
+        }
+      },
+    };
+
+    const connectPromise = target.type === "unix"
+      ? connect({ unix: target.path, socket: socketHandler })
+      : connect({ hostname: target.host, port: target.port, socket: socketHandler });
+
+    connectPromise.catch((err) => {
       if (!resolved) {
         resolved = true;
         reject(new KeeperError("CONNECTION_ERROR", `failed to connect to keeperd: ${err}`));

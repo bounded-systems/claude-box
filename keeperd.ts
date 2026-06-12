@@ -476,7 +476,22 @@ async function handleRequest(line: string): Promise<ResponseEnvelope> {
 
 const startedAt = new Date();
 
-async function serve(socketPath: string): Promise<void> {
+const socketHandler = {
+  async data(socket: Socket, data: Buffer) {
+    const lines = data.toString().split("\n").filter(Boolean);
+    for (const line of lines) {
+      const resp = await handleRequest(line);
+      socket.write(JSON.stringify(resp) + "\n");
+    }
+  },
+  open(_socket: Socket) {},
+  close(_socket: Socket) {},
+  error(_socket: Socket, err: Error) {
+    console.error(`keeperd: socket error: ${err}`);
+  },
+};
+
+async function serveUnix(socketPath: string): Promise<void> {
   // Ensure parent directory exists
   const dir = dirname(socketPath);
   if (!existsSync(dir)) {
@@ -492,20 +507,20 @@ async function serve(socketPath: string): Promise<void> {
 
   Bun.listen({
     unix: socketPath,
-    socket: {
-      async data(socket: Socket, data: Buffer) {
-        const lines = data.toString().split("\n").filter(Boolean);
-        for (const line of lines) {
-          const resp = await handleRequest(line);
-          socket.write(JSON.stringify(resp) + "\n");
-        }
-      },
-      open(_socket: Socket) {},
-      close(_socket: Socket) {},
-      error(_socket: Socket, err: Error) {
-        console.error(`keeperd: socket error: ${err}`);
-      },
-    },
+    socket: socketHandler,
+  });
+
+  // Keep running
+  await new Promise(() => {});
+}
+
+async function serveTcp(port: number, host: string = "127.0.0.1"): Promise<void> {
+  console.error(`keeperd: listening on ${host}:${port}`);
+
+  Bun.listen({
+    hostname: host,
+    port,
+    socket: socketHandler,
   });
 
   // Keep running
@@ -521,26 +536,35 @@ async function main(): Promise<number> {
   if (cmd === "serve") {
     let socketPath = defaultSocketPath();
     let keyPath = defaultKeyPath();
+    let port: number | undefined;
 
     for (let i = 1; i < args.length; i++) {
       if (args[i] === "--socket" || args[i] === "-s") {
         socketPath = args[++i]!;
       } else if (args[i] === "--key" || args[i] === "-k") {
         keyPath = args[++i]!;
+      } else if (args[i] === "--port" || args[i] === "-p") {
+        port = Number(args[++i]);
       }
     }
 
     // Load signing key
     loadOrCreateKey(keyPath);
 
-    await serve(socketPath);
+    // TCP mode (for host→VM relay) or unix socket mode
+    if (port) {
+      await serveTcp(port);
+    } else {
+      await serveUnix(socketPath);
+    }
     return 0;
   }
 
   console.log(`keeperd — git-signing daemon for claude-box
 
 Usage:
-  keeperd serve                     start daemon (foreground)
+  keeperd serve                     start daemon (foreground, unix socket)
+  keeperd serve --port PORT         listen on TCP (for host→VM relay)
   keeperd serve --socket PATH       custom socket path
   keeperd serve --key PATH          custom signing key path
 

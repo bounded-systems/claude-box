@@ -58,6 +58,7 @@ Without it, launch is a master key. Concretely launcherd enforces:
   launch can't fork-bomb boxes.
 - **audit** — every launch logged `ts, caller, image, doors, ALLOW|DENY`.
 
+
 ## The grant
 
 A door, same model as the others — `--launcher` (preset) forwards the launcherd
@@ -78,6 +79,7 @@ attempt to launch containers; relaunch with --launcher."
 > by `claude-box` itself (see [ROOM.md](./ROOM.md)) — it does *not* route through
 > launcherd. The daemon keeps its own internal room presets for the profiles it
 > can spawn; those are independent of the CLI `--room` flag.
+
 
 ## The wire protocol — reuse keeperd's framing
 
@@ -171,8 +173,7 @@ the delegation edge in the capability-provenance chain
 
 **Implemented** (`launcherd.ts`). The daemon is fully functional:
 
-- Socket server (length-prefixed JSON over unix socket at
-  `$XDG_RUNTIME_DIR/launcherd.sock`)
+- Socket server (NDJSON over unix socket or TCP for VM relay)
 - Methods: `status`, `list`, `kill`, `attach`, `launch`, `rooms`
 - Daemon-internal room presets: `dev`, `dev-spawn`, `readonly`, `offline`,
   `bootstrap`

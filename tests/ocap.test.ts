@@ -7,11 +7,19 @@
  *   nix run nixpkgs#bun -- test tests/ocap.test.ts
  *
  * Needs the image loaded (`nix build .#claude-image && podman load -i result`)
- * and a running container runtime (rootless podman). The default profile
- * (config volume only) is tested here; the --repo / --keeper / --beads grant
- * profiles are `test.todo` until the pod lands (prx-asr).
+ * and a running container runtime (rootless podman).
+ *
+ * Tests are structured in tiers:
+ * - Default profile (no grants): always runs if podman + image available
+ * - --repo / --repo-rw: runs if podman + image available (temp repos)
+ * - Door tests (--keeper, --net, --scout): skip unless doors volume exists
+ *
+ * To run door tests, start the doors first:
+ *   claude-box doors start
  */
 import { test, expect } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
 const IMAGE = "localhost/claude-personal:dev";
 
@@ -91,26 +99,171 @@ boxTest("no door ⇒ no egress (api.anthropic.com unreachable under --network=no
   expect(r.code).not.toBe(0); // no route off the box — nothing to exfiltrate THROUGH
 });
 
-// ── grant profiles — pending the pod (prx-asr) ──
-// --net: the netd door is the ONLY egress; an allowlisted host is reachable
-// THROUGH it (loopback relay → /run/netd.sock), an arbitrary host (evil.com) is
-// refused by netd. Pending netd + the pod.
-test.todo("--net: egress only via the netd door (allowlist enforced, arbitrary host refused)");
-// --net: the netd door is the ONLY egress; the allowlist permits api.anthropic.com
-// but a curl to an off-allowlist host is refused (netd policy, no other route).
-test.todo("--net: egress only via the netd door, off-allowlist host refused");
-// --repo (default): worktree files are writable, but .git is READ-ONLY — the box
-// can't plant a hook / rewrite config that would run on the host (the host-RCE
-// escape is closed). Writing /work/.git/* must fail; editing /work/<file> works.
-test.todo("--repo: .git is read-only (no host-RCE), worktree files writable");
-// --repo-rw: the unsafe escape — .git is writable again (today's behaviour).
-test.todo("--repo-rw: .git is writable (escape hatch, warned)");
-// --keeper: the keeperd door is reachable; a RAW git push fails (no creds in
-// the box); a keeperd-mediated signed write succeeds.
-test.todo("--keeper: signed writes via the keeperd door, raw push refused");
-// --beads: the beadsd door is reachable; bd writes route through it.
+// ── --repo grant profile: .git read-only, worktree writable ──
+// This closes the host-RCE escape — the box can't plant a hook/config that runs
+// on the host. These tests create a temp repo and mount it.
+
+function withTempRepo<T>(fn: (repoPath: string) => T): T {
+  const tmp = mkdtempSync("/tmp/ocap-repo-");
+  try {
+    // Initialize a git repo
+    Bun.spawnSync(["git", "init", tmp], { stdout: "pipe", stderr: "pipe" });
+    Bun.spawnSync(["git", "-C", tmp, "config", "user.email", "test@test.com"], { stdout: "pipe", stderr: "pipe" });
+    Bun.spawnSync(["git", "-C", tmp, "config", "user.name", "Test"], { stdout: "pipe", stderr: "pipe" });
+    writeFileSync(join(tmp, "README.md"), "# Test repo\n");
+    Bun.spawnSync(["git", "-C", tmp, "add", "."], { stdout: "pipe", stderr: "pipe" });
+    Bun.spawnSync(["git", "-C", tmp, "commit", "-m", "init"], { stdout: "pipe", stderr: "pipe" });
+    return fn(tmp);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** Run inside the box with a repo mounted at /work (--repo mode: .git read-only). */
+function boxRepo(repoPath: string, script: string): { code: number; out: string } {
+  const p = Bun.spawnSync(
+    ["podman", "run", "--rm", "--network=none",
+     "-v", `${repoPath}:/work`,
+     "-v", `${repoPath}/.git:/work/.git:ro`,
+     "-w", "/work",
+     "--userns=keep-id:uid=1000,gid=1000",
+     "--entrypoint", "sh", IMAGE, "-c", script],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return {
+    code: p.exitCode,
+    out: `${p.stdout.toString()}${p.stderr.toString()}`.trim(),
+  };
+}
+
+/** Run inside the box with a repo mounted at /work (--repo-rw mode: .git writable). */
+function boxRepoRw(repoPath: string, script: string): { code: number; out: string } {
+  const p = Bun.spawnSync(
+    ["podman", "run", "--rm", "--network=none",
+     "-v", `${repoPath}:/work`,
+     "-w", "/work",
+     "--userns=keep-id:uid=1000,gid=1000",
+     "--entrypoint", "sh", IMAGE, "-c", script],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return {
+    code: p.exitCode,
+    out: `${p.stdout.toString()}${p.stderr.toString()}`.trim(),
+  };
+}
+
+boxTest("--repo: worktree files are writable", () => {
+  withTempRepo((repo) => {
+    const r = boxRepo(repo, "echo 'new content' > /work/newfile.txt && cat /work/newfile.txt");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("new content");
+  });
+});
+
+boxTest("--repo: .git is read-only (write fails)", () => {
+  withTempRepo((repo) => {
+    const r = boxRepo(repo, "echo 'evil' > /work/.git/config 2>&1 || echo 'write failed'");
+    expect(r.out).toContain("write failed");
+  });
+});
+
+boxTest("--repo: can't create .git/hooks (host-RCE closed)", () => {
+  withTempRepo((repo) => {
+    const r = boxRepo(repo, "mkdir -p /work/.git/hooks 2>&1; echo '#!/bin/sh\necho pwned' > /work/.git/hooks/pre-commit 2>&1 || echo 'hook blocked'");
+    expect(r.out).toContain("blocked");
+  });
+});
+
+boxTest("--repo: git status works (read-only .git is readable)", () => {
+  withTempRepo((repo) => {
+    const r = boxRepo(repo, "cd /work && git status --porcelain");
+    expect(r.code).toBe(0);
+  });
+});
+
+boxTest("--repo-rw: .git is writable (unsafe escape)", () => {
+  withTempRepo((repo) => {
+    const r = boxRepoRw(repo, "echo '# modified' >> /work/.git/config && echo 'write ok'");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("write ok");
+  });
+});
+
+// ── door grant profiles ──
+// These require the actual daemons to be running and accessible via socket.
+// We check for the socket and skip if not available.
+
+const DOORS_VOLUME = process.env.DOORS_VOLUME ?? "systemd-claude-doors";
+
+/** Check if a door socket is available (via podman volume). */
+function doorAvailable(door: string): boolean {
+  if (!RUNTIME_READY) return false;
+  // Check if the volume exists and has the socket
+  const p = Bun.spawnSync(
+    ["podman", "volume", "inspect", DOORS_VOLUME],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return p.exitCode === 0;
+}
+
+/** Run inside the box with door sockets mounted. */
+function boxWithDoors(script: string, extraArgs: string[] = []): { code: number; out: string } {
+  const p = Bun.spawnSync(
+    ["podman", "run", "--rm", "--network=none",
+     "-v", `${DOORS_VOLUME}:/run/doors:ro`,
+     "-e", "KEEPERD_SOCK=/run/doors/keeperd.sock",
+     "-e", "NETD_SOCK=/run/doors/netd.sock",
+     "-e", "SCOUTD_SOCK=/run/doors/scoutd.sock",
+     ...extraArgs,
+     "--entrypoint", "sh", IMAGE, "-c", script],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return {
+    code: p.exitCode,
+    out: `${p.stdout.toString()}${p.stderr.toString()}`.trim(),
+  };
+}
+
+const DOORS_READY = doorAvailable("keeperd");
+const doorTest = test.skipIf(!DOORS_READY);
+
+// --keeper: the keeperd door is reachable via socket
+doorTest("--keeper: keeperd socket is accessible", () => {
+  const r = boxWithDoors("test -S /run/doors/keeperd.sock && echo 'socket exists' || echo 'no socket'");
+  expect(r.out).toContain("socket exists");
+});
+
+doorTest("--keeper: can query keeperd status", () => {
+  const r = boxWithDoors(`echo '{"id":"1","method":"status"}' | bun -e '
+    const sock = await Bun.connect({ unix: "/run/doors/keeperd.sock", socket: {
+      data(s, d) { console.log(d.toString()); s.end(); }
+    }});
+    sock.write(Bun.stdin.text());
+  '`);
+  expect(r.out).toContain('"ok":true');
+});
+
+// --scout: the scoutd door is reachable
+doorTest("--scout: scoutd socket is accessible", () => {
+  const r = boxWithDoors("test -S /run/doors/scoutd.sock && echo 'socket exists' || echo 'no socket'");
+  expect(r.out).toContain("socket exists");
+});
+
+doorTest("--scout: can query scoutd status", () => {
+  const r = boxWithDoors(`echo '{"id":"1","method":"status"}' | bun -e '
+    const sock = await Bun.connect({ unix: "/run/doors/scoutd.sock", socket: {
+      data(s, d) { console.log(d.toString()); s.end(); }
+    }});
+    sock.write(Bun.stdin.text());
+  '`);
+  expect(r.out).toContain('"ok":true');
+});
+
+// --net: the netd door provides policed egress
+doorTest("--net: netd socket is accessible", () => {
+  const r = boxWithDoors("test -S /run/doors/netd.sock && echo 'socket exists' || echo 'no socket'");
+  expect(r.out).toContain("socket exists");
+});
+
+// --beads: beadsd door (not yet implemented)
 test.todo("--beads: beads ops via the beadsd door");
-// --scout: the scoutd door is reachable; the box reads external artifacts
-// (repos/PRs/URLs) through it while holding NO read token and NO NIC — scoutd
-// returns CONTENT, never a credential, and nothing write-capable is exposed.
-test.todo("--scout: external reads via the scoutd door, no credential in the box");

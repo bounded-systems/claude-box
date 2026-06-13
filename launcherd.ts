@@ -11,7 +11,7 @@
  *   launcherd serve --key /path/to/key  # L2 signing key (Ed25519)
  */
 
-import { unlinkSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createHash, sign, generateKeyPairSync, createPrivateKey, createPublicKey } from "node:crypto";
 import type { Socket, UnixSocketListener } from "bun";
@@ -22,10 +22,21 @@ import {
   buildManifest,
   capabilityJson,
   capabilityPrompt,
+  transportString,
+  unixPath,
   type DoorGrant,
   type Manifest,
   type Launch,
 } from "./claude-box";
+import {
+  defaultSocketPath as runtimeSocketPath,
+  prepareSocket,
+  createLogger,
+  type RequestEnvelope,
+  type ResponseEnvelope,
+  ok,
+  err,
+} from "./lib/runtime";
 import {
   statement,
   PREDICATE_TYPE,
@@ -45,11 +56,10 @@ const VERSION = "0.1.0";
 const IMAGE = "localhost/claude-personal:dev";
 const NETD_PROXY = "http://127.0.0.1:3128";
 
+const log = createLogger("launcherd");
+
 function defaultSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/launcherd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/launcherd.sock`;
+  return runtimeSocketPath("launcherd");
 }
 
 function defaultKeyPath(): string {
@@ -105,12 +115,12 @@ function loadPolicy(path: string): Policy | null {
     const parsed = JSON.parse(content) as Policy;
     // Validate structure
     if (!Array.isArray(parsed.rules)) {
-      console.error(`launcherd: invalid policy file (rules must be an array)`);
+      log("ERR", "invalid policy file (rules must be an array)");
       return null;
     }
     return parsed;
   } catch (e) {
-    console.error(`launcherd: failed to load policy: ${e}`);
+    log("ERR", `failed to load policy: ${e}`);
     return null;
   }
 }
@@ -256,7 +266,7 @@ function loadOrCreateKey(keyPath: string): SigningKey {
     // Write with restrictive permissions
     writeFileSync(keyPath, privateKeyPem, { mode: 0o600 });
     writeFileSync(`${keyPath}.pub`, publicKeyPem, { mode: 0o644 });
-    console.error(`launcherd: generated new signing key at ${keyPath}`);
+    log("INFO", `generated new signing key at ${keyPath}`);
   }
 
   const privateKey = createPrivateKey(privateKeyPem);
@@ -314,7 +324,7 @@ function buildL2Attestation(
         manifestDigest: { sha256: manifestDigest },
         doors: manifest.doors.map((d) => ({
           name: d.name,
-          socket: d.inBox,
+          socket: transportString(d.guest),
           env: d.env,
           grants: d.grants,
         })),
@@ -363,19 +373,6 @@ async function getImageDigest(): Promise<string | null> {
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
-
-type RequestEnvelope = {
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-};
-
-type ResponseEnvelope = {
-  id: string;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-};
 
 type LaunchRecord = {
   launchId: string;
@@ -455,7 +452,7 @@ async function checkDoors(doors: DoorGrant[]): Promise<{ name: string; reachable
   return Promise.all(
     doors.map(async (d) => ({
       name: d.name,
-      reachable: await checkDoorReachable(d.host),
+      reachable: await checkDoorReachable(unixPath(d.host)),
     }))
   );
 }
@@ -753,7 +750,9 @@ async function buildPodmanArgv(account: string, launch: Launch, manifest: Manife
 
   // Mount doors
   for (const d of doors) {
-    argv.push("-v", `${d.host}:${d.inBox}`, "--env", `${d.env}=${d.inBox}`);
+    const hostPath = unixPath(d.host);
+    const guestPath = unixPath(d.guest);
+    argv.push("-v", `${hostPath}:${guestPath}`, "--env", `${d.env}=${guestPath}`);
   }
 
   // Capability manifest
@@ -821,32 +820,25 @@ async function handleRequest(line: string): Promise<ResponseEnvelope> {
   try {
     req = JSON.parse(line);
   } catch {
-    return { id: "", ok: false, error: { code: "PARSE_ERROR", message: "invalid JSON" } };
+    return err("", "PARSE_ERROR", "invalid JSON");
   }
 
   const { id, method, params } = req;
   if (!id || !method) {
-    return { id: id ?? "", ok: false, error: { code: "INVALID_REQUEST", message: "id and method required" } };
+    return err(id ?? "", "INVALID_REQUEST", "id and method required");
   }
 
   const handler = METHODS[method];
   if (!handler) {
-    return { id, ok: false, error: { code: "UNKNOWN_METHOD", message: `unknown method: ${method}` } };
+    return err(id, "UNKNOWN_METHOD", `unknown method: ${method}`);
   }
 
   try {
     const result = await handler(params ?? {});
-    return { id, ok: true, result };
+    return ok(id, result);
   } catch (e) {
-    const err = e as { code?: string; message?: string };
-    return {
-      id,
-      ok: false,
-      error: {
-        code: err.code ?? "INTERNAL_ERROR",
-        message: err.message ?? String(e),
-      },
-    };
+    const error = e as { code?: string; message?: string };
+    return err(id, error.code ?? "INTERNAL_ERROR", error.message ?? String(e));
   }
 }
 
@@ -856,26 +848,19 @@ function assertSocketDir(sock: string): void {
   try {
     mode = statSync(dir).mode;
   } catch {
-    console.error(`launcherd: socket dir ${dir} does not exist`);
+    log("ERR", `socket dir ${dir} does not exist`);
     process.exit(2);
   }
   if (mode & 0o002) {
-    console.error(`launcherd: refusing socket in world-writable ${dir} (hijack risk)`);
+    log("ERR", `refusing socket in world-writable ${dir} (hijack risk)`);
     process.exit(2);
   }
 }
 
 async function serve(socketPath: string): Promise<void> {
   assertSocketDir(socketPath);
-
-  // Clean up stale socket
-  try {
-    unlinkSync(socketPath);
-  } catch {
-    // Doesn't exist, fine
-  }
-
-  console.error(`launcherd: listening on ${socketPath}`);
+  prepareSocket(socketPath);
+  log("INFO", `listening on ${socketPath}`);
 
   const server = Bun.listen<{ buffer: string }>({
     unix: socketPath,
@@ -895,22 +880,20 @@ async function serve(socketPath: string): Promise<void> {
         }
       },
       close(_socket) {},
-      error(_socket, err) {
-        console.error("launcherd: socket error:", err);
+      error(_socket, e) {
+        log("ERR", `socket error: ${e}`);
       },
     },
   });
 
   // Handle shutdown
   process.on("SIGINT", () => {
-    console.error("\nlauncherd: shutting down...");
+    log("INFO", "shutting down...");
     server.stop();
-    try { unlinkSync(socketPath); } catch {}
     process.exit(0);
   });
   process.on("SIGTERM", () => {
     server.stop();
-    try { unlinkSync(socketPath); } catch {}
     process.exit(0);
   });
 
@@ -955,7 +938,7 @@ async function main(): Promise<number> {
 
   const cmd = args[0];
   if (cmd !== "serve") {
-    console.error("usage: launcherd serve [--socket PATH] [--key PATH] [--policy PATH] [--no-sign]");
+    log("ERR", "usage: launcherd serve [--socket PATH] [--key PATH] [--policy PATH] [--no-sign]");
     return 1;
   }
 
@@ -975,13 +958,13 @@ async function main(): Promise<number> {
     }
     try {
       signingKey = loadOrCreateKey(keyPath);
-      console.error(`launcherd: signing enabled (keyId: ${signingKey.keyId.slice(0, 16)}...)`);
+      log("INFO", `signing enabled (keyId: ${signingKey.keyId.slice(0, 16)}...)`);
     } catch (e) {
-      console.error(`launcherd: failed to load signing key: ${e}`);
-      console.error("launcherd: continuing without signing (use --no-sign to suppress)");
+      log("ERR", `failed to load signing key: ${e}`);
+      log("WARN", "continuing without signing (use --no-sign to suppress)");
     }
   } else {
-    console.error("launcherd: signing disabled (--no-sign)");
+    log("INFO", "signing disabled (--no-sign)");
   }
 
   // Policy loading
@@ -992,9 +975,9 @@ async function main(): Promise<number> {
   }
   policy = loadPolicy(policyPath);
   if (policy) {
-    console.error(`launcherd: policy enabled (${policy.rules.length} rules, default: [${policy.defaultAllow?.join(", ") ?? "none"}])`);
+    log("INFO", `policy enabled (${policy.rules.length} rules, default: [${policy.defaultAllow?.join(", ") ?? "none"}])`);
   } else {
-    console.error("launcherd: no policy file (all rooms permitted)");
+    log("INFO", "no policy file (all rooms permitted)");
   }
 
   await serve(socketPath);

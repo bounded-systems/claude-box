@@ -24,6 +24,50 @@
  *  must be path-safe — no `/`, no `..`, no injection into the mount spec. */
 export const DOOR_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+// ── Door transport ───────────────────────────────────────────────────────────
+// How a door socket is addressed. The capability model is transport-agnostic;
+// the substrate (container, microVM, remote) determines which transport is used.
+//
+//   unix:  same-machine socket (container or native substrates)
+//   vsock: cross-VM socket (microVM substrates)
+//   tcp:   cross-network socket (distributed/remote doors)
+
+/** Unix domain socket — same-machine, the current default. */
+export type UnixTransport = { kind: "unix"; path: string };
+
+/** Virtio socket — crosses the VM boundary (host CID 2, guest CID 3+). */
+export type VsockTransport = { kind: "vsock"; cid: number; port: number };
+
+/** TCP socket — crosses the network (remote doors). */
+export type TcpTransport = { kind: "tcp"; host: string; port: number };
+
+/** A door's transport address. */
+export type DoorTransport = UnixTransport | VsockTransport | TcpTransport;
+
+/** Construct a unix socket transport. */
+export function unix(path: string): UnixTransport {
+  return { kind: "unix", path };
+}
+
+/** Construct a vsock transport (for microVM substrates). */
+export function vsock(cid: number, port: number): VsockTransport {
+  return { kind: "vsock", cid, port };
+}
+
+/** Construct a tcp transport (for remote doors). */
+export function tcp(host: string, port: number): TcpTransport {
+  return { kind: "tcp", host, port };
+}
+
+/** Render a transport as a human-readable string (for logs/errors). */
+export function transportString(t: DoorTransport): string {
+  switch (t.kind) {
+    case "unix": return t.path;
+    case "vsock": return `vsock:${t.cid}:${t.port}`;
+    case "tcp": return `tcp:${t.host}:${t.port}`;
+  }
+}
+
 export type Env = Record<string, string | undefined>;
 
 /** Default host socket for a daemon, private-dir-first. Pure (no I/O) so door
@@ -44,20 +88,40 @@ export type DoorPreset = {
   deny: string; // rulebook when DENIED — there is no rule; do not attempt
 };
 
-/** A door actually granted to a launch (resolved from a preset, or generic). */
+/** A door actually granted to a launch (resolved from a preset, or generic).
+ *  Transport-agnostic: works across unix sockets, vsock (microVM), or tcp (remote). */
 export type DoorGrant = {
   name: string;
-  inBox: string;
-  env: string;
-  host: string;
-  grants: string;
-  use: string;
-  /** Attenuation: opaque restrictions narrowing this door (see `attenuate`).
-   *  The engine carries them and renders them honestly into the rulebook; it
-   *  never interprets them — the broker behind the door enforces them, and the
-   *  catalog owner defines their grammar. Absent ⇒ the door is unrestricted. */
-  caveats?: string[];
+  host: DoorTransport;   // broker side (where the daemon listens)
+  guest: DoorTransport;  // in-box side (where the guest connects)
+  env: string;           // env var pointing at the guest transport
+  grants: string;        // one-line capability description
+  use: string;           // rulebook when granted
+  caveats?: string[];    // opaque constraints; engine carries, daemon enforces
 };
+
+// ── Attenuation ──────────────────────────────────────────────────────────────
+// A door can be narrowed by appending caveats. Append-only: you can add
+// constraints, never remove them, so authority is monotonically non-increasing.
+// The engine carries caveats; it doesn't interpret them — that's the daemon's
+// job. This separation keeps the engine guest-agnostic (no door-specific
+// vocabulary) while enabling real capability attenuation.
+
+/** Attenuate a door by appending caveats. Returns a new grant with the
+ *  combined caveats; the original is unchanged. Append-only by construction. */
+export function attenuate(grant: DoorGrant, more: string[]): DoorGrant {
+  if (!more.length) return grant; // no-op optimization
+  return { ...grant, caveats: [...(grant.caveats ?? []), ...more] };
+}
+
+/** Parse a caveat string (k=v or k:v format) into key and value. */
+export function parseCaveat(s: string): { key: string; value: string } | null {
+  const eq = s.indexOf("=");
+  const colon = s.indexOf(":");
+  const sep = eq >= 0 && (colon < 0 || eq < colon) ? eq : colon;
+  if (sep < 1) return null; // no separator or empty key
+  return { key: s.slice(0, sep), value: s.slice(sep + 1) };
+}
 
 /** The product's door catalog: the doors this kind of room can furnish. */
 export type DoorCatalog = Record<string, DoorPreset>;
@@ -71,29 +135,45 @@ export type RoomCatalog = Record<string, RoomPreset>;
 /** Resolve a door by name to a concrete grant. A name in the catalog gets its
  *  canonical path + rulebook; any other name becomes a generic service door at
  *  /run/<name>.sock (you hold the door, not the service's keys). An explicit
- *  host socket overrides the default. */
+ *  host transport overrides the default.
+ *
+ *  The hostOverride parameter accepts either a DoorTransport or a string (unix
+ *  path) for backward compatibility. */
 export function resolveDoor(
   catalog: DoorCatalog,
   name: string,
-  host: string | undefined,
+  hostOverride: DoorTransport | string | undefined,
   env: Env,
 ): DoorGrant {
   if (!DOOR_NAME_RE.test(name)) {
     throw new Error(`invalid door name "${name}" (expected [a-z0-9][a-z0-9-]*)`);
   }
+  // Normalize hostOverride: string → unix transport
+  const hostTransport: DoorTransport | undefined =
+    hostOverride === undefined ? undefined :
+    typeof hostOverride === "string" ? unix(hostOverride) :
+    hostOverride;
+
   const known = catalog[name];
   if (known) {
-    return { name, inBox: known.inBox, env: known.env, host: host ?? known.hostDefault, grants: known.grants, use: known.use };
+    return {
+      name,
+      host: hostTransport ?? unix(known.hostDefault),
+      guest: unix(known.inBox),
+      env: known.env,
+      grants: known.grants,
+      use: known.use,
+    };
   }
   const ENV = `${name.toUpperCase().replace(/-/g, "_")}_SOCK`;
-  const inBox = `/run/${name}.sock`;
+  const guestPath = `/run/${name}.sock`;
   return {
     name,
-    inBox,
+    host: hostTransport ?? unix(env[ENV] ?? defaultHostSock(name, env)),
+    guest: unix(guestPath),
     env: ENV,
-    host: host ?? env[ENV] ?? defaultHostSock(name, env),
     grants: `service door "${name}"`,
-    use: `Reach the ${name} service at ${inBox} ($${ENV}). You hold the door, not the service's keys.`,
+    use: `Reach the ${name} service at ${guestPath} ($${ENV}). You hold the door, not the service's keys.`,
   };
 }
 
@@ -154,6 +234,7 @@ export function capabilityPreamble(workcell: string): string[] {
   ];
 }
 
+<<<<<<< HEAD
 /** One card per granted door: name, what it grants, and how to use it. An
  *  attenuated door also states its restriction, so the surface stays honest —
  *  a narrowed door must not read as if it were the full grant. */
@@ -163,6 +244,15 @@ export function grantedDoorLines(doors: DoorGrant[]): string[] {
     return d.caveats?.length
       ? `${card} RESTRICTED to: ${d.caveats.join("; ")} — requests outside this are denied.`
       : card;
+=======
+/** One card per granted door: name, what it grants, and how to use it.
+ *  If the door has caveats, they're rendered as RESTRICTED constraints. */
+export function grantedDoorLines(doors: DoorGrant[]): string[] {
+  return doors.map((d) => {
+    const base = `- ${d.name}: ${d.grants}. ${d.use}`;
+    if (!d.caveats?.length) return base;
+    return `${base} RESTRICTED: ${d.caveats.join(", ")}.`;
+>>>>>>> e1d6a51 (feat: add --guest flag for generic tool execution)
   });
 }
 

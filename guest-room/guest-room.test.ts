@@ -24,6 +24,7 @@ import {
   deniedDoors,
   grantedDoorLines,
   deniedDoorSection,
+  transportString,
 } from "./mod.ts";
 import { parseFeature, StepRegistry, type World } from "./gherkin.ts";
 
@@ -69,7 +70,7 @@ const steps = new StepRegistry()
     catch (e) { w.error = e; }
   })
   .step(/^its in-room socket is "([^"]*)"$/, (w, sock) => {
-    expect((w.grant as DoorGrant).inBox).toBe(sock);
+    expect(transportString((w.grant as DoorGrant).guest)).toBe(sock);
   })
   .step(/^the room reaches it via the "([^"]*)" env var$/, (w, envVar) => {
     expect((w.grant as DoorGrant).env).toBe(envVar);
@@ -124,7 +125,7 @@ const steps = new StepRegistry()
 describe("the engine stays guest-agnostic", () => {
   // The engine itself — NOT the test fixture (which names a non-Claude hotel) or
   // the README (which references the consumer to illustrate the mapping).
-  const engineFiles = ["mod.ts", "gherkin.ts"];
+  const engineFiles = ["mod.ts", "gherkin.ts", "daemon.ts", "protocol.ts", "room-service.ts", "hotel-safe.ts"];
   const guestIdentities = /\b(claude|anthropic|podman|keeperd|netd|scoutd|launcherd)\b/i;
 
   for (const file of engineFiles) {

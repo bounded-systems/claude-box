@@ -61,6 +61,10 @@ coordination service. Revisit a store only when both of those are true.
 ```
 guest-room/
 ├── mod.ts              # the engine — door resolution, room expansion, rulebook
+├── protocol.ts         # the door protocol — JSON-over-socket request/response
+├── daemon.ts           # daemon utilities — socket paths, CLI, logging
+├── room-service.ts     # ephemeral token issuer (secrets never at runtime)
+├── hotel-safe.ts       # two-key encryption (hotel key + guest key to open)
 ├── gherkin.ts          # a tiny Gherkin-subset runner
 ├── features/           # behavior specs, EXECUTED against mod.ts
 │   ├── doors.feature
@@ -69,6 +73,14 @@ guest-room/
 ├── guest-room.test.ts  # wires the steps to the engine; each Scenario is a test
 └── README.md
 ```
+
+| Module | What it provides |
+|--------|-----------------|
+| `mod.ts` | Door resolution, room expansion, denied surface, rulebook rendering |
+| `protocol.ts` | JSON-over-socket protocol (request/response envelopes, handlers) |
+| `daemon.ts` | Daemon plumbing (socket paths, CLI structure, logging) |
+| `room-service.ts` | Ephemeral token issuer (secrets never at runtime, only tokens) |
+| `hotel-safe.ts` | Two-key encryption (hotel key + guest key required to open) |
 
 The engine is parameterized over a **catalog** (the doors a kind of room can
 furnish) and **room bundles** — both supplied by the consumer. `mod.ts` contains

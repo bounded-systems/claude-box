@@ -22,16 +22,16 @@ const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
 // ── one generic primitive, named presets over it ──
 test("preset door: --keeper resolves to the canonical keeperd door", () => {
   const d = resolveDoor("keeper", undefined, EMPTY);
-  expect(d.inBox).toBe("/run/keeperd.sock");
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/keeperd.sock" });
   expect(d.env).toBe("KEEPERD_SOCK");
-  expect(d.host).toBe("/tmp/.claude-box/run/keeperd.sock");
+  expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/keeperd.sock" });
 });
 
 test("preset door: --scout resolves to the canonical scoutd read door", () => {
   const d = resolveDoor("scout", undefined, EMPTY);
-  expect(d.inBox).toBe("/run/scoutd.sock");
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/scoutd.sock" });
   expect(d.env).toBe("SCOUTD_SOCK");
-  expect(d.host).toBe("/tmp/.claude-box/run/scoutd.sock");
+  expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/scoutd.sock" });
 });
 
 test("--scout grants the scout read door (content, not credential)", () => {
@@ -43,21 +43,21 @@ test("--scout grants the scout read door (content, not credential)", () => {
 
 test("preset host socket is overridable via env (same launch, any transport)", () => {
   const d = resolveDoor("keeper", undefined, { HOME: "/tmp", KEEPERD_SOCK: "/relay/k.sock" });
-  expect(d.host).toBe("/relay/k.sock");
-  expect(d.inBox).toBe("/run/keeperd.sock"); // the box's contract is fixed
+  expect(d.host).toEqual({ kind: "unix", path: "/relay/k.sock" });
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/keeperd.sock" }); // the box's contract is fixed
 });
 
 test("generic door: any service attaches by socket, deriving path + env", () => {
   const d = resolveDoor("dolt", undefined, EMPTY);
-  expect(d.inBox).toBe("/run/dolt.sock");
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/dolt.sock" });
   expect(d.env).toBe("DOLT_SOCK");
   // Generic doors use library's defaultHostSock which falls back to /tmp
-  expect(d.host).toBe("/tmp/dolt.sock");
+  expect(d.host).toEqual({ kind: "unix", path: "/tmp/dolt.sock" });
 });
 
-test("generic door honors an explicit host socket (NAME=HOST)", () => {
+test("generic door honors an explicit host socket (NAME@HOST)", () => {
   const d = resolveDoor("dolt", "/var/run/dolt.sock", EMPTY);
-  expect(d.host).toBe("/var/run/dolt.sock");
+  expect(d.host).toEqual({ kind: "unix", path: "/var/run/dolt.sock" });
 });
 
 test("door names are validated (no path injection into the mount)", () => {
@@ -66,12 +66,12 @@ test("door names are validated (no path injection into the mount)", () => {
 });
 
 // ── launch planning: claude-box flags vs claude passthrough ──
-test("planLaunch separates doors/repo from claude args", () => {
-  const l = planLaunch(["--keeper", "--repo", ".", "--door", "dolt=/var/run/dolt.sock", "--resume"], EMPTY);
+test("planLaunch separates doors/repo from guest args", () => {
+  const l = planLaunch(["--keeper", "--repo", ".", "--door", "dolt@/var/run/dolt.sock", "--resume"], EMPTY);
   expect(l.repo).toBe(".");
-  expect(l.claudeArgs).toEqual(["--resume"]);
+  expect(l.guestArgs).toEqual(["--resume"]);
   expect(l.doors.map((d) => d.name).sort()).toEqual(["dolt", "keeper"]);
-  expect(l.doors.find((d) => d.name === "dolt")!.host).toBe("/var/run/dolt.sock");
+  expect(l.doors.find((d) => d.name === "dolt")!.host).toEqual({ kind: "unix", path: "/var/run/dolt.sock" });
 });
 
 // ── rooms: named door bundles, the layer above presets ──
@@ -89,7 +89,7 @@ test("--room read is reads-only: scout door, still no network", () => {
 test("flags compose over a room (add a door, dedup the overlap)", () => {
   const l = planLaunch(["--room", "read", "--keeper", "--scout", "--resume"], EMPTY);
   expect(l.doors.map((d) => d.name).sort()).toEqual(["keeper", "scout"]); // scout not doubled
-  expect(l.claudeArgs).toEqual(["--resume"]);
+  expect(l.guestArgs).toEqual(["--resume"]);
 });
 
 test("every room references only known doors (no drift from the registry)", () => {
@@ -133,9 +133,9 @@ test("a no-grant box still names its denials (knows what it cannot do)", () => {
 // ── network is a door, with launch effects ──
 test("preset door: --net resolves to the canonical netd door", () => {
   const d = resolveDoor("net", undefined, EMPTY);
-  expect(d.inBox).toBe("/run/netd.sock");
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/netd.sock" });
   expect(d.env).toBe("NETD_SOCK");
-  expect(d.host).toBe("/tmp/.claude-box/run/netd.sock"); // default; run() fails closed on world-writable dirs
+  expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/netd.sock" }); // default; run() fails closed on world-writable dirs
 });
 
 test("--net grants the net door; default posture is no network", () => {
@@ -175,9 +175,9 @@ test("machine-readable surface (for prx tool-gating) reflects the grants", () =>
 // ── launcher door (spawn sub-boxes) ──
 test("preset door: --launcher resolves to the canonical launcherd door", () => {
   const d = resolveDoor("launcher", undefined, EMPTY);
-  expect(d.inBox).toBe("/run/launcherd.sock");
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/launcherd.sock" });
   expect(d.env).toBe("LAUNCHERD_SOCK");
-  expect(d.host).toBe("/tmp/.claude-box/run/launcherd.sock");
+  expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/launcherd.sock" });
 });
 
 test("--launcher grants spawn authority and is reflected in manifest", () => {
@@ -225,4 +225,92 @@ test("regular --repo does not set repoEphemeral", () => {
   expect(l.repoEphemeral).toBe(false);
   const m = buildManifest("work", l, EMPTY);
   expect(JSON.parse(capabilityJson(m)).granted.repoEphemeral).toBe(false);
+});
+
+// ── caveats: attenuation narrows authority ──
+test("--door with caveats parses NAME:CAVEAT syntax", () => {
+  const l = planLaunch(["--door", "net:host=github.com"], EMPTY);
+  const net = l.doors.find((d) => d.name === "net")!;
+  expect(net).toBeDefined();
+  expect(net.caveats).toEqual(["host=github.com"]);
+});
+
+test("--door with multiple caveats parses NAME:CAV1:CAV2 syntax", () => {
+  const l = planLaunch(["--door", "net:host=github.com:host=api.anthropic.com"], EMPTY);
+  const net = l.doors.find((d) => d.name === "net")!;
+  expect(net.caveats).toEqual(["host=github.com", "host=api.anthropic.com"]);
+});
+
+test("--door with caveats AND socket parses NAME:CAVEAT@SOCK syntax", () => {
+  const l = planLaunch(["--door", "net:host=github.com@/tmp/custom.sock"], EMPTY);
+  const net = l.doors.find((d) => d.name === "net")!;
+  expect(net.caveats).toEqual(["host=github.com"]);
+  expect(net.host).toEqual({ kind: "unix", path: "/tmp/custom.sock" });
+});
+
+test("caveats appear in the manifest's machine-readable output", () => {
+  const m = buildManifest("work", planLaunch(["--door", "net:host=github.com:host=.npmjs.org"], EMPTY), EMPTY);
+  const json = JSON.parse(capabilityJson(m));
+  const net = json.granted.doors.find((d: { name: string }) => d.name === "net");
+  expect(net.caveats).toEqual(["host=github.com", "host=.npmjs.org"]);
+});
+
+test("caveats appear in the capability prompt as RESTRICTED", () => {
+  const prompt = capabilityPrompt(buildManifest("work", planLaunch(["--door", "net:host=github.com"], EMPTY), EMPTY));
+  expect(prompt).toMatch(/RESTRICTED.*host=github\.com/);
+});
+
+test("uncaveated door has empty caveats array in json", () => {
+  const m = buildManifest("work", planLaunch(["--net"], EMPTY), EMPTY);
+  const json = JSON.parse(capabilityJson(m));
+  const net = json.granted.doors.find((d: { name: string }) => d.name === "net");
+  expect(net.caveats).toEqual([]);
+});
+
+// ── guests: different runtimes share the room+door model ──
+test("default guest is claude", () => {
+  const l = planLaunch([], EMPTY);
+  expect(l.guest).toBe("claude");
+});
+
+test("--guest selects a different runtime", () => {
+  const l = planLaunch(["--guest", "bun", "--repo", "."], EMPTY);
+  expect(l.guest).toBe("bun");
+  expect(l.repo).toBe(".");
+});
+
+test("unknown guest throws (fail closed)", () => {
+  expect(() => planLaunch(["--guest", "unknown"], EMPTY)).toThrow(/unknown guest/);
+});
+
+test("tool guests get their defaultRoom automatically", () => {
+  // bun without explicit --room or doors gets the "tool" room (no doors)
+  const l = planLaunch(["--guest", "bun", "--repo", "."], EMPTY);
+  expect(l.guest).toBe("bun");
+  expect(l.doors).toEqual([]); // tool room has no doors
+});
+
+test("explicit --room overrides guest's defaultRoom", () => {
+  const l = planLaunch(["--guest", "bun", "--room", "dev", "--repo", "."], EMPTY);
+  expect(l.guest).toBe("bun");
+  expect(l.doors.map((d) => d.name).sort()).toEqual(["keeper", "net", "scout"]);
+});
+
+test("explicit door flags override guest's defaultRoom", () => {
+  const l = planLaunch(["--guest", "bun", "--net", "--repo", "."], EMPTY);
+  expect(l.guest).toBe("bun");
+  expect(l.doors.map((d) => d.name)).toEqual(["net"]);
+});
+
+test("manifest includes guest in json", () => {
+  const m = buildManifest("work", planLaunch(["--guest", "bun", "--repo", "."], EMPTY), EMPTY);
+  const json = JSON.parse(capabilityJson(m));
+  expect(json.guest).toBe("bun");
+});
+
+test("claude guest does not get tool room by default", () => {
+  // claude without explicit room gets NO default room (no doors unless specified)
+  const l = planLaunch([], EMPTY);
+  expect(l.guest).toBe("claude");
+  expect(l.doors).toEqual([]);
 });

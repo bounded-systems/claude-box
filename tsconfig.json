@@ -20,7 +20,8 @@
     "tests/**/*.ts",
     "netd/**/*.ts",
     "contract/**/*.ts",
-    "peercred/**/*.ts"
+    "peercred/**/*.ts",
+    "guest-room/**/*.ts"
   ],
   "exclude": ["node_modules"]
 }

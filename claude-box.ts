@@ -28,16 +28,69 @@ import {
   type DoorGrant,
   type DoorCatalog,
   type RoomCatalog,
+  type DoorTransport,
   resolveDoor as resolveDoorIn,
   expandRoom,
   deniedDoors,
   capabilityPreamble,
   grantedDoorLines,
   deniedDoorSection,
+  transportString,
+  unix,
+  attenuate,
 } from "./guest-room/mod.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
+
+// ── Guest catalog ─────────────────────────────────────────────────────────────
+// A *guest* is a runtime identity: which image runs, what entrypoint, and what
+// default room (capability surface). The room+door model is guest-agnostic; the
+// guest catalog is the product-specific binding of "who runs" to "what they get."
+// `claude` is the default; tool guests (bun, node, python) run with minimal caps.
+
+type GuestPreset = {
+  image: string;
+  entrypoint?: string[];  // override image entrypoint
+  defaultRoom?: string;   // room to apply if none specified
+  needsConfig?: boolean;  // mount the account's config volume (default: true for claude)
+};
+
+/** claude-box's guest catalog. Tool guests default to the "tool" room (read-only
+ *  repo, no network, no doors). */
+function knownGuests(): Record<string, GuestPreset> {
+  return {
+    claude: {
+      image: IMAGE,
+      needsConfig: true,
+      // No defaultRoom — claude gets explicit room/door flags
+    },
+    bun: {
+      image: "oven/bun:1",
+      entrypoint: ["bun"],
+      defaultRoom: "tool",
+      needsConfig: false,
+    },
+    node: {
+      image: "node:22-slim",
+      entrypoint: ["node"],
+      defaultRoom: "tool",
+      needsConfig: false,
+    },
+    deno: {
+      image: "denoland/deno:2",
+      entrypoint: ["deno"],
+      defaultRoom: "tool",
+      needsConfig: false,
+    },
+    python: {
+      image: "python:3.12-slim",
+      entrypoint: ["python"],
+      defaultRoom: "tool",
+      needsConfig: false,
+    },
+  };
+}
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
@@ -80,6 +133,15 @@ function getRunDir(env: Env): string {
 /** Default host socket for a daemon, private-dir-first. */
 function defaultHostSock(daemon: string, env: Env): string {
   return `${getRunDir(env)}/${daemon}.sock`;
+}
+
+/** Extract the path from a unix transport; throws if not unix (podman substrate
+ *  only supports unix sockets — vsock/tcp would need a different substrate). */
+function unixPath(t: DoorTransport): string {
+  if (t.kind !== "unix") {
+    throw new Error(`podman substrate requires unix sockets, got ${t.kind}`);
+  }
+  return t.path;
 }
 
 /** Daemon start hints for each door (shown when socket missing). */
@@ -209,6 +271,12 @@ function knownDoors(env: Env = process.env): DoorCatalog {
 // flags after `--room` compose (add/override) over the bundle. See ROOM.md.
 function knownRooms(): RoomCatalog {
   return {
+    // Minimal tool room: no doors at all. For running untrusted tools (test
+    // runners, linters, type checkers) over a read-only repo. Parallel-safe.
+    tool: {
+      doors: [],
+      about: "no doors — isolated tool execution over read-only repo",
+    },
     // Read-only research: reads via scout, no write key, no NIC of its own.
     read: {
       doors: ["scout"],
@@ -231,34 +299,42 @@ function resolveDoor(name: string, host: string | undefined, env: Env = process.
   return resolveDoorIn(knownDoors(env), name, host, env);
 }
 
-const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude, one account per volume
+const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, isolated workloads
 
-  claude-box                  personal account
+  # Claude (default guest)
+  claude-box                  personal account, claude guest
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
   claude-box work --repo .    mount the worktree at /work (.git read-only; commits via --keeper)
-  claude-box work --repo-ephemeral .  create an ephemeral worktree (parallel-safe, cleaned up on exit)
-  claude-box work --repo-rw . UNSAFE: worktree AND host .git writable (no-keeper escape)
-  claude-box work --net       forward the netd door — policed egress (default: no network)
-  claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
-  claude-box work --keeper    forward the keeperd door (signed git writes)
-  claude-box work --beads     forward the beadsd door (beads reads/writes)
-  claude-box work --scout     forward the scoutd door (external reads: repos/PRs/URLs)
-  claude-box work --launcher  forward the launcherd door (spawn sub-boxes)
-  claude-box work --room NAME  forward a named door bundle (read | dev) — see ROOM.md
-  claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
-  claude-box ls               list accounts (+ descriptions)
-  claude-box name <acct> <description…>   set a friendly label
-  claude-box doors init       one-shot setup: build images, install units, start services
-  claude-box doors status     show door service status (keeperd, netd, scoutd)
-  claude-box doors start      start all door services
-  claude-box doors logs <svc> follow logs for a door service
-  claude-box status           show launcherd status (requires daemon)
-  claude-box ps               list running boxes (requires daemon)
-  claude-box kill <id>        terminate a running box (requires daemon)
-  claude-box attach <id>      reconnect to a running box (requires daemon)
-  claude-box keeper-status    show keeperd status (requires daemon)
-  claude-box keeper-key       show keeperd signing public key (requires daemon)`;
+
+  # Tool guests (sandboxed tool execution)
+  claude-box --guest bun --repo . -- test           run bun test in a box
+  claude-box --guest node --repo . -- script.js    run node in a box
+  claude-box --guest python --repo . -- -m pytest  run pytest in a box
+  claude-box --guest deno --repo . -- test         run deno test in a box
+
+  # Capability flags (work with any guest)
+  --guest NAME        select runtime (claude | bun | node | deno | python)
+  --repo PATH         mount worktree at /work (.git read-only)
+  --repo-ephemeral .  ephemeral worktree (parallel-safe, cleaned up on exit)
+  --repo-rw PATH      UNSAFE: worktree AND .git writable
+  --net               forward the netd door — policed egress
+  --net-open          UNSAFE: full ambient egress, no allowlist
+  --keeper            forward the keeperd door (signed git writes)
+  --beads             forward the beadsd door (beads reads/writes)
+  --scout             forward the scoutd door (external reads)
+  --launcher          forward the launcherd door (spawn sub-boxes)
+  --room NAME         forward a door bundle (tool | read | dev)
+  --door NAME[:CAV...][@SOCK]  attach door with optional caveats
+
+  # Management
+  claude-box ls               list accounts
+  claude-box name <a> <desc>  label an account
+  claude-box doors init       one-shot setup (build images, install units)
+  claude-box doors status     show door service status
+  claude-box status           show launcherd status
+  claude-box ps               list running boxes
+  claude-box kill <id>        terminate a running box`;
 
 type Meta = Record<string, { desc?: string }>;
 
@@ -333,29 +409,42 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 // ── Launch planning + the capability manifest ────────────────────────────────
 
 type Launch = {
+  guest: string;
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
   doors: DoorGrant[];
   netOpen: boolean;
-  claudeArgs: string[];
+  guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
 
-/** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
- *  / --beads / --scout / --room / --door) and the claude passthrough args.
- *  `--net` takes an optional socket path (bare ⇒ the default netd door);
+/** Split a launch's tail into claude-box flags (--guest / --repo / --net[-open]
+ *  / --keeper / --beads / --scout / --room / --door) and the guest passthrough
+ *  args. `--net` takes an optional socket path (bare ⇒ the default netd door);
  *  `--net-open` is the unsafe ambient-egress escape (no door); `--room` expands a
- *  named door bundle that later flags compose over. */
+ *  named door bundle that later flags compose over. `--guest` selects a runtime;
+ *  tool guests (bun, node, python) apply their defaultRoom if no explicit room. */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
+  let guest = "claude";
+  let explicitRoom = false;
   let repo: string | undefined;
   let repoRw = false;
   let repoEphemeral = false;
   let netOpen = false;
   const doors = new Map<string, DoorGrant>();
-  const claudeArgs: string[] = [];
+  const guestArgs: string[] = [];
   const add = (d: DoorGrant) => doors.set(d.name, d);
   for (let i = 0; i < tail.length; i++) {
     const t = tail[i]!;
+    if (t === "--guest") {
+      const name = tail[++i] ?? "";
+      const guests = knownGuests();
+      if (!guests[name]) {
+        throw new Error(`unknown guest "${name}" (known: ${Object.keys(guests).join(", ")})`);
+      }
+      guest = name;
+      continue;
+    }
     if (t === "--repo") {
       repo = tail[++i];
       continue;
@@ -408,30 +497,50 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // dedupes by name, so `--room dev --door dolt=…` just adds dolt). Unknown
       // room ⇒ throw (fail closed, not a silent empty launch).
       for (const d of expandRoom(knownRooms(), knownDoors(env), name, env)) add(d);
+      explicitRoom = true;
       continue;
     }
     if (t === "--door") {
+      // Syntax: NAME[:CAVEAT...][@HOST_SOCK]
+      // Examples: net, net:host=github.com, net:host=a.com:host=b.com@/sock
       const spec = tail[++i] ?? "";
-      const eq = spec.indexOf("=");
-      const name = eq < 0 ? spec : spec.slice(0, eq);
-      const host = eq < 0 ? undefined : spec.slice(eq + 1);
-      add(resolveDoor(name, host, env));
+      const atIdx = spec.lastIndexOf("@");
+      const hostPart = atIdx >= 0 ? spec.slice(atIdx + 1) : undefined;
+      const nameCaveatPart = atIdx >= 0 ? spec.slice(0, atIdx) : spec;
+      const parts = nameCaveatPart.split(":");
+      const name = parts[0]!;
+      const caveats = parts.slice(1).filter(Boolean);
+      let grant = resolveDoor(name, hostPart, env);
+      if (caveats.length) {
+        grant = attenuate(grant, caveats);
+      }
+      add(grant);
       continue;
     }
-    claudeArgs.push(t);
+    guestArgs.push(t);
+  }
+  // Apply guest's defaultRoom if no explicit --room was given and no doors were
+  // explicitly added. Tool guests get their defaultRoom automatically.
+  const guestPreset = knownGuests()[guest];
+  if (!explicitRoom && doors.size === 0 && guestPreset?.defaultRoom) {
+    for (const d of expandRoom(knownRooms(), knownDoors(env), guestPreset.defaultRoom, env)) {
+      add(d);
+    }
   }
   return {
+    guest,
     repo,
     repoRw,
     repoEphemeral,
     doors: [...doors.values()],
     netOpen,
-    claudeArgs,
+    guestArgs,
   };
 }
 
 type Manifest = {
   account: string;
+  guest: string;
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
@@ -454,7 +563,7 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -464,6 +573,7 @@ function capabilityJson(m: Manifest): string {
   return JSON.stringify({
     workcell: "claude-box",
     account: m.account,
+    guest: m.guest,
     // Network posture is explicit: policed (netd door), open (unsafe escape), or
     // none (--network=none, the default). Egress is a capability, not ambient.
     network: m.netOpen ? "open" : netDoor ? "policed" : "none",
@@ -477,9 +587,10 @@ function capabilityJson(m: Manifest): string {
       repoEphemeral: m.repoEphemeral,
       doors: m.doors.map((d) => ({
         name: d.name,
-        socket: d.inBox,
+        socket: transportString(d.guest),
         env: d.env,
         grants: d.grants,
+        caveats: d.caveats ?? [],
       })),
     },
     denied: m.denied.map((d) => ({ name: d.name, flag: d.flag })),
@@ -574,7 +685,8 @@ async function run(
   env: Env = process.env,
 ): Promise<number> {
   assertAccount(account);
-  const { repo, repoRw, repoEphemeral, doors, netOpen, claudeArgs } = launch;
+  const { guest, repo, repoRw, repoEphemeral, doors, netOpen, guestArgs } = launch;
+  const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);
   const argv = [
     "podman",
@@ -590,9 +702,12 @@ async function run(
     "all",
     "--pids-limit",
     "2048",
-    "-v",
-    `claude-${account}-config:/home/claude/.config/claude:U`,
   ];
+  // Only mount the account's config volume for guests that need it (claude).
+  // Tool guests don't need or want claude's auth/history.
+  if (guestPreset.needsConfig) {
+    argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+  }
   // Network is a DOOR, not a NIC. Default to NO interface (nothing to exfiltrate
   // through, even with a repo mounted); the netd door (below) is the only
   // policed way out. `--net-open` is the loud, explicit, unsafe ambient-egress
@@ -624,8 +739,10 @@ async function run(
   // env so the box finds it — never the daemon's keys. Fail closed if the host
   // socket sits in a world-writable dir (hijack risk), for EVERY door.
   for (const d of doors) {
-    assertSocketDir(d.host, d.name);
-    argv.push("-v", `${d.host}:${d.inBox}`, "--env", `${d.env}=${d.inBox}`);
+    const hostPath = unixPath(d.host);
+    const guestPath = unixPath(d.guest);
+    assertSocketDir(hostPath, d.name);
+    argv.push("-v", `${hostPath}:${guestPath}`, "--env", `${d.env}=${guestPath}`);
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
   argv.push("--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`);
@@ -696,14 +813,19 @@ async function run(
       }
     }
   }
-  // Inject the honest surface into the agent's context (granted AND denied), so
-  // the box KNOWS its powers and limits rather than assuming them.
-  argv.push(
-    IMAGE,
-    "--append-system-prompt",
-    capabilityPrompt(manifest),
-    ...claudeArgs,
-  );
+  // Use the guest's image and entrypoint.
+  argv.push(guestPreset.image);
+  // For claude guest, inject the honest surface into the agent's context
+  // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
+  // don't need or parse system prompts — they just run their command.
+  if (guest === "claude") {
+    argv.push("--append-system-prompt", capabilityPrompt(manifest));
+  }
+  // Add entrypoint override if the guest specifies one, then the args.
+  if (guestPreset.entrypoint) {
+    argv.push(...guestPreset.entrypoint);
+  }
+  argv.push(...guestArgs);
   const proc = Bun.spawn(argv, {
     stdin: "inherit",
     stdout: "inherit",
@@ -1347,13 +1469,17 @@ async function main(): Promise<number> {
 export {
   knownDoors,
   knownRooms,
+  knownGuests,
   resolveDoor,
   planLaunch,
   buildManifest,
   capabilityJson,
   capabilityPrompt,
+  transportString,
+  unix,
+  unixPath,
 };
-export type { DoorGrant, Manifest, Launch };
+export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset };
 
 if (import.meta.main) {
   process.exit(await main());

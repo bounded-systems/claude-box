@@ -25,37 +25,69 @@
  * supported`), which is exactly what the pod provides.
  */
 import { connect, listen, type Socket } from "bun";
-import { unlinkSync, mkdirSync } from "node:fs";
+
+// Import shared daemon infrastructure
+import {
+  defaultSocketPath,
+  prepareSocket,
+  createLogger,
+} from "../lib/runtime";
+
+const log = createLogger("netd");
 
 const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
 
-function defaultSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/netd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  // Auto-create ~/.claude-box/run on macOS (no XDG_RUNTIME_DIR)
-  const runDir = `${home}/.claude-box/run`;
-  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); } catch {}
-  return `${runDir}/netd.sock`;
-}
-
 /** Allowlist entry: exact host, or ".suffix" (matches the apex + any subdomain). */
-function allowed(host: string, allow: string[]): boolean {
+function matchesPattern(host: string, pattern: string): boolean {
   const h = host.toLowerCase();
-  return allow.some((a) => (a.startsWith(".") ? h === a.slice(1) || h.endsWith(a) : h === a));
+  const p = pattern.toLowerCase();
+  return p.startsWith(".") ? h === p.slice(1) || h.endsWith(p) : h === p;
 }
 
-function log(decision: "ALLOW" | "DENY" | "ERR" | "INFO", detail: string): void {
-  process.stdout.write(`netd ${new Date().toISOString()} ${decision} ${detail}\n`);
+/** Check if host matches any pattern in the list. */
+function matchesAny(host: string, patterns: string[]): boolean {
+  return patterns.some((p) => matchesPattern(host, p));
+}
+
+/** Parse caveats from NETD_CAVEATS. Returns host patterns from host=... caveats. */
+function parseCaveats(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((c) => {
+      // Parse host=... or host:... caveats
+      const eq = c.indexOf("=");
+      const colon = c.indexOf(":");
+      const sep = eq >= 0 && (colon < 0 || eq < colon) ? eq : colon;
+      if (sep < 0) return null;
+      const key = c.slice(0, sep);
+      const val = c.slice(sep + 1);
+      return key === "host" ? val : null;
+    })
+    .filter((h): h is string => h !== null);
 }
 
 /** Per-connection state: pre-tunnel header buffer, the upstream socket, tunnel flag. */
 type Cx = { head: Uint8Array; up?: Socket<unknown>; tunnel: boolean };
 
+// Base allowlist from NETD_ALLOW (or default)
 const ALLOW = (process.env.NETD_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? [])
   .length
   ? process.env.NETD_ALLOW!.split(",").map((s) => s.trim()).filter(Boolean)
   : DEFAULT_ALLOW;
+
+// Per-launch caveats from NETD_CAVEATS — narrows the allowlist
+const CAVEATS = parseCaveats(process.env.NETD_CAVEATS);
+
+/** Check if a host is allowed (must pass base allowlist AND caveats if present). */
+function allowed(host: string): boolean {
+  // Must be in the base allowlist
+  if (!matchesAny(host, ALLOW)) return false;
+  // If caveats present, must also match at least one caveat host
+  if (CAVEATS.length > 0 && !matchesAny(host, CAVEATS)) return false;
+  return true;
+}
 
 /** Parse the CONNECT request head and, if allowed, open the upstream tunnel. */
 function onHead(client: Socket<Cx>, headEnd: number): void {
@@ -72,7 +104,7 @@ function onHead(client: Socket<Cx>, headEnd: number): void {
   }
   const [host, portStr] = (target ?? "").split(":");
   const port = Number(portStr || "443");
-  if (!host || !allowed(host, ALLOW)) {
+  if (!host || !allowed(host)) {
     log("DENY", `${host ?? "?"}:${port}`);
     client.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
     client.end();
@@ -151,11 +183,12 @@ Usage:
 Environment:
   NETD_SOCK      default unix socket path (fallback: ~/.claude-box/run/netd.sock)
   NETD_ALLOW     comma-separated allowlist (default: api.anthropic.com,.anthropic.com)
+  NETD_CAVEATS   comma-separated caveats to narrow allowlist (e.g. host=github.com)
 `);
 }
 
 if (cmd === "serve") {
-  let socketPath = defaultSocketPath();
+  let socketPath = defaultSocketPath("netd");
   let port: number | undefined;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--socket" || args[i] === "-s" || args[i] === "--unix") {
@@ -164,34 +197,36 @@ if (cmd === "serve") {
       port = Number(args[++i]);
     }
   }
+  const caveatInfo = CAVEATS.length ? ` caveats=${CAVEATS.join(",")}` : "";
   if (port) {
     listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
-    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")} (fail-closed)`);
+    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   } else {
-    try { unlinkSync(socketPath); } catch {}
+    prepareSocket(socketPath);
     listen<Cx>({ unix: socketPath, socket: handlers });
-    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")} (fail-closed)`);
+    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   }
 } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
   showUsage();
 } else if (cmd === undefined) {
   // Backward compat: no subcommand → serve with legacy flag parsing
-  let socketPath = defaultSocketPath();
+  let socketPath = defaultSocketPath("netd");
   let port: number | undefined;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--port") port = Number(args[++i]);
     else if (args[i] === "--unix" || args[i] === "--socket" || args[i] === "-s") socketPath = args[++i]!;
   }
+  const caveatInfo = CAVEATS.length ? ` caveats=${CAVEATS.join(",")}` : "";
   if (port) {
     listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
-    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")} (fail-closed)`);
+    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   } else {
-    try { unlinkSync(socketPath); } catch {}
+    prepareSocket(socketPath);
     listen<Cx>({ unix: socketPath, socket: handlers });
-    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")} (fail-closed)`);
+    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   }
 } else {
-  console.error(`netd: unknown command "${cmd}"`);
+  log("ERR", `unknown command "${cmd}"`);
   showUsage();
   process.exit(1);
 }

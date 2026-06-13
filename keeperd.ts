@@ -11,7 +11,7 @@
  *   keeperd serve --key /path/to/key  # signing key (Ed25519)
  */
 
-import { unlinkSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { createHash, sign, verify, generateKeyPairSync, createPrivateKey, createPublicKey } from "node:crypto";
 import type { Socket } from "bun";
@@ -24,19 +24,23 @@ import {
   type SLSAStatement,
 } from "./contract/slsa";
 
+// Import shared daemon infrastructure
+import {
+  defaultSocketPath,
+  prepareSocket,
+  createLogger,
+  showUsage,
+  type RequestEnvelope,
+  type ResponseEnvelope,
+  ok,
+  err,
+} from "./lib/runtime";
+
+const log = createLogger("keeperd");
+
 // ── Config ───────────────────────────────────────────────────────────────────
 
 const VERSION = "0.1.0";
-
-function defaultSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/keeperd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  // Auto-create ~/.claude-box/run on macOS (no XDG_RUNTIME_DIR)
-  const runDir = `${home}/.claude-box/run`;
-  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); } catch {}
-  return `${runDir}/keeperd.sock`;
-}
 
 function defaultKeyPath(): string {
   const home = process.env.HOME ?? "/tmp";
@@ -424,54 +428,33 @@ const METHODS: Record<string, MethodHandler> = {
   getPublicKey: handleGetPublicKey,
 };
 
-// ── Protocol types ───────────────────────────────────────────────────────────
-
-type RequestEnvelope = {
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-};
-
-type ResponseEnvelope = {
-  id: string;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-};
-
 // ── Request handling ─────────────────────────────────────────────────────────
+// Protocol types (RequestEnvelope, ResponseEnvelope) imported from lib/runtime
 
 async function handleRequest(line: string): Promise<ResponseEnvelope> {
   let req: RequestEnvelope;
   try {
     req = JSON.parse(line);
   } catch {
-    return { id: "", ok: false, error: { code: "PARSE_ERROR", message: "invalid JSON" } };
+    return err("", "PARSE_ERROR", "invalid JSON");
   }
 
   const { id, method, params } = req;
   if (!id || !method) {
-    return { id: id ?? "", ok: false, error: { code: "INVALID_REQUEST", message: "id and method required" } };
+    return err(id ?? "", "INVALID_REQUEST", "id and method required");
   }
 
   const handler = METHODS[method];
   if (!handler) {
-    return { id, ok: false, error: { code: "UNKNOWN_METHOD", message: `unknown method: ${method}` } };
+    return err(id, "UNKNOWN_METHOD", `unknown method: ${method}`);
   }
 
   try {
     const result = await handler(params ?? {});
-    return { id, ok: true, result };
+    return ok(id, result);
   } catch (e) {
-    const err = e as { code?: string; message?: string };
-    return {
-      id,
-      ok: false,
-      error: {
-        code: err.code ?? "INTERNAL_ERROR",
-        message: err.message ?? String(e),
-      },
-    };
+    const error = e as { code?: string; message?: string };
+    return err(id, error.code ?? "INTERNAL_ERROR", error.message ?? String(e));
   }
 }
 
@@ -489,8 +472,8 @@ const socketHandler = {
   },
   open(_socket: Socket) {},
   close(_socket: Socket) {},
-  error(_socket: Socket, err: Error) {
-    console.error(`keeperd: socket error: ${err}`);
+  error(_socket: Socket, error: Error) {
+    log("ERR", `socket error: ${error}`);
   },
 };
 
@@ -501,12 +484,9 @@ async function serveUnix(socketPath: string): Promise<void> {
     mkdirSync(dir, { recursive: true });
   }
 
-  // Remove existing socket
-  try {
-    unlinkSync(socketPath);
-  } catch {}
-
-  console.error(`keeperd: listening on ${socketPath}`);
+  // Remove existing socket and start listening
+  prepareSocket(socketPath);
+  log("INFO", `listening on ${socketPath}`);
 
   Bun.listen({
     unix: socketPath,
@@ -518,7 +498,7 @@ async function serveUnix(socketPath: string): Promise<void> {
 }
 
 async function serveTcp(port: number, host: string = "127.0.0.1"): Promise<void> {
-  console.error(`keeperd: listening on ${host}:${port}`);
+  log("INFO", `listening on ${host}:${port}`);
 
   Bun.listen({
     hostname: host,
@@ -537,7 +517,7 @@ async function main(): Promise<number> {
   const cmd = args[0];
 
   if (cmd === "serve") {
-    let socketPath = defaultSocketPath();
+    let socketPath = defaultSocketPath("keeperd");
     let keyPath = defaultKeyPath();
     let port: number | undefined;
 

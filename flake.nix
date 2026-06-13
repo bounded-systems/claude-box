@@ -195,13 +195,15 @@
                 pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
               };
 
-              # Bundle the keeperd source (keeperd.ts + contract/ + lib/)
+              # Bundle the keeperd source (keeperd.ts + contract/ + lib/ + guest-room/)
               keeperdSrc = pkgs.runCommand "keeperd-src" {} ''
-                mkdir -p $out/app
+                mkdir -p $out/app/lib $out/app/guest-room
                 cp ${./keeperd.ts} $out/app/keeperd.ts
                 cp -r ${./contract} $out/app/contract
-                mkdir -p $out/app/lib
                 cp ${./lib/keeper.ts} $out/app/lib/keeper.ts
+                cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
+                cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';
 
               keeperdEntrypoint = pkgs.writeShellScript "keeperd-entrypoint" ''
@@ -275,14 +277,17 @@
                 pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
               };
 
-              # Bundle the netd source
+              # Bundle the netd source (preserving directory structure for imports)
               netdSrc = pkgs.runCommand "netd-src" {} ''
-                mkdir -p $out/app
-                cp ${./netd/netd.ts} $out/app/netd.ts
+                mkdir -p $out/app/netd $out/app/lib $out/app/guest-room
+                cp ${./netd/netd.ts} $out/app/netd/netd.ts
+                cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
+                cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';
 
               netdEntrypoint = pkgs.writeShellScript "netd-entrypoint" ''
-                exec bun /app/netd.ts --unix /run/doors/netd.sock "$@"
+                exec bun /app/netd/netd.ts --unix /run/doors/netd.sock "$@"
               '';
             in
             pkgs.dockerTools.buildLayeredImage {
@@ -348,10 +353,13 @@
                 pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
               };
 
-              # Bundle the scoutd source
+              # Bundle the scoutd source (with lib/ and guest-room/ for imports)
               scoutdSrc = pkgs.runCommand "scoutd-src" {} ''
-                mkdir -p $out/app
+                mkdir -p $out/app/lib $out/app/guest-room
                 cp ${./scoutd.ts} $out/app/scoutd.ts
+                cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
+                cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';
 
               scoutdEntrypoint = pkgs.writeShellScript "scoutd-entrypoint" ''
@@ -426,7 +434,7 @@
             claude-box =
               let pkgs = pkgsFor "aarch64-darwin";
               in pkgs.writeShellScriptBin "claude-box" ''
-                exec ${pkgs.bun}/bin/bun ${./claude-box.ts} "$@"
+                exec ${pkgs.bun}/bin/bun ${./.}/claude-box.ts "$@"
               '';
 
             # L1 provenance generator (capability-aware, see contract/). Emits
@@ -461,7 +469,7 @@
             netd =
               let pkgs = pkgsFor "aarch64-darwin";
               in pkgs.writeShellScriptBin "netd" ''
-                exec ${pkgs.bun}/bin/bun ${./netd/netd.ts} "$@"
+                exec ${pkgs.bun}/bin/bun ${./.}/netd/netd.ts "$@"
               '';
 
             # scoutd — the external read daemon behind the `--scout` door (SCOUT.md).
@@ -472,7 +480,7 @@
             scoutd =
               let pkgs = pkgsFor "aarch64-darwin";
               in pkgs.writeShellScriptBin "scoutd" ''
-                exec ${pkgs.bun}/bin/bun ${./scoutd.ts} "$@"
+                exec ${pkgs.bun}/bin/bun ${./.}/scoutd.ts "$@"
               '';
           };
         };

@@ -8,3 +8,4 @@ result-*
 keys/
 *.qcow2
 nixos.qcow2
+.claude/settings.local.json

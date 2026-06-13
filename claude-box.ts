@@ -153,9 +153,8 @@ const DAEMON_HINTS: Record<string, string> = {
 };
 /** A door socket's dir must not be world-writable, or another host user can
  *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
- *  for EVERY door — so the /tmp default is refused unless a private path is set.
- *  Also checks the socket itself exists and gives a helpful start hint. */
-function assertSocketDir(sock: string, doorName?: string): void {
+ *  for EVERY door — so the /tmp default is refused unless a private path is set. */
+function assertSocketDir(sock: string, _doorName?: string): void {
   const dir = dirname(sock);
   let mode: number;
   try {
@@ -170,10 +169,12 @@ function assertSocketDir(sock: string, doorName?: string): void {
     );
     process.exit(2);
   }
-  // Check if the socket itself exists — give a helpful hint if not
-  try {
-    statSync(sock);
-  } catch {
+}
+
+/** Check socket file exists (daemon running). Uses existsSync to avoid statfs
+ *  issues with virtiofs-shared sockets on macOS ↔ podman machine. */
+function assertSocketExists(sock: string, doorName?: string): void {
+  if (!existsSync(sock)) {
     const hint = doorName && DAEMON_HINTS[doorName];
     const startCmd = hint ? `\n  Start it with: ${hint}` : "";
     console.error(
@@ -202,20 +203,20 @@ function knownDoors(env: Env = process.env): DoorCatalog {
   return {
     keeper: {
       flag: "--keeper",
-      inBox: "/run/keeperd.sock",
+      inBox: "/run/doors/keeperd.sock",
       env: "KEEPERD_SOCK",
       hostDefault: env.KEEPERD_SOCK ?? defaultHostSock("keeperd", env),
       grants: "signed git writes (commit/push/refs) via keeperd",
-      use: "Route every git write through keeperd at /run/keeperd.sock ($KEEPERD_SOCK). You hold NO git credentials and NO signing key — request a signed write and keeperd performs it. A raw `git push` cannot work; there is nothing in the box to push with.",
+      use: "Route every git write through keeperd at /run/doors/keeperd.sock ($KEEPERD_SOCK). You hold NO git credentials and NO signing key — request a signed write and keeperd performs it. A raw `git push` cannot work; there is nothing in the box to push with.",
       deny: "No git-write authority in this box. Do not push, mutate refs, or claim a commit landed on a remote — it will fail. If the task needs it, it must be RELAUNCHED with --keeper.",
     },
     beads: {
       flag: "--beads",
-      inBox: "/run/beadsd.sock",
+      inBox: "/run/doors/beadsd.sock",
       env: "BEADSD_SOCK",
       hostDefault: env.BEADSD_SOCK ?? defaultHostSock("beadsd", env),
       grants: "beads reads/writes via beadsd",
-      use: "Route beads operations through beadsd at /run/beadsd.sock ($BEADSD_SOCK).",
+      use: "Route beads operations through beadsd at /run/doors/beadsd.sock ($BEADSD_SOCK).",
       deny: "No beads access in this box. Do not attempt bd reads/writes; relaunch with --beads if the task needs them.",
     },
     // The read door (GH-5). Dropping `gh` unbundled its powers: writes → keeper,
@@ -225,12 +226,12 @@ function knownDoors(env: Env = process.env): DoorCatalog {
     // SCOUT.md; the read twin of keeperd (writes).
     scout: {
       flag: "--scout",
-      inBox: "/run/scoutd.sock",
+      inBox: "/run/doors/scoutd.sock",
       env: "SCOUTD_SOCK",
       hostDefault: env.SCOUTD_SOCK ?? defaultHostSock("scoutd", env),
       grants:
         "read external artifacts (repos/PRs/URLs) via scoutd (you hold no read tokens)",
-      use: "Read external content through the scout door at /run/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
+      use: "Read external content through the scout door at /run/doors/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
       deny: "No external reads in this box — do not assume you can clone, fetch, or browse; there is no token and no read route. Do not claim a fetch succeeded. If the task needs external reads, relaunch with --scout.",
     },
     // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box runs
@@ -239,11 +240,11 @@ function knownDoors(env: Env = process.env): DoorCatalog {
     // door — not a NIC"). The daemon is the network twin of keeperd/beadsd.
     net: {
       flag: "--net",
-      inBox: "/run/netd.sock",
+      inBox: "/run/doors/netd.sock",
       env: "NETD_SOCK",
       hostDefault: env.NETD_SOCK ?? defaultHostSock("netd", env),
       grants: "policed network egress via the netd allowlist proxy",
-      use: "All egress goes through the netd door at /run/netd.sock ($NETD_SOCK); HTTPS_PROXY is set for you. You can reach ONLY hosts netd's allowlist permits — there is no other route off the box. A blocked host is final; do not retry or tunnel around it.",
+      use: "All egress goes through the netd door at /run/doors/netd.sock ($NETD_SOCK); HTTPS_PROXY is set for you. You can reach ONLY hosts netd's allowlist permits — there is no other route off the box. A blocked host is final; do not retry or tunnel around it.",
       deny: "No network. This box runs --network=none with no egress door — you cannot reach any host. Do not attempt network calls or claim they worked; relaunch with --net for policed egress (or --net-open for unrestricted, unsafe egress).",
     },
     // The launcher door — spawn sub-boxes without holding podman. The box asks
@@ -252,11 +253,11 @@ function knownDoors(env: Env = process.env): DoorCatalog {
     // escalation. See LAUNCHERD.md.
     launcher: {
       flag: "--launcher",
-      inBox: "/run/launcherd.sock",
+      inBox: "/run/doors/launcherd.sock",
       env: "LAUNCHERD_SOCK",
       hostDefault: env.LAUNCHERD_SOCK ?? defaultHostSock("launcherd", env),
       grants: "spawn sub-boxes via launcherd (you hold no runtime)",
-      use: "Spawn sub-boxes by requesting through launcherd at /run/launcherd.sock ($LAUNCHERD_SOCK). You hold NO podman, NO runtime — request a spawn with a capability profile and launcherd performs it. Send JSON requests: {op:'spawn', profile:'work', doors:['keeper','net']}. The sub-box inherits doors you specify (if policy permits).",
+      use: "Spawn sub-boxes by requesting through launcherd at /run/doors/launcherd.sock ($LAUNCHERD_SOCK). You hold NO podman, NO runtime — request a spawn with a capability profile and launcherd performs it. Send JSON requests: {op:'spawn', profile:'work', doors:['keeper','net']}. The sub-box inherits doors you specify (if policy permits).",
       deny: "No spawn authority in this box. Do not attempt to launch containers or claim spawns succeeded — there is nothing in the box to spawn with. If the task needs sub-boxes, it must be RELAUNCHED with --launcher.",
     },
   };
@@ -735,14 +736,22 @@ async function run(
       );
     }
   }
-  // Forward each granted door (host socket → fixed in-box path) and export its
-  // env so the box finds it — never the daemon's keys. Fail closed if the host
-  // socket sits in a world-writable dir (hijack risk), for EVERY door.
-  for (const d of doors) {
-    const hostPath = unixPath(d.host);
-    const guestPath = unixPath(d.guest);
-    assertSocketDir(hostPath, d.name);
-    argv.push("-v", `${hostPath}:${guestPath}`, "--env", `${d.env}=${guestPath}`);
+  // Forward doors by mounting the socket directory (not individual files) to
+  // avoid virtiofs statfs issues with sockets shared across macOS↔VM boundary.
+  // All doors share ~/.claude-box/run → /run/doors; env vars point to sockets.
+  if (doors.length > 0) {
+    // Validate socket directory once (all doors share the same host dir)
+    const hostDir = getRunDir(env);
+    assertSocketDir(`${hostDir}/placeholder`, undefined); // check dir exists & is private
+    argv.push("-v", `${hostDir}:/run/doors`);
+    // Export env var for each granted door
+    for (const d of doors) {
+      const hostPath = unixPath(d.host);
+      const guestPath = unixPath(d.guest);
+      // Verify the socket exists (daemon running)
+      assertSocketExists(hostPath, d.name);
+      argv.push("--env", `${d.env}=${guestPath}`);
+    }
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
   argv.push("--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`);
@@ -1375,10 +1384,93 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
       console.log("\nRun 'claude-box --room dev --repo .' to launch with all doors.");
       return 0;
     }
+    case "serve": {
+      // Run all door daemons in foreground (orchestrated, for macOS host)
+      console.log("claude-box doors serve — starting daemons on host...\n");
+
+      const daemons: Array<{ name: string; script: string }> = [
+        { name: "keeperd", script: "keeperd.ts" },
+        { name: "netd", script: "netd/netd.ts" },
+        { name: "scoutd", script: "scoutd.ts" },
+      ];
+
+      // Find the repo root (where this script lives)
+      const scriptDir = dirname(Bun.main);
+
+      const children: Array<{ name: string; proc: ReturnType<typeof Bun.spawn> }> = [];
+
+      for (const d of daemons) {
+        const scriptPath = `${scriptDir}/${d.script}`;
+        const proc = Bun.spawn(["bun", scriptPath, "serve"], {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env },
+        });
+        children.push({ name: d.name, proc });
+
+        // Stream stdout with prefix
+        (async () => {
+          const reader = proc.stdout.getReader();
+          const decoder = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const lines = decoder.decode(value).split("\n");
+            for (const line of lines) {
+              if (line.trim()) console.log(`[${d.name}] ${line}`);
+            }
+          }
+        })();
+
+        // Stream stderr with prefix
+        (async () => {
+          const reader = proc.stderr.getReader();
+          const decoder = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const lines = decoder.decode(value).split("\n");
+            for (const line of lines) {
+              if (line.trim()) console.error(`[${d.name}] ${line}`);
+            }
+          }
+        })();
+
+        console.log(`  ${d.name}: started (pid ${proc.pid})`);
+      }
+
+      console.log("\nAll daemons running. Press Ctrl+C to stop.\n");
+
+      // Handle SIGINT to clean up
+      process.on("SIGINT", () => {
+        console.log("\nStopping daemons...");
+        for (const { name, proc } of children) {
+          proc.kill();
+          console.log(`  ${name}: stopped`);
+        }
+        process.exit(0);
+      });
+
+      // Wait for any child to exit (shouldn't happen normally)
+      await Promise.race(children.map(async ({ name, proc }) => {
+        const code = await proc.exited;
+        console.error(`[${name}] exited with code ${code}`);
+        return { name, code };
+      }));
+
+      // If one exits, kill the others and exit
+      console.error("A daemon exited unexpectedly. Stopping others...");
+      for (const { name, proc } of children) {
+        proc.kill();
+        console.log(`  ${name}: stopped`);
+      }
+      return 1;
+    }
     default:
       console.log(`claude-box doors — manage door services
 
 Usage:
+  claude-box doors serve             run all daemons in foreground (recommended for macOS)
   claude-box doors init              one-shot setup (build images, install units, start)
   claude-box doors ensure            start any stopped services (fast, no rebuild)
   claude-box doors status [svc...]   show status of door services
@@ -1390,8 +1482,8 @@ Usage:
 Services: ${DOOR_SERVICES.join(", ")}
 
 Examples:
-  claude-box doors init              first-time setup (run once)
-  claude-box doors ensure            quick restart after reboot
+  claude-box doors serve             run daemons in foreground (Ctrl+C to stop)
+  claude-box doors init              first-time setup (containerized, for Linux)
   claude-box doors status            status of all doors
   claude-box doors start keeperd     start just keeperd
   claude-box doors logs netd         follow netd logs`);

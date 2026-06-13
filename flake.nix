@@ -482,6 +482,43 @@
               in pkgs.writeShellScriptBin "scoutd" ''
                 exec ${pkgs.bun}/bin/bun ${./.}/scoutd.ts "$@"
               '';
+
+            # doors-serve — run all door daemons in foreground (orchestrated)
+            # For macOS development: one command starts keeperd, netd, scoutd
+            #   nix run .#doors-serve
+            doors-serve =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "doors-serve" ''
+                set -e
+                echo "doors-serve: starting daemons..."
+
+                cleanup() {
+                  echo ""
+                  echo "Stopping daemons..."
+                  kill $KEEPERD_PID $NETD_PID $SCOUTD_PID 2>/dev/null || true
+                  wait
+                  echo "Done."
+                }
+                trap cleanup EXIT INT TERM
+
+                ${self.packages.aarch64-darwin.keeperd}/bin/keeperd serve &
+                KEEPERD_PID=$!
+                echo "  keeperd: started (pid $KEEPERD_PID)"
+
+                ${self.packages.aarch64-darwin.netd}/bin/netd serve &
+                NETD_PID=$!
+                echo "  netd: started (pid $NETD_PID)"
+
+                ${self.packages.aarch64-darwin.scoutd}/bin/scoutd serve &
+                SCOUTD_PID=$!
+                echo "  scoutd: started (pid $SCOUTD_PID)"
+
+                echo ""
+                echo "All daemons running. Press Ctrl+C to stop."
+                echo ""
+
+                wait
+              '';
           };
         };
 

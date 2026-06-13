@@ -160,6 +160,10 @@
                 # Personal account's auth/settings/history live here, on the
                 # mounted volume — the isolation boundary, separate from work.
                 "CLAUDE_CONFIG_DIR=${configDir}"
+                # Disable telemetry — the box has no route to statsig.anthropic.com
+                # and the failed connection attempts are just noise.
+                "DISABLE_AUTOUPDATER=1"
+                "DISABLE_ERROR_REPORTING=1"
               ];
               # Declares the config dir as a mount point; the run wrapper
               # (prx-6xx) binds a named volume here so /login persists.

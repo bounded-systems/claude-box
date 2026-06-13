@@ -39,7 +39,10 @@ function defaultSocketPath(): string {
   const runtime = process.env.XDG_RUNTIME_DIR;
   if (runtime) return `${runtime}/scoutd.sock`;
   const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/scoutd.sock`;
+  // Auto-create ~/.claude-box/run on macOS (no XDG_RUNTIME_DIR)
+  const runDir = `${home}/.claude-box/run`;
+  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); } catch {}
+  return `${runDir}/scoutd.sock`;
 }
 
 function defaultTokenPath(): string {

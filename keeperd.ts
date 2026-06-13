@@ -32,7 +32,10 @@ function defaultSocketPath(): string {
   const runtime = process.env.XDG_RUNTIME_DIR;
   if (runtime) return `${runtime}/keeperd.sock`;
   const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/keeperd.sock`;
+  // Auto-create ~/.claude-box/run on macOS (no XDG_RUNTIME_DIR)
+  const runDir = `${home}/.claude-box/run`;
+  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); } catch {}
+  return `${runDir}/keeperd.sock`;
 }
 
 function defaultKeyPath(): string {

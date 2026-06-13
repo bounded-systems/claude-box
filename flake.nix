@@ -512,5 +512,36 @@
           # mainProgram is `create-builder` (not `linux-builder`); getExe tracks it.
           program = nixpkgs.lib.getExe pkgs.darwin.linux-builder;
         };
+
+      # ── Checks (nix flake check) ────────────────────────────────────────────────
+      # Validates the flake: type checking + tests. Run with:
+      #   nix flake check
+      checks.aarch64-darwin =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in {
+          # TypeScript type checking (bunx tsc --noEmit)
+          typecheck = pkgs.runCommand "typecheck" {
+            nativeBuildInputs = [ pkgs.bun ];
+            src = ./.;
+          } ''
+            cd $src
+            bun x tsc --noEmit
+            touch $out
+          '';
+
+          # Unit tests (bun test)
+          test = pkgs.runCommand "test" {
+            nativeBuildInputs = [ pkgs.bun pkgs.git ];
+            src = ./.;
+          } ''
+            cd $src
+            # Git needs a minimal config for tests that use git
+            export HOME=$(mktemp -d)
+            git config --global user.email "test@test.com"
+            git config --global user.name "Test"
+            bun test
+            touch $out
+          '';
+        };
     };
 }

@@ -8,12 +8,13 @@
  * bytes — end-to-end TLS is preserved), FAILS CLOSED (anything not allowed →
  * 403), and AUDITS every decision. Contract: ../NETD.md.
  *
- *   nix run .#netd                     # listen on $NETD_SOCK or ~/.claude-box/run/netd.sock
- *   nix run .#netd -- --port 3128      # listen on TCP 127.0.0.1:3128 (host/pod)
- *   NETD_ALLOW="api.anthropic.com,.anthropic.com" nix run .#netd
+ *   nix run .#netd -- serve                     # listen on default socket
+ *   nix run .#netd -- serve --socket /path.sock # custom socket path
+ *   nix run .#netd -- serve --port 3128         # listen on TCP (for testing)
+ *   NETD_ALLOW="api.anthropic.com,.anthropic.com" nix run .#netd -- serve
  *
  * Verify on a host (no container/VM needed):
- *   nix run .#netd -- --port 3128 &
+ *   nix run .#netd -- serve --port 3128 &
  *   curl -x http://127.0.0.1:3128 https://api.anthropic.com   # allowed (tunnels)
  *   curl -x http://127.0.0.1:3128 https://example.com         # 403 (refused)
  *
@@ -134,21 +135,63 @@ const handlers = {
 };
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
-let unix = process.env.NETD_SOCK || defaultSocketPath();
-let port: number | undefined;
-const argv = Bun.argv.slice(2);
-for (let i = 0; i < argv.length; i++) {
-  if (argv[i] === "--port") port = Number(argv[++i]);
-  else if (argv[i] === "--unix") unix = argv[++i]!;
+// Aligned with keeperd/scoutd: `netd serve --socket PATH` (--unix kept as alias).
+const args = Bun.argv.slice(2);
+const cmd = args[0];
+
+function showUsage(): void {
+  console.log(`netd — allowlist egress proxy for the claude-box --net door
+
+Usage:
+  netd serve                     start daemon (foreground, unix socket)
+  netd serve --port PORT         listen on TCP (for host→VM relay)
+  netd serve --socket PATH       custom socket path (--unix is alias)
+  netd help                      show this help
+
+Environment:
+  NETD_SOCK      default unix socket path (fallback: ~/.claude-box/run/netd.sock)
+  NETD_ALLOW     comma-separated allowlist (default: api.anthropic.com,.anthropic.com)
+`);
 }
 
-if (port) {
-  listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
-  log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")} (fail-closed)`);
+if (cmd === "serve") {
+  let socketPath = defaultSocketPath();
+  let port: number | undefined;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--socket" || args[i] === "-s" || args[i] === "--unix") {
+      socketPath = args[++i]!;
+    } else if (args[i] === "--port") {
+      port = Number(args[++i]);
+    }
+  }
+  if (port) {
+    listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
+    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")} (fail-closed)`);
+  } else {
+    try { unlinkSync(socketPath); } catch {}
+    listen<Cx>({ unix: socketPath, socket: handlers });
+    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")} (fail-closed)`);
+  }
+} else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
+  showUsage();
+} else if (cmd === undefined) {
+  // Backward compat: no subcommand → serve with legacy flag parsing
+  let socketPath = defaultSocketPath();
+  let port: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port") port = Number(args[++i]);
+    else if (args[i] === "--unix" || args[i] === "--socket" || args[i] === "-s") socketPath = args[++i]!;
+  }
+  if (port) {
+    listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
+    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")} (fail-closed)`);
+  } else {
+    try { unlinkSync(socketPath); } catch {}
+    listen<Cx>({ unix: socketPath, socket: handlers });
+    log("INFO", `listening unix ${socketPath} allow=${ALLOW.join(",")} (fail-closed)`);
+  }
 } else {
-  try {
-    unlinkSync(unix);
-  } catch {}
-  listen<Cx>({ unix, socket: handlers });
-  log("INFO", `listening unix ${unix} allow=${ALLOW.join(",")} (fail-closed)`);
+  console.error(`netd: unknown command "${cmd}"`);
+  showUsage();
+  process.exit(1);
 }

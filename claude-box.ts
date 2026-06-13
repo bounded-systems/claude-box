@@ -47,7 +47,14 @@ function getRunDir(env: Env): string {
     return env.XDG_RUNTIME_DIR;
   }
   // macOS/fallback: use ~/.claude-box/run (create with safe perms if needed)
-  const home = env.HOME ?? "/tmp";
+  const home = env.HOME;
+  if (!home) {
+    console.error(
+      "claude-box: HOME environment variable not set and XDG_RUNTIME_DIR unavailable.\n" +
+      "  Set HOME or XDG_RUNTIME_DIR to a private directory for door sockets.",
+    );
+    process.exit(2);
+  }
   const fallback = `${home}/.claude-box/run`;
   if (!existsSync(fallback)) {
     mkdirSync(fallback, { recursive: true, mode: 0o700 });
@@ -60,10 +67,19 @@ function defaultHostSock(daemon: string, env: Env): string {
   return `${getRunDir(env)}/${daemon}.sock`;
 }
 
+/** Daemon start hints for each door (shown when socket missing). */
+const DAEMON_HINTS: Record<string, string> = {
+  keeper: "nix run .#keeperd -- serve",
+  net: "nix run .#netd -- serve",
+  scout: "nix run .#scoutd -- serve",
+  launcher: "nix run .#launcherd -- serve",
+};
+
 /** A door socket's dir must not be world-writable, or another host user can
  *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
- *  for EVERY door — so the /tmp default is refused unless a private path is set. */
-function assertSocketDir(sock: string): void {
+ *  for EVERY door — so the /tmp default is refused unless a private path is set.
+ *  Also checks the socket itself exists and gives a helpful start hint. */
+function assertSocketDir(sock: string, doorName?: string): void {
   const dir = dirname(sock);
   let mode: number;
   try {
@@ -75,6 +91,17 @@ function assertSocketDir(sock: string): void {
   if (mode & 0o002) {
     console.error(
       `claude-box: refusing door socket in world-writable ${dir} (hijack risk) — set a private path (e.g. under $XDG_RUNTIME_DIR)`,
+    );
+    process.exit(2);
+  }
+  // Check if the socket itself exists — give a helpful hint if not
+  try {
+    statSync(sock);
+  } catch {
+    const hint = doorName && DAEMON_HINTS[doorName];
+    const startCmd = hint ? `\n  Start it with: ${hint}` : "";
+    console.error(
+      `claude-box: door socket ${sock} does not exist (daemon not running?)${startCmd}`,
     );
     process.exit(2);
   }
@@ -261,6 +288,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label
+  claude-box doors init       one-shot setup: build images, install units, start services
   claude-box doors status     show door service status (keeperd, netd, scoutd)
   claude-box doors start      start all door services
   claude-box doors logs <svc> follow logs for a door service
@@ -662,7 +690,7 @@ async function run(
   // env so the box finds it — never the daemon's keys. Fail closed if the host
   // socket sits in a world-writable dir (hijack risk), for EVERY door.
   for (const d of doors) {
-    assertSocketDir(d.host);
+    assertSocketDir(d.host, d.name);
     argv.push("-v", `${d.host}:${d.inBox}`, "--env", `${d.env}=${d.inBox}`);
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
@@ -1040,6 +1068,42 @@ async function hasPodmanMachine(): Promise<boolean> {
   return stdout.trim().length > 0;
 }
 
+/** Get the quadlet directory (relative to this script). */
+function getQuadletDir(): string {
+  return `${import.meta.dir}/quadlet`;
+}
+
+/** Build and load a daemon image. */
+async function buildAndLoadImage(
+  name: string,
+): Promise<{ ok: boolean; error?: string }> {
+  console.log(`  building ${name}-image...`);
+  const build = Bun.spawn(["nix", "build", `.#${name}-image`, "--no-link", "--print-out-paths"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const buildOut = await new Response(build.stdout).text();
+  const buildErr = await new Response(build.stderr).text();
+  if ((await build.exited) !== 0) {
+    return { ok: false, error: `nix build failed: ${buildErr}` };
+  }
+  const imagePath = buildOut.trim();
+  if (!imagePath) {
+    return { ok: false, error: "nix build produced no output" };
+  }
+
+  console.log(`  loading ${name}-image...`);
+  const load = Bun.spawn(["podman", "load", "-i", imagePath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const loadErr = await new Response(load.stderr).text();
+  if ((await load.exited) !== 0) {
+    return { ok: false, error: `podman load failed: ${loadErr}` };
+  }
+  return { ok: true };
+}
+
 async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
   const useMachine = await hasPodmanMachine();
 
@@ -1149,10 +1213,118 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
         return proc.exited;
       }
     }
+    case "ensure": {
+      // Start any door services that aren't running (doesn't rebuild/reinstall)
+      console.log("Ensuring door services are running...\n");
+      let allOk = true;
+      for (const svc of DOOR_SERVICES) {
+        const check = await runSystemctl(["is-active", svc]);
+        if (check.ok) {
+          console.log(`  ${svc.padEnd(10)} already active`);
+        } else {
+          const start = await runSystemctl(["start", svc]);
+          if (start.ok) {
+            console.log(`  ${svc.padEnd(10)} started`);
+          } else {
+            console.error(`  ${svc.padEnd(10)} failed: ${start.stderr}`);
+            allOk = false;
+          }
+        }
+      }
+      if (!allOk) {
+        console.log("\nSome services failed. Try 'claude-box doors init' to reinstall.");
+      }
+      return allOk ? 0 : 1;
+    }
+    case "init": {
+      // One-shot setup: build images, install quadlet units, start services
+      const quadletDir = getQuadletDir();
+      const mode = useMachine ? "podman-machine" : "native";
+      console.log(`Initializing door services (${mode})...\n`);
+
+      // 1. Build and load images
+      console.log("Step 1: Building and loading images...");
+      for (const svc of DOOR_SERVICES) {
+        const result = await buildAndLoadImage(svc);
+        if (!result.ok) {
+          console.error(`  ${svc}: ${result.error}`);
+          return 1;
+        }
+        console.log(`  ${svc}: loaded`);
+      }
+
+      // 2. Install quadlet units
+      console.log("\nStep 2: Installing quadlet units...");
+      const unitFiles = [
+        "claude-doors.volume",
+        "claude-keys.volume",
+        "keeperd.container",
+        "netd.container",
+        "scoutd.container",
+      ];
+      if (useMachine) {
+        // Create systemd directory in VM
+        await podmanMachineExec([
+          "mkdir",
+          "-p",
+          "/var/home/core/.config/containers/systemd",
+        ]);
+        // Copy each unit file using stdin piping
+        for (const file of unitFiles) {
+          const content = await Bun.file(`${quadletDir}/${file}`).text();
+          const dest = `/var/home/core/.config/containers/systemd/${file}`;
+          const proc = Bun.spawn(
+            ["podman", "machine", "ssh", "--", "sh", "-c", `cat > '${dest}'`],
+            { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+          );
+          proc.stdin.write(content);
+          proc.stdin.end();
+          await proc.exited;
+          console.log(`  ${file}`);
+        }
+        // Reload systemd
+        await podmanMachineExec(["systemctl", "--user", "daemon-reload"]);
+      } else {
+        // Native Linux: copy to ~/.config/containers/systemd/
+        const home = process.env.HOME ?? "/tmp";
+        const systemdDir = `${home}/.config/containers/systemd`;
+        await Bun.spawn(["mkdir", "-p", systemdDir]).exited;
+        for (const file of unitFiles) {
+          await Bun.spawn(["cp", `${quadletDir}/${file}`, systemdDir]).exited;
+          console.log(`  ${file}`);
+        }
+        // Reload systemd
+        await Bun.spawn(["systemctl", "--user", "daemon-reload"]).exited;
+      }
+      console.log("  daemon-reload done");
+
+      // 3. Start services
+      console.log("\nStep 3: Starting services...");
+      for (const svc of DOOR_SERVICES) {
+        const result = await runSystemctl(["start", svc]);
+        if (result.ok) {
+          console.log(`  ${svc}: started`);
+        } else {
+          console.error(`  ${svc}: failed - ${result.stderr}`);
+        }
+      }
+
+      // 4. Show status
+      console.log("\nDone! Status:");
+      for (const svc of DOOR_SERVICES) {
+        const result = await runSystemctl(["is-active", svc]);
+        const status = result.ok ? "active" : result.stdout || "inactive";
+        console.log(`  ${svc.padEnd(10)} ${status}`);
+      }
+      console.log("\nRun 'claude-box --room dev --repo .' to launch with all doors.");
+      return 0;
+    }
     default:
       console.log(`claude-box doors — manage door services
 
 Usage:
+  claude-box doors init              one-shot setup (build images, install units, start)
+  claude-box doors ensure            start any stopped services (fast, no rebuild)
   claude-box doors status [svc...]   show status of door services
   claude-box doors start [svc...]    start door services
   claude-box doors stop [svc...]     stop door services
@@ -1162,6 +1334,8 @@ Usage:
 Services: ${DOOR_SERVICES.join(", ")}
 
 Examples:
+  claude-box doors init              first-time setup (run once)
+  claude-box doors ensure            quick restart after reboot
   claude-box doors status            status of all doors
   claude-box doors start keeperd     start just keeperd
   claude-box doors logs netd         follow netd logs`);

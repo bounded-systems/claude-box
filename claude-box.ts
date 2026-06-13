@@ -20,6 +20,22 @@
 
 import { statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+// The guest-agnostic room+door engine. claude-box is its first consumer: it
+// supplies the door catalog (knownDoors) and room bundles (knownRooms); the
+// engine resolves grants, derives the honest granted/denied surface, and renders
+// the rulebook. See guest-room/README.md.
+import {
+  type DoorGrant,
+  type DoorCatalog,
+  type RoomCatalog,
+  defaultHostSock,
+  resolveDoor as resolveDoorIn,
+  expandRoom,
+  deniedDoors,
+  capabilityPreamble,
+  grantedDoorLines,
+  deniedDoorSection,
+} from "./guest-room/mod.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
@@ -37,12 +53,6 @@ function assertAccount(account: string): void {
     console.error(`claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`);
     process.exit(2);
   }
-}
-
-/** Default host socket for a daemon, private-dir-first. Pure (no I/O) so door
- *  resolution stays testable; run() enforces the fail-closed check below. */
-function defaultHostSock(daemon: string, env: Env): string {
-  return `${env.XDG_RUNTIME_DIR ?? "/tmp"}/${daemon}.sock`;
 }
 
 /** A door socket's dir must not be world-writable, or another host user can
@@ -74,21 +84,11 @@ function assertSocketDir(sock: string): void {
 // env, manifest, help and docs cannot drift (the drift that let `--keeper` be
 // "documented but unimplemented" is now structurally impossible).
 
-/** A door the box knows by name: canonical in-box path, env, and rulebook. */
-type DoorPreset = {
-  flag: string; // the launcher sugar flag (e.g. "--keeper")
-  inBox: string; // where the box looks for the socket
-  env: string; // env var pointing the box at the in-box socket
-  hostDefault: string; // host socket path (overridable so the same launch works across transports)
-  grants: string; // one-line capability, for the manifest
-  use: string; // rulebook when GRANTED — how the man translates this symbol
-  deny: string; // rulebook when DENIED — there is no rule; do not attempt
-};
-
-/** The known doors. Host socket paths are overridable via env so the identical
- *  launch works whether the door is a direct socket or one relayed across the
- *  two-VM gap (see CAPABILITIES.md). */
-function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
+/** claude-box's door catalog. Host socket paths are overridable via env so the
+ *  identical launch works whether the door is a direct socket or one relayed
+ *  across the two-VM gap (see CAPABILITIES.md). The DoorPreset shape lives in
+ *  guest-room; this is the claude-box-specific *content* fed to the engine. */
+function knownDoors(env: Env = process.env): DoorCatalog {
   return {
     keeper: {
       flag: "--keeper",
@@ -158,9 +158,7 @@ function knownDoors(env: Env = process.env): Record<string, DoorPreset> {
 // still falls out of the granted doors, so a room cannot drift from what it
 // grants. Doors only — `--repo <path>` stays explicit (it needs a path), and
 // flags after `--room` compose (add/override) over the bundle. See ROOM.md.
-type RoomPreset = { doors: string[]; about: string };
-
-function knownRooms(): Record<string, RoomPreset> {
+function knownRooms(): RoomCatalog {
   return {
     // Read-only research: reads via scout, no write key, no NIC of its own.
     read: { doors: ["scout"], about: "external reads only (scout) — no writes, no egress NIC" },
@@ -170,39 +168,11 @@ function knownRooms(): Record<string, RoomPreset> {
   };
 }
 
-/** A door actually granted to this launch (preset or generic). */
-type DoorGrant = {
-  name: string;
-  inBox: string;
-  env: string;
-  host: string;
-  grants: string;
-  use: string;
-};
-
-const DOOR_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-
-/** Resolve a door by name to a concrete grant. Known names get their canonical
- *  path + rulebook; any other name becomes a generic service door at
- *  /run/<name>.sock. An explicit host socket overrides the default. */
+/** Resolve a door against claude-box's catalog. Thin product binding over the
+ *  engine's resolveDoor (guest-room/mod.ts): known names get their canonical
+ *  path + rulebook; any other name becomes a generic service door. */
 function resolveDoor(name: string, host: string | undefined, env: Env = process.env): DoorGrant {
-  if (!DOOR_NAME_RE.test(name)) {
-    throw new Error(`invalid door name "${name}" (expected [a-z0-9][a-z0-9-]*)`);
-  }
-  const known = knownDoors(env)[name];
-  if (known) {
-    return { name, inBox: known.inBox, env: known.env, host: host ?? known.hostDefault, grants: known.grants, use: known.use };
-  }
-  const ENV = `${name.toUpperCase().replace(/-/g, "_")}_SOCK`;
-  const inBox = `/run/${name}.sock`;
-  return {
-    name,
-    inBox,
-    env: ENV,
-    host: host ?? env[ENV] ?? defaultHostSock(name, env),
-    grants: `service door "${name}"`,
-    use: `Reach the ${name} service at ${inBox} ($${ENV}). You hold the door, not the service's keys.`,
-  };
+  return resolveDoorIn(knownDoors(env), name, host, env);
 }
 
 const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude, one account per volume
@@ -308,7 +278,6 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoRw = false;
   let repoEphemeral = false;
   let netOpen = false;
-  let room: string | undefined;
   const doors = new Map<string, DoorGrant>();
   const claudeArgs: string[] = [];
   const add = (d: DoorGrant) => doors.set(d.name, d);
@@ -361,13 +330,10 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--room") {
       const name = tail[++i] ?? "";
-      const room = knownRooms()[name];
-      if (!room) {
-        throw new Error(`unknown room "${name}" (known: ${Object.keys(knownRooms()).join(", ")})`);
-      }
       // Expand to the bundle's doors; later flags compose over them (the Map
-      // dedupes by name, so `--room dev --door dolt=…` just adds dolt).
-      for (const d of room.doors) add(resolveDoor(d, undefined, env));
+      // dedupes by name, so `--room dev --door dolt=…` just adds dolt). Unknown
+      // room ⇒ throw (fail closed, not a silent empty launch).
+      for (const d of expandRoom(knownRooms(), knownDoors(env), name, env)) add(d);
       continue;
     }
     if (t === "--door") {
@@ -399,9 +365,10 @@ type Manifest = {
  *  manifest must not claim there's no network when there is. */
 function buildManifest(account: string, launch: Launch, env: Env = process.env): Manifest {
   const granted = new Set(launch.doors.map((d) => d.name));
-  const denied = Object.entries(knownDoors(env))
-    .filter(([name]) => !granted.has(name) && !(name === "net" && launch.netOpen))
-    .map(([name, p]) => ({ name, flag: p.flag, deny: p.deny }));
+  // --net-open opens ambient egress WITHOUT the net door, so suppress the "net"
+  // denial — the manifest must not claim there's no network when there is.
+  const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
+  const denied = deniedDoors(knownDoors(env), granted, suppress);
   return { account, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
@@ -433,8 +400,7 @@ function capabilityJson(m: Manifest): string {
  *  room hands the man a rulebook keyed to exactly the doors present. */
 function capabilityPrompt(m: Manifest): string {
   const lines: string[] = [
-    "[claude-box — capability surface for THIS launch]",
-    "You are running inside claude-box, a credential-free OCAP workcell. Your authority is EXACTLY the capabilities listed below — nothing is ambient. This list is generated from the actual mounts of this launch, so it is ground truth: if something is not GRANTED, you do not have it — do not attempt it and do not claim it succeeded.",
+    ...capabilityPreamble("claude-box"),
     "",
     "GRANTED:",
     "- config: your own account's auth/history (a private volume).",
@@ -448,21 +414,14 @@ function capabilityPrompt(m: Manifest): string {
       lines.push(`- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`);
     }
   }
-  for (const d of m.doors) {
-    lines.push(`- ${d.name}: ${d.grants}. ${d.use}`);
-  }
+  // The room hands the guest a card per granted door (engine-rendered).
+  lines.push(...grantedDoorLines(m.doors));
   if (m.netOpen) {
     lines.push("- network: UNRESTRICTED ambient egress (--net-open) — NO allowlist. Unsafe escape hatch; anything you send can reach any host.");
   }
   lines.push("");
-  if (m.denied.length) {
-    lines.push("DENIED (the capability is physically absent from this box — do not attempt):");
-    for (const d of m.denied) {
-      lines.push(`- ${d.name}: ${d.deny}`);
-    }
-  } else {
-    lines.push("DENIED: nothing named — but authority is still ONLY what is GRANTED above.");
-  }
+  // And a card per denied door (a symbol with no rule).
+  lines.push(...deniedDoorSection(m.denied));
   return lines.join("\n");
 }
 

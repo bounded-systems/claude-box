@@ -16,21 +16,22 @@ import {
   capabilityPrompt,
 } from "../claude-box.ts";
 
-const EMPTY = {} as Record<string, string | undefined>;
+// Test env with a fake HOME (required for socket path resolution)
+const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
 
 // ── one generic primitive, named presets over it ──
 test("preset door: --keeper resolves to the canonical keeperd door", () => {
   const d = resolveDoor("keeper", undefined, EMPTY);
   expect(d.inBox).toBe("/run/keeperd.sock");
   expect(d.env).toBe("KEEPERD_SOCK");
-  expect(d.host).toBe("/tmp/keeperd.sock");
+  expect(d.host).toBe("/tmp/.claude-box/run/keeperd.sock");
 });
 
 test("preset door: --scout resolves to the canonical scoutd read door", () => {
   const d = resolveDoor("scout", undefined, EMPTY);
   expect(d.inBox).toBe("/run/scoutd.sock");
   expect(d.env).toBe("SCOUTD_SOCK");
-  expect(d.host).toBe("/tmp/scoutd.sock");
+  expect(d.host).toBe("/tmp/.claude-box/run/scoutd.sock");
 });
 
 test("--scout grants the scout read door (content, not credential)", () => {
@@ -41,7 +42,7 @@ test("--scout grants the scout read door (content, not credential)", () => {
 });
 
 test("preset host socket is overridable via env (same launch, any transport)", () => {
-  const d = resolveDoor("keeper", undefined, { KEEPERD_SOCK: "/relay/k.sock" });
+  const d = resolveDoor("keeper", undefined, { HOME: "/tmp", KEEPERD_SOCK: "/relay/k.sock" });
   expect(d.host).toBe("/relay/k.sock");
   expect(d.inBox).toBe("/run/keeperd.sock"); // the box's contract is fixed
 });
@@ -50,6 +51,7 @@ test("generic door: any service attaches by socket, deriving path + env", () => 
   const d = resolveDoor("dolt", undefined, EMPTY);
   expect(d.inBox).toBe("/run/dolt.sock");
   expect(d.env).toBe("DOLT_SOCK");
+  // Generic doors use library's defaultHostSock which falls back to /tmp
   expect(d.host).toBe("/tmp/dolt.sock");
 });
 
@@ -133,7 +135,7 @@ test("preset door: --net resolves to the canonical netd door", () => {
   const d = resolveDoor("net", undefined, EMPTY);
   expect(d.inBox).toBe("/run/netd.sock");
   expect(d.env).toBe("NETD_SOCK");
-  expect(d.host).toBe("/tmp/netd.sock"); // default; run() fails closed on world-writable dirs
+  expect(d.host).toBe("/tmp/.claude-box/run/netd.sock"); // default; run() fails closed on world-writable dirs
 });
 
 test("--net grants the net door; default posture is no network", () => {
@@ -175,7 +177,7 @@ test("preset door: --launcher resolves to the canonical launcherd door", () => {
   const d = resolveDoor("launcher", undefined, EMPTY);
   expect(d.inBox).toBe("/run/launcherd.sock");
   expect(d.env).toBe("LAUNCHERD_SOCK");
-  expect(d.host).toBe("/tmp/launcherd.sock");
+  expect(d.host).toBe("/tmp/.claude-box/run/launcherd.sock");
 });
 
 test("--launcher grants spawn authority and is reflected in manifest", () => {

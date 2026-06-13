@@ -5,6 +5,24 @@ content-addressed OCI container, one account per volume, built reproducibly by
 nix. Each account's auth/history/projects live in their own podman volume; the
 container itself is credential-free (see [CAPABILITIES.md](./CAPABILITIES.md)).
 
+## Quick Start
+
+**Prerequisites:** [nix](https://nixos.org/download) (with flakes), [podman](https://podman.io/docs/installation) + `podman machine` (macOS)
+
+```sh
+# 1. Build and load the Claude image
+nix build .#claude-image && podman load -i result
+
+# 2. Initialize door services (one-time setup)
+claude-box doors init
+
+# 3. Launch with full capabilities
+claude-box --room dev --repo .
+
+# Or quick start without doors (unsafe, but works immediately):
+claude-box --net-open --repo .
+```
+
 ## Use
 
 ```sh
@@ -70,9 +88,55 @@ podman load -i result              # → localhost/claude-personal:dev
 a target-arch executable that can't run on the darwin host; a tarball loads
 anywhere.
 
+## Development
+
+```sh
+# Run tests (no podman needed for unit tests)
+bun test
+
+# Type check
+bunx tsc --noEmit
+```
+
+### Starting the doors (daemons)
+
+The `--room dev` preset requires three daemons: keeperd (git signing), scoutd
+(external reads), and netd (egress allowlist).
+
+**One-shot setup** (builds images, installs systemd units, starts services):
+
+```sh
+claude-box doors init
+```
+
+This runs in podman-machine (macOS) or native systemd (Linux). After init:
+
+```sh
+claude-box doors status          # check service status
+claude-box --room dev --repo .   # launch with all doors
+```
+
+**Manual daemon startup** (alternative to quadlet):
+
+```sh
+nix run .#keeperd -- serve   # → ~/.claude-box/run/keeperd.sock
+nix run .#scoutd  -- serve   # → ~/.claude-box/run/scoutd.sock
+nix run .#netd    -- serve   # → ~/.claude-box/run/netd.sock
+```
+
+Each daemon auto-creates `~/.claude-box/run/` with safe permissions (0700).
+Override socket paths with `--socket PATH` or env vars (`KEEPERD_SOCK`, etc.).
+
+### Quick start (no daemons)
+
+For development without full door setup, use the unsafe escapes:
+
+```sh
+claude-box --net-open --repo .   # unrestricted egress, no daemon needed
+```
+
 ## Status
 
 Extracted from the prx `claude-runtime` work (ADR: [ADR.md](./ADR.md)). prx's
 **builder actor** is the intended producer/signer of the image; this repo is the
 self-contained source.
-# test

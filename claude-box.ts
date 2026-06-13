@@ -18,7 +18,7 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
 // supplies the door catalog (knownDoors) and room bundles (knownRooms); the
@@ -50,15 +50,51 @@ type Env = Record<string, string | undefined>;
  *  `/` could malform or redirect the mount. Keep them boring. */
 function assertAccount(account: string): void {
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
-    console.error(`claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`);
+    console.error(
+      `claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`,
+    );
     process.exit(2);
   }
 }
 
+/** Get the runtime directory for door sockets, auto-creating on macOS. */
+function getRunDir(env: Env): string {
+  if (env.XDG_RUNTIME_DIR) {
+    return env.XDG_RUNTIME_DIR;
+  }
+  // macOS/fallback: use ~/.claude-box/run (create with safe perms if needed)
+  const home = env.HOME;
+  if (!home) {
+    console.error(
+      "claude-box: HOME environment variable not set and XDG_RUNTIME_DIR unavailable.\n" +
+      "  Set HOME or XDG_RUNTIME_DIR to a private directory for door sockets.",
+    );
+    process.exit(2);
+  }
+  const fallback = `${home}/.claude-box/run`;
+  if (!existsSync(fallback)) {
+    mkdirSync(fallback, { recursive: true, mode: 0o700 });
+  }
+  return fallback;
+}
+
+/** Default host socket for a daemon, private-dir-first. */
+function defaultHostSock(daemon: string, env: Env): string {
+  return `${getRunDir(env)}/${daemon}.sock`;
+}
+
+/** Daemon start hints for each door (shown when socket missing). */
+const DAEMON_HINTS: Record<string, string> = {
+  keeper: "nix run .#keeperd -- serve",
+  net: "nix run .#netd -- serve",
+  scout: "nix run .#scoutd -- serve",
+  launcher: "nix run .#launcherd -- serve",
+};
 /** A door socket's dir must not be world-writable, or another host user can
  *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
- *  for EVERY door — so the /tmp default is refused unless a private path is set. */
-function assertSocketDir(sock: string): void {
+ *  for EVERY door — so the /tmp default is refused unless a private path is set.
+ *  Also checks the socket itself exists and gives a helpful start hint. */
+function assertSocketDir(sock: string, doorName?: string): void {
   const dir = dirname(sock);
   let mode: number;
   try {
@@ -68,7 +104,20 @@ function assertSocketDir(sock: string): void {
     process.exit(2);
   }
   if (mode & 0o002) {
-    console.error(`claude-box: refusing door socket in world-writable ${dir} (hijack risk) — set a private path (e.g. under $XDG_RUNTIME_DIR)`);
+    console.error(
+      `claude-box: refusing door socket in world-writable ${dir} (hijack risk) — set a private path (e.g. under $XDG_RUNTIME_DIR)`,
+    );
+    process.exit(2);
+  }
+  // Check if the socket itself exists — give a helpful hint if not
+  try {
+    statSync(sock);
+  } catch {
+    const hint = doorName && DAEMON_HINTS[doorName];
+    const startCmd = hint ? `\n  Start it with: ${hint}` : "";
+    console.error(
+      `claude-box: door socket ${sock} does not exist (daemon not running?)${startCmd}`,
+    );
     process.exit(2);
   }
 }
@@ -118,7 +167,8 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       inBox: "/run/scoutd.sock",
       env: "SCOUTD_SOCK",
       hostDefault: env.SCOUTD_SOCK ?? defaultHostSock("scoutd", env),
-      grants: "read external artifacts (repos/PRs/URLs) via scoutd (you hold no read tokens)",
+      grants:
+        "read external artifacts (repos/PRs/URLs) via scoutd (you hold no read tokens)",
       use: "Read external content through the scout door at /run/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
       deny: "No external reads in this box — do not assume you can clone, fetch, or browse; there is no token and no read route. Do not claim a fetch succeeded. If the task needs external reads, relaunch with --scout.",
     },
@@ -161,10 +211,17 @@ function knownDoors(env: Env = process.env): DoorCatalog {
 function knownRooms(): RoomCatalog {
   return {
     // Read-only research: reads via scout, no write key, no NIC of its own.
-    read: { doors: ["scout"], about: "external reads only (scout) — no writes, no egress NIC" },
+    read: {
+      doors: ["scout"],
+      about: "external reads only (scout) — no writes, no egress NIC",
+    },
     // The development room (e.g. claude-box working on claude-box): read + write
     // + policed egress. Pair with `--repo <path>` to mount a worktree.
-    dev: { doors: ["keeper", "net", "scout"], about: "keeper + net + scout — edit, commit (via keeper), read & policed egress" },
+    dev: {
+      doors: ["keeper", "net", "scout"],
+      about:
+        "keeper + net + scout — edit, commit (via keeper), read & policed egress",
+    },
   };
 }
 
@@ -193,6 +250,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label
+  claude-box doors init       one-shot setup: build images, install units, start services
   claude-box doors status     show door service status (keeperd, netd, scoutd)
   claude-box doors start      start all door services
   claude-box doors logs <svc> follow logs for a door service
@@ -233,7 +291,9 @@ async function volumeAccounts(): Promise<string[]> {
 
 async function listAccounts(): Promise<number> {
   const meta = await loadMeta();
-  const names = [...new Set([...(await volumeAccounts()), ...Object.keys(meta)])].sort();
+  const names = [
+    ...new Set([...(await volumeAccounts()), ...Object.keys(meta)]),
+  ].sort();
   for (const name of names) {
     const desc = meta[name]?.desc;
     console.log(desc ? `${name}  —  ${desc}` : name);
@@ -256,7 +316,14 @@ async function setName(account: string, desc: string): Promise<number> {
 /** The real git dir (a worktree's lives in a bare repo OUTSIDE the worktree). */
 async function gitCommonDir(repo: string): Promise<string | undefined> {
   const proc = Bun.spawn(
-    ["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    [
+      "git",
+      "-C",
+      repo,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ],
     { stdout: "pipe", stderr: "ignore" },
   );
   const out = (await new Response(proc.stdout).text()).trim();
@@ -266,7 +333,14 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 
 // ── Launch planning + the capability manifest ────────────────────────────────
 
-type Launch = { repo?: string; repoRw: boolean; repoEphemeral: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
+type Launch = {
+  repo?: string;
+  repoRw: boolean;
+  repoEphemeral: boolean;
+  doors: DoorGrant[];
+  netOpen: boolean;
+  claudeArgs: string[];
+};
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
  *  / --beads / --scout / --room / --door) and the claude passthrough args.
@@ -308,7 +382,8 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--net") {
       const next = tail[i + 1];
-      const host = next !== undefined && !next.startsWith("-") ? tail[++i] : undefined;
+      const host =
+        next !== undefined && !next.startsWith("-") ? tail[++i] : undefined;
       add(resolveDoor("net", host, env));
       continue;
     }
@@ -346,7 +421,14 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     claudeArgs.push(t);
   }
-  return { repo, repoRw, repoEphemeral, doors: [...doors.values()], netOpen, claudeArgs };
+  return {
+    repo,
+    repoRw,
+    repoEphemeral,
+    doors: [...doors.values()],
+    netOpen,
+    claudeArgs,
+  };
 }
 
 type Manifest = {
@@ -363,7 +445,11 @@ type Manifest = {
  *  from the actual grants, so it cannot drift from reality. `--net-open` opens
  *  ambient egress WITHOUT the net door, so it suppresses the "net" denial — the
  *  manifest must not claim there's no network when there is. */
-function buildManifest(account: string, launch: Launch, env: Env = process.env): Manifest {
+function buildManifest(
+  account: string,
+  launch: Launch,
+  env: Env = process.env,
+): Manifest {
   const granted = new Set(launch.doors.map((d) => d.name));
   // --net-open opens ambient egress WITHOUT the net door, so suppress the "net"
   // denial — the manifest must not claim there's no network when there is.
@@ -390,7 +476,12 @@ function capabilityJson(m: Manifest): string {
       repoGit: m.repo ? (m.repoRw ? "rw" : "ro") : null,
       // Ephemeral worktree: parallel-safe, edits are isolated per-box.
       repoEphemeral: m.repoEphemeral,
-      doors: m.doors.map((d) => ({ name: d.name, socket: d.inBox, env: d.env, grants: d.grants })),
+      doors: m.doors.map((d) => ({
+        name: d.name,
+        socket: d.inBox,
+        env: d.env,
+        grants: d.grants,
+      })),
     },
     denied: m.denied.map((d) => ({ name: d.name, flag: d.flag })),
   });
@@ -407,17 +498,25 @@ function capabilityPrompt(m: Manifest): string {
   ];
   if (m.repo) {
     if (m.repoRw) {
-      lines.push(`- repo: ${m.repo} at /work — worktree AND .git WRITABLE (--repo-rw, unsafe). Only this worktree on the host is writable.`);
+      lines.push(
+        `- repo: ${m.repo} at /work — worktree AND .git WRITABLE (--repo-rw, unsafe). Only this worktree on the host is writable.`,
+      );
     } else if (m.repoEphemeral) {
-      lines.push(`- repo: ${m.repo} at /work — EPHEMERAL worktree (--repo-ephemeral). This is an isolated copy; your edits are local to this box and do not affect the original or other boxes. .git is READ-ONLY. Route commits through the keeper door.`);
+      lines.push(
+        `- repo: ${m.repo} at /work — EPHEMERAL worktree (--repo-ephemeral). This is an isolated copy; your edits are local to this box and do not affect the original or other boxes. .git is READ-ONLY. Route commits through the keeper door.`,
+      );
     } else {
-      lines.push(`- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`);
+      lines.push(
+        `- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`,
+      );
     }
   }
   // The room hands the guest a card per granted door (engine-rendered).
   lines.push(...grantedDoorLines(m.doors));
   if (m.netOpen) {
-    lines.push("- network: UNRESTRICTED ambient egress (--net-open) — NO allowlist. Unsafe escape hatch; anything you send can reach any host.");
+    lines.push(
+      "- network: UNRESTRICTED ambient egress (--net-open) — NO allowlist. Unsafe escape hatch; anything you send can reach any host.",
+    );
   }
   lines.push("");
   // And a card per denied door (a symbol with no rule).
@@ -458,7 +557,10 @@ async function createEphemeralWorktree(repo: string): Promise<string> {
 }
 
 /** Remove an ephemeral git worktree. */
-async function removeEphemeralWorktree(repo: string, worktreePath: string): Promise<void> {
+async function removeEphemeralWorktree(
+  repo: string,
+  worktreePath: string,
+): Promise<void> {
   const proc = Bun.spawn(
     ["git", "-C", repo, "worktree", "remove", "--force", worktreePath],
     { stdout: "pipe", stderr: "pipe" },
@@ -467,19 +569,30 @@ async function removeEphemeralWorktree(repo: string, worktreePath: string): Prom
   // Ignore errors — best effort cleanup
 }
 
-async function run(account: string, launch: Launch, env: Env = process.env): Promise<number> {
+async function run(
+  account: string,
+  launch: Launch,
+  env: Env = process.env,
+): Promise<number> {
   assertAccount(account);
   const { repo, repoRw, repoEphemeral, doors, netOpen, claudeArgs } = launch;
   const manifest = buildManifest(account, launch, env);
   const argv = [
-    "podman", "run", "-it", "--rm",
+    "podman",
+    "run",
+    "-it",
+    "--rm",
     // Defense-in-depth floor (not a grant): the box needs no Linux caps and
     // never escalates, so cap a runaway/forky agent from fork-bombing or
     // privilege-escalating the host.
-    "--security-opt", "no-new-privileges",
-    "--cap-drop", "all",
-    "--pids-limit", "2048",
-    "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
+    "--security-opt",
+    "no-new-privileges",
+    "--cap-drop",
+    "all",
+    "--pids-limit",
+    "2048",
+    "-v",
+    `claude-${account}-config:/home/claude/.config/claude:U`,
   ];
   // Network is a DOOR, not a NIC. Default to NO interface (nothing to exfiltrate
   // through, even with a repo mounted); the netd door (below) is the only
@@ -487,7 +600,9 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   // escape — used only when no netd is running.
   const netDoor = doors.find((d) => d.name === "net");
   if (netOpen) {
-    console.error("claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)");
+    console.error(
+      "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
+    );
   } else {
     argv.push("--network=none");
     if (netDoor) {
@@ -495,8 +610,14 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
       // egress client at it. The box holds no egress of its own — it can only
       // ASK netd, which owns the allowlist.
       argv.push(
-        "--env", `HTTPS_PROXY=${NETD_PROXY}`, "--env", `HTTP_PROXY=${NETD_PROXY}`,
-        "--env", `ALL_PROXY=${NETD_PROXY}`, "--env", "NO_PROXY=localhost,127.0.0.1",
+        "--env",
+        `HTTPS_PROXY=${NETD_PROXY}`,
+        "--env",
+        `HTTP_PROXY=${NETD_PROXY}`,
+        "--env",
+        `ALL_PROXY=${NETD_PROXY}`,
+        "--env",
+        "NO_PROXY=localhost,127.0.0.1",
       );
     }
   }
@@ -504,7 +625,7 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   // env so the box finds it — never the daemon's keys. Fail closed if the host
   // socket sits in a world-writable dir (hijack risk), for EVERY door.
   for (const d of doors) {
-    assertSocketDir(d.host);
+    assertSocketDir(d.host, d.name);
     argv.push("-v", `${d.host}:${d.inBox}`, "--env", `${d.env}=${d.inBox}`);
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
@@ -526,7 +647,9 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
       try {
         ephemeralWorktree = await createEphemeralWorktree(abs);
         mountPath = ephemeralWorktree;
-        console.error(`claude-box: --repo-ephemeral — created ephemeral worktree at ${ephemeralWorktree}`);
+        console.error(
+          `claude-box: --repo-ephemeral — created ephemeral worktree at ${ephemeralWorktree}`,
+        );
       } catch (e) {
         console.error(`claude-box: failed to create ephemeral worktree: ${e}`);
         process.exit(2);
@@ -536,7 +659,13 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
     // Mount the worktree RW at /work; map the host user → the in-box `claude`
     // uid so host-owned files line up (writable + no git "dubious ownership"),
     // WITHOUT chowning the repo.
-    argv.push("-v", `${mountPath}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
+    argv.push(
+      "-v",
+      `${mountPath}:/work`,
+      "-w",
+      "/work",
+      "--userns=keep-id:uid=1000,gid=1000",
+    );
     // Tell the box what the host path is, so keeperd requests can translate
     // /work → the actual host path (keeperd runs on the host, not in the box).
     // For ephemeral worktrees, use the original repo path so commits apply there.
@@ -570,13 +699,24 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   }
   // Inject the honest surface into the agent's context (granted AND denied), so
   // the box KNOWS its powers and limits rather than assuming them.
-  argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...claudeArgs);
-  const proc = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  argv.push(
+    IMAGE,
+    "--append-system-prompt",
+    capabilityPrompt(manifest),
+    ...claudeArgs,
+  );
+  const proc = Bun.spawn(argv, {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
   const exitCode = await proc.exited;
 
   // Clean up ephemeral worktree on exit
   if (ephemeralWorktree && originalRepo) {
-    console.error(`claude-box: cleaning up ephemeral worktree ${ephemeralWorktree}`);
+    console.error(
+      `claude-box: cleaning up ephemeral worktree ${ephemeralWorktree}`,
+    );
     await removeEphemeralWorktree(originalRepo, ephemeralWorktree);
   }
 
@@ -592,7 +732,10 @@ function launcherdSocketPath(): string {
   return `${home}/.claude-box/launcherd.sock`;
 }
 
-async function launcherdRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+async function launcherdRequest(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
   const socketPath = launcherdSocketPath();
   const id = crypto.randomUUID();
 
@@ -610,7 +753,12 @@ async function launcherdRequest(method: string, params: Record<string, unknown> 
           if (newline >= 0) {
             const line = buffer.slice(0, newline);
             try {
-              const resp = JSON.parse(line) as { id: string; ok: boolean; result?: unknown; error?: { message: string } };
+              const resp = JSON.parse(line) as {
+                id: string;
+                ok: boolean;
+                result?: unknown;
+                error?: { message: string };
+              };
               if (resp.ok) {
                 resolve(resp.result);
               } else {
@@ -639,7 +787,10 @@ function keeperdSocketPath(): string {
   return `${home}/.claude-box/keeperd.sock`;
 }
 
-async function keeperdRequest(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+async function keeperdRequest(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
   const socketPath = keeperdSocketPath();
   const id = crypto.randomUUID();
 
@@ -657,7 +808,12 @@ async function keeperdRequest(method: string, params: Record<string, unknown> = 
           if (newline >= 0) {
             const line = buffer.slice(0, newline);
             try {
-              const resp = JSON.parse(line) as { id: string; ok: boolean; result?: unknown; error?: { message: string } };
+              const resp = JSON.parse(line) as {
+                id: string;
+                ok: boolean;
+                result?: unknown;
+                error?: { message: string };
+              };
               if (resp.ok) {
                 resolve(resp.result);
               } else {
@@ -679,13 +835,15 @@ async function keeperdRequest(method: string, params: Record<string, unknown> = 
 
 async function cmdKeeperStatus(): Promise<number> {
   try {
-    const status = await keeperdRequest("status") as Record<string, unknown>;
+    const status = (await keeperdRequest("status")) as Record<string, unknown>;
     console.log("keeperd status:");
     console.log(`  version: ${status.version}`);
     console.log(`  uptime: ${status.uptime}s`);
     if (status.signing) {
       const signing = status.signing as { enabled: boolean; keyId?: string };
-      console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId})` : "disabled"}`);
+      console.log(
+        `  signing: ${signing.enabled ? `enabled (${signing.keyId})` : "disabled"}`,
+      );
     }
     return 0;
   } catch (e) {
@@ -696,7 +854,10 @@ async function cmdKeeperStatus(): Promise<number> {
 
 async function cmdKeeperKey(): Promise<number> {
   try {
-    const result = await keeperdRequest("getPublicKey") as { publicKey: string; keyId: string };
+    const result = (await keeperdRequest("getPublicKey")) as {
+      publicKey: string;
+      keyId: string;
+    };
     console.log(result.publicKey);
     return 0;
   } catch (e) {
@@ -707,27 +868,43 @@ async function cmdKeeperKey(): Promise<number> {
 
 async function cmdStatus(): Promise<number> {
   try {
-    const status = await launcherdRequest("status") as Record<string, unknown>;
+    const status = (await launcherdRequest("status")) as Record<
+      string,
+      unknown
+    >;
     console.log("launcherd status:");
     console.log(`  version: ${status.version}`);
     console.log(`  uptime: ${status.uptime}s`);
     console.log(`  active launches: ${status.launches}`);
     if (status.signing) {
       const signing = status.signing as { enabled: boolean; keyId?: string };
-      console.log(`  signing: ${signing.enabled ? `enabled (${signing.keyId?.slice(0, 16)}...)` : "disabled"}`);
+      console.log(
+        `  signing: ${signing.enabled ? `enabled (${signing.keyId?.slice(0, 16)}...)` : "disabled"}`,
+      );
     }
     if (status.policy) {
-      const pol = status.policy as { enabled: boolean; defaultAllow?: string[]; rulesCount?: number };
+      const pol = status.policy as {
+        enabled: boolean;
+        defaultAllow?: string[];
+        rulesCount?: number;
+      };
       if (pol.enabled) {
-        console.log(`  policy: enabled (${pol.rulesCount} rules, default: [${pol.defaultAllow?.join(", ") ?? "none"}])`);
+        console.log(
+          `  policy: enabled (${pol.rulesCount} rules, default: [${pol.defaultAllow?.join(", ") ?? "none"}])`,
+        );
       } else {
         console.log("  policy: disabled (all rooms permitted)");
       }
     }
     console.log("  doors:");
-    const doors = status.doors as Record<string, { socket: string; reachable: boolean }>;
+    const doors = status.doors as Record<
+      string,
+      { socket: string; reachable: boolean }
+    >;
     for (const [name, info] of Object.entries(doors)) {
-      console.log(`    ${name}: ${info.reachable ? "reachable" : "unreachable"} (${info.socket})`);
+      console.log(
+        `    ${name}: ${info.reachable ? "reachable" : "unreachable"} (${info.socket})`,
+      );
     }
     if (status.rooms) {
       console.log("  rooms:");
@@ -745,26 +922,32 @@ async function cmdStatus(): Promise<number> {
 
 async function cmdPs(): Promise<number> {
   try {
-    const result = await launcherdRequest("list") as { launches: Array<{
-      launchId: string;
-      account: string;
-      pid: number;
-      startedAt: string;
-      doors: string[];
-      repo?: string;
-      status: string;
-    }> };
+    const result = (await launcherdRequest("list")) as {
+      launches: Array<{
+        launchId: string;
+        account: string;
+        pid: number;
+        startedAt: string;
+        doors: string[];
+        repo?: string;
+        status: string;
+      }>;
+    };
 
     if (result.launches.length === 0) {
       console.log("no running boxes");
       return 0;
     }
 
-    console.log("LAUNCH ID                    ACCOUNT     PID    DOORS              REPO");
+    console.log(
+      "LAUNCH ID                    ACCOUNT     PID    DOORS              REPO",
+    );
     for (const l of result.launches) {
       const doors = l.doors.join(",") || "-";
       const repo = l.repo ?? "-";
-      console.log(`${l.launchId.padEnd(28)} ${l.account.padEnd(11)} ${String(l.pid).padEnd(6)} ${doors.padEnd(18)} ${repo}`);
+      console.log(
+        `${l.launchId.padEnd(28)} ${l.account.padEnd(11)} ${String(l.pid).padEnd(6)} ${doors.padEnd(18)} ${repo}`,
+      );
     }
     return 0;
   } catch (e) {
@@ -793,7 +976,9 @@ async function cmdKill(launchId: string): Promise<number> {
 const DOOR_SERVICES = ["keeperd", "netd", "scoutd"] as const;
 
 /** Run a command in the podman machine VM. */
-async function podmanMachineExec(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+async function podmanMachineExec(
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["podman", "machine", "ssh", "--", ...args], {
     stdout: "pipe",
     stderr: "pipe",
@@ -806,19 +991,60 @@ async function podmanMachineExec(args: string[]): Promise<{ ok: boolean; stdout:
 
 /** Check if we're running with podman machine (macOS). */
 async function hasPodmanMachine(): Promise<boolean> {
-  const proc = Bun.spawn(["podman", "machine", "list", "--format", "{{.Name}}"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = Bun.spawn(
+    ["podman", "machine", "list", "--format", "{{.Name}}"],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const stdout = await new Response(proc.stdout).text();
   await proc.exited;
   return stdout.trim().length > 0;
 }
 
+/** Get the quadlet directory (relative to this script). */
+function getQuadletDir(): string {
+  return `${import.meta.dir}/quadlet`;
+}
+
+/** Build and load a daemon image. */
+async function buildAndLoadImage(
+  name: string,
+): Promise<{ ok: boolean; error?: string }> {
+  console.log(`  building ${name}-image...`);
+  const build = Bun.spawn(["nix", "build", `.#${name}-image`, "--no-link", "--print-out-paths"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const buildOut = await new Response(build.stdout).text();
+  const buildErr = await new Response(build.stderr).text();
+  if ((await build.exited) !== 0) {
+    return { ok: false, error: `nix build failed: ${buildErr}` };
+  }
+  const imagePath = buildOut.trim();
+  if (!imagePath) {
+    return { ok: false, error: "nix build produced no output" };
+  }
+
+  console.log(`  loading ${name}-image...`);
+  const load = Bun.spawn(["podman", "load", "-i", imagePath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const loadErr = await new Response(load.stderr).text();
+  if ((await load.exited) !== 0) {
+    return { ok: false, error: `podman load failed: ${loadErr}` };
+  }
+  return { ok: true };
+}
+
 async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
   const useMachine = await hasPodmanMachine();
 
-  const runSystemctl = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+  const runSystemctl = async (
+    args: string[],
+  ): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
     if (useMachine) {
       return podmanMachineExec(["systemctl", "--user", ...args]);
     } else {
@@ -833,12 +1059,17 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
     }
   };
 
-  const targets = services.length > 0
-    ? services.filter((s): s is typeof DOOR_SERVICES[number] => DOOR_SERVICES.includes(s as any))
-    : [...DOOR_SERVICES];
+  const targets =
+    services.length > 0
+      ? services.filter((s): s is (typeof DOOR_SERVICES)[number] =>
+          DOOR_SERVICES.includes(s as any),
+        )
+      : [...DOOR_SERVICES];
 
   if (services.length > 0 && targets.length !== services.length) {
-    console.error(`claude-box: unknown service(s). Known: ${DOOR_SERVICES.join(", ")}`);
+    console.error(
+      `claude-box: unknown service(s). Known: ${DOOR_SERVICES.join(", ")}`,
+    );
     return 1;
   }
 
@@ -894,22 +1125,141 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
       }
       if (useMachine) {
         const proc = Bun.spawn(
-          ["podman", "machine", "ssh", "--", "journalctl", "--user", "-u", svc, "-f"],
+          [
+            "podman",
+            "machine",
+            "ssh",
+            "--",
+            "journalctl",
+            "--user",
+            "-u",
+            svc,
+            "-f",
+          ],
           { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
         );
         return proc.exited;
       } else {
-        const proc = Bun.spawn(
-          ["journalctl", "--user", "-u", svc, "-f"],
-          { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
-        );
+        const proc = Bun.spawn(["journalctl", "--user", "-u", svc, "-f"], {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
         return proc.exited;
       }
+    }
+    case "ensure": {
+      // Start any door services that aren't running (doesn't rebuild/reinstall)
+      console.log("Ensuring door services are running...\n");
+      let allOk = true;
+      for (const svc of DOOR_SERVICES) {
+        const check = await runSystemctl(["is-active", svc]);
+        if (check.ok) {
+          console.log(`  ${svc.padEnd(10)} already active`);
+        } else {
+          const start = await runSystemctl(["start", svc]);
+          if (start.ok) {
+            console.log(`  ${svc.padEnd(10)} started`);
+          } else {
+            console.error(`  ${svc.padEnd(10)} failed: ${start.stderr}`);
+            allOk = false;
+          }
+        }
+      }
+      if (!allOk) {
+        console.log("\nSome services failed. Try 'claude-box doors init' to reinstall.");
+      }
+      return allOk ? 0 : 1;
+    }
+    case "init": {
+      // One-shot setup: build images, install quadlet units, start services
+      const quadletDir = getQuadletDir();
+      const mode = useMachine ? "podman-machine" : "native";
+      console.log(`Initializing door services (${mode})...\n`);
+
+      // 1. Build and load images
+      console.log("Step 1: Building and loading images...");
+      for (const svc of DOOR_SERVICES) {
+        const result = await buildAndLoadImage(svc);
+        if (!result.ok) {
+          console.error(`  ${svc}: ${result.error}`);
+          return 1;
+        }
+        console.log(`  ${svc}: loaded`);
+      }
+
+      // 2. Install quadlet units
+      console.log("\nStep 2: Installing quadlet units...");
+      const unitFiles = [
+        "claude-doors.volume",
+        "claude-keys.volume",
+        "keeperd.container",
+        "netd.container",
+        "scoutd.container",
+      ];
+      if (useMachine) {
+        // Create systemd directory in VM
+        await podmanMachineExec([
+          "mkdir",
+          "-p",
+          "/var/home/core/.config/containers/systemd",
+        ]);
+        // Copy each unit file using stdin piping
+        for (const file of unitFiles) {
+          const content = await Bun.file(`${quadletDir}/${file}`).text();
+          const dest = `/var/home/core/.config/containers/systemd/${file}`;
+          const proc = Bun.spawn(
+            ["podman", "machine", "ssh", "--", "sh", "-c", `cat > '${dest}'`],
+            { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+          );
+          proc.stdin.write(content);
+          proc.stdin.end();
+          await proc.exited;
+          console.log(`  ${file}`);
+        }
+        // Reload systemd
+        await podmanMachineExec(["systemctl", "--user", "daemon-reload"]);
+      } else {
+        // Native Linux: copy to ~/.config/containers/systemd/
+        const home = process.env.HOME ?? "/tmp";
+        const systemdDir = `${home}/.config/containers/systemd`;
+        await Bun.spawn(["mkdir", "-p", systemdDir]).exited;
+        for (const file of unitFiles) {
+          await Bun.spawn(["cp", `${quadletDir}/${file}`, systemdDir]).exited;
+          console.log(`  ${file}`);
+        }
+        // Reload systemd
+        await Bun.spawn(["systemctl", "--user", "daemon-reload"]).exited;
+      }
+      console.log("  daemon-reload done");
+
+      // 3. Start services
+      console.log("\nStep 3: Starting services...");
+      for (const svc of DOOR_SERVICES) {
+        const result = await runSystemctl(["start", svc]);
+        if (result.ok) {
+          console.log(`  ${svc}: started`);
+        } else {
+          console.error(`  ${svc}: failed - ${result.stderr}`);
+        }
+      }
+
+      // 4. Show status
+      console.log("\nDone! Status:");
+      for (const svc of DOOR_SERVICES) {
+        const result = await runSystemctl(["is-active", svc]);
+        const status = result.ok ? "active" : result.stdout || "inactive";
+        console.log(`  ${svc.padEnd(10)} ${status}`);
+      }
+      console.log("\nRun 'claude-box --room dev --repo .' to launch with all doors.");
+      return 0;
     }
     default:
       console.log(`claude-box doors — manage door services
 
 Usage:
+  claude-box doors init              one-shot setup (build images, install units, start)
+  claude-box doors ensure            start any stopped services (fast, no rebuild)
   claude-box doors status [svc...]   show status of door services
   claude-box doors start [svc...]    start door services
   claude-box doors stop [svc...]     stop door services
@@ -919,6 +1269,8 @@ Usage:
 Services: ${DOOR_SERVICES.join(", ")}
 
 Examples:
+  claude-box doors init              first-time setup (run once)
+  claude-box doors ensure            quick restart after reboot
   claude-box doors status            status of all doors
   claude-box doors start keeperd     start just keeperd
   claude-box doors logs netd         follow netd logs`);
@@ -932,7 +1284,7 @@ async function cmdAttach(launchId: string): Promise<number> {
     return 1;
   }
   try {
-    const result = await launcherdRequest("attach", { launchId }) as {
+    const result = (await launcherdRequest("attach", { launchId })) as {
       launchId: string;
       container: string;
       command: string;
@@ -993,7 +1345,15 @@ async function main(): Promise<number> {
 
 // Importable by tests (planLaunch / resolveDoor / buildManifest / capability*),
 // runnable as a script.
-export { knownDoors, knownRooms, resolveDoor, planLaunch, buildManifest, capabilityJson, capabilityPrompt };
+export {
+  knownDoors,
+  knownRooms,
+  resolveDoor,
+  planLaunch,
+  buildManifest,
+  capabilityJson,
+  capabilityPrompt,
+};
 export type { DoorGrant, Manifest, Launch };
 
 if (import.meta.main) {

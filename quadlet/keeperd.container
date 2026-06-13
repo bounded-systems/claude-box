@@ -22,7 +22,7 @@ ContainerName=keeperd
 # Socket directory — mount host's ~/.claude-box/run so sockets are accessible
 # from both the host CLI and containers. On macOS, podman machine shares /Users.
 # Adjust the path if your home directory differs.
-Volume=/Users/bobby/.claude-box/run:/run/doors:U
+Volume=/Users/bobby/.claude-box/run:/run/doors
 
 # Key volume (keeperd-only, persistent)
 Volume=claude-keys.volume:/keys:U

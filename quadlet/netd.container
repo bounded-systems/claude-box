@@ -19,7 +19,7 @@ ContainerName=netd
 
 # Socket directory — mount host's ~/.claude-box/run so sockets are accessible
 # from both the host CLI and containers. Adjust path for your home directory.
-Volume=/Users/bobby/.claude-box/run:/run/doors:U
+Volume=/Users/bobby/.claude-box/run:/run/doors
 
 # netd DOES need network (it's the egress door)
 # Default: uses podman's default network

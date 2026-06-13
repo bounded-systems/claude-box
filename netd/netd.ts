@@ -199,8 +199,9 @@ if (cmd === "serve") {
   }
   const caveatInfo = CAVEATS.length ? ` caveats=${CAVEATS.join(",")}` : "";
   if (port) {
-    listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
-    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
+    // Bind to 0.0.0.0 so podman machine VM can reach us via host.containers.internal
+    listen<Cx>({ hostname: "0.0.0.0", port, socket: handlers });
+    log("INFO", `listening tcp 0.0.0.0:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   } else {
     prepareSocket(socketPath);
     listen<Cx>({ unix: socketPath, socket: handlers });
@@ -218,8 +219,9 @@ if (cmd === "serve") {
   }
   const caveatInfo = CAVEATS.length ? ` caveats=${CAVEATS.join(",")}` : "";
   if (port) {
-    listen<Cx>({ hostname: "127.0.0.1", port, socket: handlers });
-    log("INFO", `listening tcp 127.0.0.1:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
+    // Bind to 0.0.0.0 so podman machine VM can reach us via host.containers.internal
+    listen<Cx>({ hostname: "0.0.0.0", port, socket: handlers });
+    log("INFO", `listening tcp 0.0.0.0:${port} allow=${ALLOW.join(",")}${caveatInfo} (fail-closed)`);
   } else {
     prepareSocket(socketPath);
     listen<Cx>({ unix: socketPath, socket: handlers });

@@ -497,8 +497,9 @@ async function serveUnix(socketPath: string): Promise<void> {
   await new Promise(() => {});
 }
 
-async function serveTcp(port: number, host: string = "127.0.0.1"): Promise<void> {
-  log("INFO", `listening on ${host}:${port}`);
+// Bind to 0.0.0.0 so podman machine VM can reach us via host.containers.internal
+async function serveTcp(port: number, host: string = "0.0.0.0"): Promise<void> {
+  log("INFO", `listening tcp ${host}:${port}`);
 
   Bun.listen({
     hostname: host,

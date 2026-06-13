@@ -234,7 +234,6 @@ export function capabilityPreamble(workcell: string): string[] {
   ];
 }
 
-<<<<<<< HEAD
 /** One card per granted door: name, what it grants, and how to use it. An
  *  attenuated door also states its restriction, so the surface stays honest —
  *  a narrowed door must not read as if it were the full grant. */
@@ -244,15 +243,6 @@ export function grantedDoorLines(doors: DoorGrant[]): string[] {
     return d.caveats?.length
       ? `${card} RESTRICTED to: ${d.caveats.join("; ")} — requests outside this are denied.`
       : card;
-=======
-/** One card per granted door: name, what it grants, and how to use it.
- *  If the door has caveats, they're rendered as RESTRICTED constraints. */
-export function grantedDoorLines(doors: DoorGrant[]): string[] {
-  return doors.map((d) => {
-    const base = `- ${d.name}: ${d.grants}. ${d.use}`;
-    if (!d.caveats?.length) return base;
-    return `${base} RESTRICTED: ${d.caveats.join(", ")}.`;
->>>>>>> e1d6a51 (feat: add --guest flag for generic tool execution)
   });
 }
 

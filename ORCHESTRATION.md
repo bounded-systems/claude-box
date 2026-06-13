@@ -50,12 +50,12 @@ systemctl --user status keeperd
 # Logs
 journalctl --user -u keeperd -f
 
-# Run a box
+# Run a box with keeper door
+# Note: Quadlet prefixes volumes with "systemd-"
 podman run -it --rm \
-  -v claude-doors:/run/doors:ro \
+  -v systemd-claude-doors:/run/doors:ro \
   -v ~/code/myproject:/work \
   -e KEEPERD_SOCK=/run/doors/keeperd.sock \
-  --network=none \
   localhost/claude-personal:dev
 ```
 

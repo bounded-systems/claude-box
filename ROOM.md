@@ -145,6 +145,19 @@ existing `claude-box` command / nix package / prx image build / provenance chain
 reference it; the model graduates to `guest-rooms` *if* the core is extracted.
 Concept now, extraction later.
 
+**The seam is now real — `guest-room/` as an internal dependency.** The generic
+core no longer lives *interleaved* with the Claude-specific launcher: the
+capability engine (door resolution → room expansion → the rulebook surface) is
+extracted into [`guest-room/`](./guest-room/), a self-contained module with no
+Claude references. `claude-box.ts` is its first consumer — it supplies the door
+catalog (`knownDoors`) and room bundles (`knownRooms`) and keeps its own launch
+mechanics (image, accounts, podman). So extraction is now a *move*, not a
+*refactor*: lift the directory to its own repo and flip the import. The module
+ships its own [behavior specs](./guest-room/features/) (Gherkin executed against
+the engine, so the docs can't drift) and a [README](./guest-room/README.md)
+framing the model as a **hotel**: independent rooms joined by adjoining doors,
+each door reaching one brokered service, never the keys or the building.
+
 ## Status
 
 This doc is the **mental model**. The `room` profile (move 1) is **implemented**;

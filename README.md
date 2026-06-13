@@ -27,6 +27,16 @@ network only through the **netd** door (`--net`), which enforces an allowlist
 [CAPABILITIES.md](./CAPABILITIES.md) — and [OCAP.md](./OCAP.md) for where this
 applied object-capability design sits in the established canon.
 
+## Design — a room for any guest
+
+The capability engine (door → room → rulebook) is guest-agnostic and lives in
+[`guest-room/`](./guest-room/) — an internal dependency `claude-box` consumes by
+supplying its own door catalog and room bundles. The model is a **hotel**:
+independent rooms joined by adjoining doors, each door reaching one brokered
+service, never the keys or the building. The essay
+[*The Guest Room*](./drafts/the-guest-room.md) tells that story end to end; the
+topology (host / VM / room) is in [ROOM.md](./ROOM.md).
+
 ## Install (home-manager)
 
 ```nix

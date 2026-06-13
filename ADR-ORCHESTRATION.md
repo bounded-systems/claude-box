@@ -1,6 +1,7 @@
 # ADR — Quadlet for door orchestration (not Compose, not Pods)
 
 > Status: **accepted** (2026-06-13). Tracking: follows from `ADR.md` (OCI runtime).
+> Provenance: doors emit L3 attestations per SLSA Provenance v1 / in-toto Statement v1.
 
 ## Context
 
@@ -72,8 +73,29 @@ Same units, same commands, same tooling.
 3. **Volume naming** — Quadlet prefixes volumes with `systemd-`, docs updated
 4. **Install script** — `quadlet/install.sh` copies units into the VM
 
+## Provenance chain
+
+Orchestration doesn't change the attestation model:
+
+```
+L1 (image)     → CapabilityProvenance statement for the OCI image
+L2 (launch)    → launcherd emits manifest of granted doors
+L3 (operation) → each door emits signed attestations for its actions
+```
+
+keeperd emits L3 attestations (SLSA Provenance v1) for every commit, binding:
+- The git commit SHA (subject)
+- The L2 manifest digest (proving which box made the request)
+- The door's signing key
+
+Whether keeperd runs as a Quadlet container, a microVM, or a bare process, the
+attestation format is identical. Orchestration is orthogonal to provenance.
+
+See: `KEEPERD.md` (L3 attestation), `OCAP.md` (capability model), `contract/` (schemas).
+
 ## Future: microVMs
 
 For multi-tenant or compliance, doors could run in Firecracker microVMs instead
 of containers. The systemd units would change from `*.container` to launching
 microVMs, but the interface (socket at `/run/doors/*.sock`) stays the same.
+The L3 attestations remain identical — only the isolation boundary changes.

@@ -2,6 +2,8 @@
 
 Doors run as systemd services via Quadlet. Same setup for macOS (Lima) and Linux.
 
+> ADR: `ADR-ORCHESTRATION.md`. Provenance: doors emit L3 attestations per OCAP model.
+
 ## Architecture
 
 ```

@@ -26,10 +26,20 @@ Volume=claude-doors.volume:/run/doors:U
 # Volume=claude-scout-creds.volume:/creds:ro
 
 # scoutd needs network (it fetches external content)
+# Default: uses podman's default network
+# Uncomment for explicit control:
 # Network=slirp4netns
 
 # Security hardening
 NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=128
+Memory=512m
 
 [Service]
 Restart=always

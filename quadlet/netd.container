@@ -21,10 +21,20 @@ ContainerName=netd
 Volume=claude-doors.volume:/run/doors:U
 
 # netd DOES need network (it's the egress door)
-# Network=slirp4netns  # or bridge, depending on setup
+# Default: uses podman's default network
+# Uncomment for explicit control:
+# Network=slirp4netns
 
 # Security hardening
 NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=128
+Memory=256m
 
 [Service]
 Restart=always

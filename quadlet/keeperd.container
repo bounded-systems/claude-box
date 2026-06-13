@@ -35,8 +35,15 @@ Volume=claude-keys.volume:/keys:U
 Network=none
 
 # Security hardening
-SecurityLabelDisable=true
 NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=256
+Memory=512m
 
 [Service]
 Restart=always

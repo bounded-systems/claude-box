@@ -211,6 +211,7 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work             'work' account (own auth/history)
   claude-box work --resume    flags pass through to claude
   claude-box work --repo .    mount the worktree at /work (.git read-only; commits via --keeper)
+  claude-box work --repo-ephemeral .  create an ephemeral worktree (parallel-safe, cleaned up on exit)
   claude-box work --repo-rw . UNSAFE: worktree AND host .git writable (no-keeper escape)
   claude-box work --net       forward the netd door — policed egress (default: no network)
   claude-box work --net-open  UNSAFE: full ambient egress, no allowlist
@@ -292,7 +293,7 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
 
 // ── Launch planning + the capability manifest ────────────────────────────────
 
-type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
+type Launch = { repo?: string; repoRw: boolean; repoEphemeral: boolean; doors: DoorGrant[]; netOpen: boolean; claudeArgs: string[] };
 
 /** Split a launch's tail into claude-box flags (--repo / --net[-open] / --keeper
  *  / --beads / --scout / --room / --door) and the claude passthrough args.
@@ -302,6 +303,7 @@ type Launch = { repo?: string; repoRw: boolean; doors: DoorGrant[]; netOpen: boo
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
   let repoRw = false;
+  let repoEphemeral = false;
   let netOpen = false;
   let room: string | undefined;
   const doors = new Map<string, DoorGrant>();
@@ -311,6 +313,14 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     const t = tail[i]!;
     if (t === "--repo") {
       repo = tail[++i];
+      continue;
+    }
+    if (t === "--repo-ephemeral") {
+      // Ephemeral worktree: create a temp worktree at HEAD, mount that instead
+      // of the live worktree. Parallel-safe (each box gets its own copy), and
+      // the worktree is removed on exit. Shares the same .git (still :ro).
+      repo = tail[++i];
+      repoEphemeral = true;
       continue;
     }
     if (t === "--repo-rw") {
@@ -367,13 +377,14 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     claudeArgs.push(t);
   }
-  return { repo, repoRw, doors: [...doors.values()], netOpen, claudeArgs };
+  return { repo, repoRw, repoEphemeral, doors: [...doors.values()], netOpen, claudeArgs };
 }
 
 type Manifest = {
   account: string;
   repo?: string;
   repoRw: boolean;
+  repoEphemeral: boolean;
   doors: DoorGrant[];
   netOpen: boolean;
   denied: { name: string; flag: string; deny: string }[];
@@ -388,7 +399,7 @@ function buildManifest(account: string, launch: Launch, env: Env = process.env):
   const denied = Object.entries(knownDoors(env))
     .filter(([name]) => !granted.has(name) && !(name === "net" && launch.netOpen))
     .map(([name, p]) => ({ name, flag: p.flag, deny: p.deny }));
-  return { account, repo: launch.repo, repoRw: launch.repoRw, doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -407,6 +418,8 @@ function capabilityJson(m: Manifest): string {
       // Honest about the .git posture: read-only (writes via keeper) unless the
       // unsafe --repo-rw escape was used.
       repoGit: m.repo ? (m.repoRw ? "rw" : "ro") : null,
+      // Ephemeral worktree: parallel-safe, edits are isolated per-box.
+      repoEphemeral: m.repoEphemeral,
       doors: m.doors.map((d) => ({ name: d.name, socket: d.inBox, env: d.env, grants: d.grants })),
     },
     denied: m.denied.map((d) => ({ name: d.name, flag: d.flag })),
@@ -424,11 +437,13 @@ function capabilityPrompt(m: Manifest): string {
     "- config: your own account's auth/history (a private volume).",
   ];
   if (m.repo) {
-    lines.push(
-      m.repoRw
-        ? `- repo: ${m.repo} at /work — worktree AND .git WRITABLE (--repo-rw, unsafe). Only this worktree on the host is writable.`
-        : `- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`,
-    );
+    if (m.repoRw) {
+      lines.push(`- repo: ${m.repo} at /work — worktree AND .git WRITABLE (--repo-rw, unsafe). Only this worktree on the host is writable.`);
+    } else if (m.repoEphemeral) {
+      lines.push(`- repo: ${m.repo} at /work — EPHEMERAL worktree (--repo-ephemeral). This is an isolated copy; your edits are local to this box and do not affect the original or other boxes. .git is READ-ONLY. Route commits through the keeper door.`);
+    } else {
+      lines.push(`- repo: ${m.repo} at /work — worktree files are writable, but .git is READ-ONLY: you cannot commit/rewrite history in-box. Route commits through the keeper door. Do not try to edit .git/config or hooks; it will fail.`);
+    }
   }
   for (const d of m.doors) {
     lines.push(`- ${d.name}: ${d.grants}. ${d.use}`);

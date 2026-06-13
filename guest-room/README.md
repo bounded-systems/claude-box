@@ -29,6 +29,15 @@ stay. The room hands its guest a **rulebook** keyed to exactly the doors present
 — a how-to card per granted door, and a *no-rule* card per absent one — so the
 surface is honest about what is **denied**, not only what is granted.
 
+A door can be **attenuated**: narrowed by opaque *caveats* the broker behind it
+enforces (a single host, a read-only mode). Attenuation is append-only, so
+authority only ever decreases — a holder can hand a door onward equally or more
+restricted, never wider (`attenuate(grant, caveats)`). The rulebook states the
+restriction on a narrowed door, so the honest surface extends to it. The caveat
+*grammar* is the consumer's; the engine carries and renders, never interprets —
+the same seam that keeps it guest-agnostic. (This is the object-capability
+attenuation rule; the caveats are macaroon-shaped.)
+
 ## What's here
 
 ```

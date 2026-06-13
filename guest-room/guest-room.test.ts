@@ -19,6 +19,7 @@ import {
   type Env,
   type RoomCatalog,
   resolveDoor,
+  attenuate,
   expandRoom,
   deniedDoors,
   grantedDoorLines,
@@ -74,6 +75,17 @@ const steps = new StepRegistry()
     expect((w.grant as DoorGrant).env).toBe(envVar);
   })
   .step(/^resolution is refused$/, (w) => { expect(w.error).toBeInstanceOf(Error); })
+
+  // attenuate a held door (append-only narrowing) and read its rulebook card
+  .step(/^the door is narrowed to "([^"]*)"$/, (w, caveat) => {
+    w.grant = attenuate(w.grant as DoorGrant, [caveat]);
+  })
+  .step(/^the rulebook card for it shows "([^"]*)"$/, (w, text) => {
+    expect(grantedDoorLines([w.grant as DoorGrant]).join("\n")).toContain(text);
+  })
+  .step(/^the rulebook card for it does not show "([^"]*)"$/, (w, text) => {
+    expect(grantedDoorLines([w.grant as DoorGrant]).join("\n")).not.toContain(text);
+  })
 
   // open a room (a bundle of adjoining doors)
   .step(/^the room "([^"]*)" is opened$/, (w, name) => {

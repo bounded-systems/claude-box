@@ -46,8 +46,10 @@ pinned nixpkgs (`claude-code` + git, gh, ripgrep, fd, bun, openssh…), non-root
 `claude` user, config-volume mount point. The resulting OCI image is addressed
 by its own **sha256 digest** — the pin.
 
-Building needs an `aarch64-linux` builder (the flake exposes
-`nix run .#linux-builder` for a standalone one on darwin):
+Building needs an `aarch64-linux` builder. On Apple Silicon use a **vz**
+(Apple Virtualization.framework) builder — the QEMU `nix run .#linux-builder`
+crashes on M3/M4 (`HV_SYS_REG_SMCR_EL1`); see **[BUILD.md](./BUILD.md)** for the
+full setup:
 
 ```sh
 nix build .#claude-image           # offloads to the Linux builder

@@ -505,6 +505,12 @@
       #   nix run .#linux-builder
       # then wire it once into the builder set (see BUILD.md) and:
       #   nix build .#claude-image
+      #
+      # CAVEAT (BUILD.md): this is a QEMU/HVF VM. On recent macOS + Apple
+      # Silicon (M3/M4) it crashes in `hvf_arch_init_vcpu` on the SME registers
+      # (`HV_SYS_REG_SMCR_EL1` assertion, qemu#2665). Prefer a vz-backed builder
+      # (e.g. a Lima aarch64-linux VM) registered in /etc/nix/machines — see
+      # BUILD.md. Keep this as the no-Lima fallback.
       apps.aarch64-darwin.linux-builder =
         let pkgs = nixpkgs.legacyPackages.aarch64-darwin;
         in {

@@ -94,11 +94,11 @@
           # HTTPS_PROXY the launcher set reaches netd, which owns the allowlist.
           # No door ⇒ no relay ⇒ the box is offline. The box holds no egress of
           # its own — standard tooling can't proxy straight to a unix socket, so
-          # socat bridges loopback-TCP → /run/netd.sock. Flags still pass through
+          # socat bridges loopback-TCP → /run/doors/netd.sock. Flags still pass through
           # to claude (`exec claude "$@"`); a bare run launches the TUI.
           entrypoint = pkgs.writeShellScript "claude-box-entrypoint" ''
-            if [ -S /run/netd.sock ]; then
-              ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/netd.sock &
+            if [ -S /run/doors/netd.sock ]; then
+              ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/doors/netd.sock &
             fi
             exec claude "$@"
           '';

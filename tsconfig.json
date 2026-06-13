@@ -15,6 +15,7 @@
   },
   "include": [
     "*.ts",
+    "guest-room/**/*.ts",
     "lib/**/*.ts",
     "tests/**/*.ts",
     "netd/**/*.ts",

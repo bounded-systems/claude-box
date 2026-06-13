@@ -223,6 +223,9 @@ const HELP = `claude-box [account] [claude args…] — pinned, isolated Claude,
   claude-box work --door NAME[=HOST_SOCK]   attach any service by socket (generic door)
   claude-box ls               list accounts (+ descriptions)
   claude-box name <acct> <description…>   set a friendly label
+  claude-box doors status     show door service status (keeperd, netd, scoutd)
+  claude-box doors start      start all door services
+  claude-box doors logs <svc> follow logs for a door service
   claude-box status           show launcherd status (requires daemon)
   claude-box ps               list running boxes (requires daemon)
   claude-box kill <id>        terminate a running box (requires daemon)
@@ -463,9 +466,51 @@ function capabilityPrompt(m: Manifest): string {
   return lines.join("\n");
 }
 
+/** Create an ephemeral git worktree at a temp path. Returns the path to the
+ *  worktree. The caller is responsible for removing it with `git worktree remove`. */
+async function createEphemeralWorktree(repo: string): Promise<string> {
+  const id = crypto.randomUUID().slice(0, 8);
+  const tmpDir = process.env.TMPDIR ?? "/tmp";
+  const worktreePath = `${tmpDir}/claude-box-${id}`;
+
+  // Get the current HEAD commit to check out
+  const headProc = Bun.spawn(["git", "-C", repo, "rev-parse", "HEAD"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const headOut = (await new Response(headProc.stdout).text()).trim();
+  const headErr = (await new Response(headProc.stderr).text()).trim();
+  const headCode = await headProc.exited;
+  if (headCode !== 0) {
+    throw new Error(`failed to get HEAD: ${headErr}`);
+  }
+
+  // Create the worktree at the detached HEAD (no branch, just the commit)
+  const proc = Bun.spawn(
+    ["git", "-C", repo, "worktree", "add", "--detach", worktreePath, headOut],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const err = (await new Response(proc.stderr).text()).trim();
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`failed to create ephemeral worktree: ${err}`);
+  }
+  return worktreePath;
+}
+
+/** Remove an ephemeral git worktree. */
+async function removeEphemeralWorktree(repo: string, worktreePath: string): Promise<void> {
+  const proc = Bun.spawn(
+    ["git", "-C", repo, "worktree", "remove", "--force", worktreePath],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  await proc.exited;
+  // Ignore errors — best effort cleanup
+}
+
 async function run(account: string, launch: Launch, env: Env = process.env): Promise<number> {
   assertAccount(account);
-  const { repo, repoRw, doors, netOpen, claudeArgs } = launch;
+  const { repo, repoRw, repoEphemeral, doors, netOpen, claudeArgs } = launch;
   const manifest = buildManifest(account, launch, env);
   const argv = [
     "podman", "run", "-it", "--rm",
@@ -505,19 +550,42 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
   argv.push("--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`);
+
+  // Track ephemeral worktree for cleanup
+  let ephemeralWorktree: string | undefined;
+  let originalRepo: string | undefined;
+
   if (repo) {
     const abs = resolve(repo);
+    originalRepo = abs;
+
+    // Ephemeral worktree: create a temp worktree at HEAD, mount that instead of
+    // the live worktree. Parallel-safe (each box gets its own copy), and the
+    // worktree is removed on exit. Still shares the same .git (read-only).
+    let mountPath = abs;
+    if (repoEphemeral) {
+      try {
+        ephemeralWorktree = await createEphemeralWorktree(abs);
+        mountPath = ephemeralWorktree;
+        console.error(`claude-box: --repo-ephemeral — created ephemeral worktree at ${ephemeralWorktree}`);
+      } catch (e) {
+        console.error(`claude-box: failed to create ephemeral worktree: ${e}`);
+        process.exit(2);
+      }
+    }
+
     // Mount the worktree RW at /work; map the host user → the in-box `claude`
     // uid so host-owned files line up (writable + no git "dubious ownership"),
     // WITHOUT chowning the repo.
-    argv.push("-v", `${abs}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
+    argv.push("-v", `${mountPath}:/work`, "-w", "/work", "--userns=keep-id:uid=1000,gid=1000");
     // Tell the box what the host path is, so keeperd requests can translate
     // /work → the actual host path (keeperd runs on the host, not in the box).
+    // For ephemeral worktrees, use the original repo path so commits apply there.
     argv.push("--env", `CLAUDE_BOX_HOST_REPO=${abs}`);
     // A worktree's git dir lives in a bare repo OUTSIDE the worktree; mount that
     // common dir at its host path so `git` resolves inside the box.
-    const common = await gitCommonDir(abs);
-    const external = common && !common.startsWith(`${abs}/`);
+    const common = await gitCommonDir(mountPath);
+    const external = common && !common.startsWith(`${mountPath}/`);
     if (repoRw) {
       // UNSAFE escape: leave .git WRITABLE (today's behaviour). A box that writes
       // .git/hooks or .git/config gets host code execution when you next run git.
@@ -537,7 +605,7 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
         argv.push("-v", `${common}:${common}:ro`);
       } else {
         // normal repo: .git is inside the worktree — overlay it :ro over /work.
-        argv.push("-v", `${abs}/.git:/work/.git:ro`);
+        argv.push("-v", `${mountPath}/.git:/work/.git:ro`);
       }
     }
   }
@@ -545,7 +613,15 @@ async function run(account: string, launch: Launch, env: Env = process.env): Pro
   // the box KNOWS its powers and limits rather than assuming them.
   argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...claudeArgs);
   const proc = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-  return proc.exited;
+  const exitCode = await proc.exited;
+
+  // Clean up ephemeral worktree on exit
+  if (ephemeralWorktree && originalRepo) {
+    console.error(`claude-box: cleaning up ephemeral worktree ${ephemeralWorktree}`);
+    await removeEphemeralWorktree(originalRepo, ephemeralWorktree);
+  }
+
+  return exitCode;
 }
 
 // ── Launcherd client ─────────────────────────────────────────────────────────
@@ -753,6 +829,144 @@ async function cmdKill(launchId: string): Promise<number> {
   }
 }
 
+// ── Door management (Quadlet services) ────────────────────────────────────────
+
+const DOOR_SERVICES = ["keeperd", "netd", "scoutd"] as const;
+
+/** Run a command in the podman machine VM. */
+async function podmanMachineExec(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["podman", "machine", "ssh", "--", ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+  return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+/** Check if we're running with podman machine (macOS). */
+async function hasPodmanMachine(): Promise<boolean> {
+  const proc = Bun.spawn(["podman", "machine", "list", "--format", "{{.Name}}"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+  return stdout.trim().length > 0;
+}
+
+async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
+  const useMachine = await hasPodmanMachine();
+
+  const runSystemctl = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+    if (useMachine) {
+      return podmanMachineExec(["systemctl", "--user", ...args]);
+    } else {
+      const proc = Bun.spawn(["systemctl", "--user", ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      const code = await proc.exited;
+      return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() };
+    }
+  };
+
+  const targets = services.length > 0
+    ? services.filter((s): s is typeof DOOR_SERVICES[number] => DOOR_SERVICES.includes(s as any))
+    : [...DOOR_SERVICES];
+
+  if (services.length > 0 && targets.length !== services.length) {
+    console.error(`claude-box: unknown service(s). Known: ${DOOR_SERVICES.join(", ")}`);
+    return 1;
+  }
+
+  switch (subcmd) {
+    case "status": {
+      const mode = useMachine ? "podman-machine" : "native";
+      console.log(`door status (${mode}):\n`);
+      for (const svc of targets) {
+        const result = await runSystemctl(["is-active", svc]);
+        const status = result.ok ? "active" : result.stdout || "inactive";
+        console.log(`  ${svc.padEnd(10)} ${status}`);
+      }
+      return 0;
+    }
+    case "start": {
+      for (const svc of targets) {
+        const result = await runSystemctl(["start", svc]);
+        if (result.ok) {
+          console.log(`started ${svc}`);
+        } else {
+          console.error(`failed to start ${svc}: ${result.stderr}`);
+        }
+      }
+      return 0;
+    }
+    case "stop": {
+      for (const svc of targets) {
+        const result = await runSystemctl(["stop", svc]);
+        if (result.ok) {
+          console.log(`stopped ${svc}`);
+        } else {
+          console.error(`failed to stop ${svc}: ${result.stderr}`);
+        }
+      }
+      return 0;
+    }
+    case "restart": {
+      for (const svc of targets) {
+        const result = await runSystemctl(["restart", svc]);
+        if (result.ok) {
+          console.log(`restarted ${svc}`);
+        } else {
+          console.error(`failed to restart ${svc}: ${result.stderr}`);
+        }
+      }
+      return 0;
+    }
+    case "logs": {
+      const svc = targets[0];
+      if (!svc) {
+        console.error("usage: claude-box doors logs <service>");
+        return 1;
+      }
+      if (useMachine) {
+        const proc = Bun.spawn(
+          ["podman", "machine", "ssh", "--", "journalctl", "--user", "-u", svc, "-f"],
+          { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+        );
+        return proc.exited;
+      } else {
+        const proc = Bun.spawn(
+          ["journalctl", "--user", "-u", svc, "-f"],
+          { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+        );
+        return proc.exited;
+      }
+    }
+    default:
+      console.log(`claude-box doors — manage door services
+
+Usage:
+  claude-box doors status [svc...]   show status of door services
+  claude-box doors start [svc...]    start door services
+  claude-box doors stop [svc...]     stop door services
+  claude-box doors restart [svc...]  restart door services
+  claude-box doors logs <svc>        follow logs for a service
+
+Services: ${DOOR_SERVICES.join(", ")}
+
+Examples:
+  claude-box doors status            status of all doors
+  claude-box doors start keeperd     start just keeperd
+  claude-box doors logs netd         follow netd logs`);
+      return subcmd === "-h" || subcmd === "--help" ? 0 : 1;
+  }
+}
+
 async function cmdAttach(launchId: string): Promise<number> {
   if (!launchId) {
     console.error("usage: claude-box attach <launch-id>");
@@ -796,6 +1010,8 @@ async function main(): Promise<number> {
       return cmdKill(rest[0] ?? "");
     case "attach":
       return cmdAttach(rest[0] ?? "");
+    case "doors":
+      return cmdDoors(rest[0] ?? "", rest.slice(1));
     case "keeper-status":
       return cmdKeeperStatus();
     case "keeper-key":

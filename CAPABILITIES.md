@@ -23,7 +23,7 @@ declaration, projected onto the `podman run` mounts/sockets).
 | Grant | What it gives | How |
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
-| **`--repo <path>`** | work on a real project | worktree RW at `/work`, **`.git` read-only** (no host-RCE; commits via keeper). `--repo-rw` is the unsafe `.git`-writable escape. See [REPOD.md](./REPOD.md) |
+| **`--repo <path>`** | work on a real project | worktree RW at `/work`, **`.git` read-only** (no host-RCE; commits via keeper). `--repo-ephemeral` creates a temp worktree (parallel-safe). `--repo-rw` is the unsafe `.git`-writable escape. See [REPOD.md](./REPOD.md) |
 | **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--scout`** | **external reads** (repos/PRs/URLs) | forward the **scoutd** door — content, not creds; the read twin of keeper, see [SCOUT.md](./SCOUT.md) |

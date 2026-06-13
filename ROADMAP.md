@@ -20,7 +20,7 @@ so they can't drift.
 |---|---|
 | **doors** | `keeper`, `beads`, `net`, `scout` presets + generic `--door NAME[=SOCK]` |
 | **rooms** | `--room dev` (keeper+net+scout), `--room read` (scout) — named door bundles |
-| **repo** | `--repo` (worktree RW, `.git` **:ro**) / `--repo-rw` (unsafe escape) |
+| **repo** | `--repo` (worktree RW, `.git` **:ro**) / `--repo-ephemeral` (parallel-safe) / `--repo-rw` (unsafe escape) |
 | **egress** | `--net` (netd door) / `--net-open` (unsafe ambient escape) |
 | **netd** | daemon built (`nix run .#netd`), allowlist proxy, fail-closed (lives in prx) |
 | **provenance** | L1 image attestation + pinned contract; L2/L3 pending (HANDOFF.md) |
@@ -48,12 +48,16 @@ unsafe escapes (`--repo-rw` / `--net-open`) are the interim. See ROOM.md.
   `claude-box` becomes its first consumer. Concept now, extraction later.
 
 **In `bounded-systems/prx` (out of this session's scope — needs that repo):**
-- `scoutd` daemon (keeperd is the template; a prior attempt stalled mid-typecheck).
 - `repod` daemon (read projection + overlay).
 - `launcherd` daemon (LAUNCHERD.md — attenuation is the core invariant).
-- Package `netd` as a pinned OCI image.
 - **The pod (`prx-zj8`)** — run all daemons + the box as pinned images in one
   podman pod.
+
+**Recently completed (this session):**
+- **scoutd daemon** — external read door (repos/PRs/issues/URLs), now implemented
+- **netd-image** — allowlist egress proxy as OCI image
+- **scoutd-image** — read daemon as OCI image
+- **Quadlet units** — systemd service files for all doors
 
 **On a host / macOS:**
 - Build/refresh the image, run the pod, verify policed doors end-to-end, then
@@ -62,13 +66,12 @@ unsafe escapes (`--repo-rw` / `--net-open`) are the interim. See ROOM.md.
 
 ## Suggested order
 
-1. **The pod** — package netd as a pinned image, run box + netd in the pod. Makes
-   `--net` actually work on macOS and is the template for the rest.
-2. **Un-`todo` the `--net` ocap tests** once the pod runs netd.
-3. **scoutd** (#5) → un-`todo` `--scout`.
-4. **repod** (#4-proper) → migrate `--repo`, un-`todo` `--repo` cases.
-5. **launcherd** → wire `--launcher`; self-hosting collapses to one room.
-6. **Provenance L2/L3** (HANDOFF.md) once the doors are real.
+1. **The pod** — run keeperd + netd + scoutd in the pod. All images now exist;
+   the pod makes `--net`/`--scout` work on macOS (direct socket mount).
+2. **Un-`todo` the ocap tests** (`--net`, `--scout`, `--keeper`) once the pod runs.
+3. **repod** → migrate `--repo` to read projection + overlay, un-`todo` `--repo` cases.
+4. **launcherd** → wire `--launcher`; self-hosting collapses to one room.
+5. **Provenance L2/L3** (HANDOFF.md) once the doors are real.
 
 ## Spike — `wip/launcherd` (reference, do NOT merge)
 
@@ -89,15 +92,18 @@ hardening it into a real daemon, resolve three things:
 - **L2 overlap** — the spike signs L2 launch attestations, but HANDOFF.md
   earmarks L2 for keeperd. Decide who owns it.
 
-## Working-tree isolation (launcher gap, unblocked)
+## Working-tree isolation (launcher gap)
 
 `--repo .` bind-mounts the **live host worktree** RW at `/work` (only `.git` is
 `:ro`), so in-box edits mutate your real checkout and parallel boxes collide.
-Two layers fix this: (1) **ephemeral host worktree** — `--repo` does
-`git worktree add` a temp tree at the rev, mounts that, `worktree remove` on exit
-(launcher-only, **not blocked on a daemon**; still shares the one `.git`); and
-(2) **repod overlay** (REPOD.md) — full `.git` isolation, needs the daemon. (1)
-is a real shippable next step here.
+Two layers fix this:
+
+1. **ephemeral host worktree — DONE:** `--repo-ephemeral` does `git worktree add`
+   a temp tree at HEAD, mounts that, `worktree remove` on exit. Parallel-safe
+   (each box gets its own copy), still shares the one `.git` (read-only), commits
+   via keeperd apply to the original repo. No daemon needed.
+
+2. **repod overlay** (REPOD.md) — full `.git` isolation, needs the daemon. Future.
 
 ## Dogfooding today
 

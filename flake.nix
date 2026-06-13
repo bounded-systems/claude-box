@@ -253,6 +253,151 @@
               };
             };
 
+          # netd-image — the allowlist egress proxy as a container.
+          # Runs alongside the box container in the VM, sharing:
+          #   - /run/doors/ volume (where netd writes its socket)
+          # netd is the ONLY egress path for boxes (--network=none + door).
+          #   nix build .#netd-image && podman load -i result
+          #   podman run -v doors:/run/doors netd
+          netd-image =
+            let
+              # Minimal toolchain for netd: just bun + coreutils
+              netdTools = with pkgs; [
+                bun
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              netdEnv = pkgs.buildEnv {
+                name = "netd-image-root";
+                paths = netdTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # Bundle the netd source
+              netdSrc = pkgs.runCommand "netd-src" {} ''
+                mkdir -p $out/app
+                cp ${./netd/netd.ts} $out/app/netd.ts
+              '';
+
+              netdEntrypoint = pkgs.writeShellScript "netd-entrypoint" ''
+                exec bun /app/netd.ts --unix /run/doors/netd.sock "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "netd";
+              tag = "dev";
+
+              contents = [ netdEnv netdSrc ];
+
+              extraCommands = ''
+                mkdir -p etc tmp run/doors
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                netd:x:${toString uid}:${toString uid}:netd:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                netd:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                chown -R ${toString uid}:${toString uid} run/doors
+              '';
+
+              config = {
+                Entrypoint = [ "${netdEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "netd";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                  # Default allowlist — can be overridden via NETD_ALLOW env
+                  "NETD_ALLOW=api.anthropic.com,.anthropic.com"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                };
+              };
+            };
+
+          # scoutd-image — the external read daemon as a container.
+          # Runs alongside the box container in the VM, sharing:
+          #   - /run/doors/ volume (where scoutd writes its socket)
+          # scoutd holds read tokens; boxes get content, never creds.
+          #   nix build .#scoutd-image && podman load -i result
+          #   podman run -v doors:/run/doors scoutd
+          scoutd-image =
+            let
+              # Minimal toolchain for scoutd: bun + coreutils + cacert
+              scoutdTools = with pkgs; [
+                bun
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              scoutdEnv = pkgs.buildEnv {
+                name = "scoutd-image-root";
+                paths = scoutdTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # Bundle the scoutd source
+              scoutdSrc = pkgs.runCommand "scoutd-src" {} ''
+                mkdir -p $out/app
+                cp ${./scoutd.ts} $out/app/scoutd.ts
+              '';
+
+              scoutdEntrypoint = pkgs.writeShellScript "scoutd-entrypoint" ''
+                exec bun /app/scoutd.ts serve --socket /run/doors/scoutd.sock "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "scoutd";
+              tag = "dev";
+
+              contents = [ scoutdEnv scoutdSrc ];
+
+              extraCommands = ''
+                mkdir -p etc tmp run/doors creds
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                scout:x:${toString uid}:${toString uid}:scout:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                scout:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                chown -R ${toString uid}:${toString uid} run/doors creds
+              '';
+
+              config = {
+                Entrypoint = [ "${scoutdEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "scout";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                  "/creds" = {};
+                };
+              };
+            };
+
           # peercred — SO_PEERCRED injector for launcherd (Rust)
           # Wraps a unix socket to inject caller UID/GID/PID into requests.
           peercred = pkgs.rustPlatform.buildRustPackage {
@@ -268,6 +413,8 @@
           aarch64-darwin = {
             claude-image = self.packages.aarch64-linux.claude-image;
             keeperd-image = self.packages.aarch64-linux.keeperd-image;
+            netd-image = self.packages.aarch64-linux.netd-image;
+            scoutd-image = self.packages.aarch64-linux.scoutd-image;
             default = self.packages.aarch64-linux.claude-image;
 
             # The host launcher: a typed Bun CLI, nix-built, run via PINNED bun.
@@ -316,6 +463,17 @@
               in pkgs.writeShellScriptBin "netd" ''
                 exec ${pkgs.bun}/bin/bun ${./netd/netd.ts} "$@"
               '';
+
+            # scoutd — the external read daemon behind the `--scout` door (SCOUT.md).
+            # A pinned bun process that fetches repos/PRs/issues/URLs and returns
+            # content, never credentials. The read twin of keeperd.
+            #   nix run .#scoutd -- --port 3129   # TCP for testing
+            #   nix run .#scoutd                   # listen on $SCOUTD_SOCK door
+            scoutd =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "scoutd" ''
+                exec ${pkgs.bun}/bin/bun ${./scoutd.ts} "$@"
+              '';
           };
         };
 
@@ -332,6 +490,11 @@
       apps.aarch64-darwin.netd = {
         type = "app";
         program = "${self.packages.aarch64-darwin.netd}/bin/netd";
+      };
+
+      apps.aarch64-darwin.scoutd = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.scoutd}/bin/scoutd";
       };
 
       # Option A builder (prx-9yp), prepared so we can build LATER.

@@ -64,6 +64,23 @@ All doors use defense-in-depth:
 
 ## Install
 
+### macOS (via podman machine)
+
+```bash
+# Build and load images
+nix build .#keeperd-image && podman load -i result
+nix build .#netd-image && podman load -i result
+nix build .#scoutd-image && podman load -i result
+
+# Install quadlet units
+./quadlet/install.sh
+
+# Start doors
+podman machine ssh -- systemctl --user start keeperd
+podman machine ssh -- systemctl --user start netd
+podman machine ssh -- systemctl --user start scoutd
+```
+
 ### macOS (via Lima)
 
 ```bash
@@ -76,7 +93,7 @@ limactl copy *.volume *.container claude:~/.config/containers/systemd/
 
 # Enable
 limactl shell claude -- systemctl --user daemon-reload
-limactl shell claude -- systemctl --user enable --now keeperd
+limactl shell claude -- systemctl --user enable --now keeperd netd
 ```
 
 ### Linux
@@ -85,24 +102,28 @@ limactl shell claude -- systemctl --user enable --now keeperd
 mkdir -p ~/.config/containers/systemd
 cp *.volume *.container ~/.config/containers/systemd/
 systemctl --user daemon-reload
-systemctl --user enable --now keeperd
+systemctl --user enable --now keeperd netd
 ```
 
 ## Use
 
 ```bash
 # Status
-systemctl --user status keeperd
+systemctl --user status keeperd netd scoutd
 
 # Logs
 journalctl --user -u keeperd -f
+journalctl --user -u netd -f
+journalctl --user -u scoutd -f
 
-# Run box with keeper door
-podman run -it --rm \
+# Run box with all doors (dev room)
+podman run -it --rm --network=none \
   -v claude-doors:/run/doors:ro \
   -v ~/code/myproject:/work \
   -e KEEPERD_SOCK=/run/doors/keeperd.sock \
-  --network=none \
+  -e NETD_SOCK=/run/doors/netd.sock \
+  -e SCOUTD_SOCK=/run/doors/scoutd.sock \
+  -e HTTPS_PROXY=http://127.0.0.1:3128 \
   localhost/claude-personal:dev
 ```
 

@@ -3,8 +3,6 @@
 # Boxes request repo/PR/URL content through /run/doors/scoutd.sock.
 # scoutd holds read tokens; boxes hold nothing and have no network.
 #
-# STATUS: Not yet implemented - this is the target unit file.
-#
 # Install:
 #   systemctl --user enable --now scoutd
 #

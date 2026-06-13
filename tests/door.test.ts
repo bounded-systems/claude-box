@@ -191,3 +191,36 @@ test("without --launcher, spawn is explicitly denied", () => {
   expect(m.denied.map((d) => d.name)).toContain("launcher");
   expect(capabilityPrompt(m)).toMatch(/launcher:.*No spawn authority/i);
 });
+
+// ── --repo-ephemeral: parallel-safe ephemeral worktrees ──
+test("--repo-ephemeral sets the repoEphemeral flag", () => {
+  const l = planLaunch(["--repo-ephemeral", "."], EMPTY);
+  expect(l.repo).toBe(".");
+  expect(l.repoEphemeral).toBe(true);
+  expect(l.repoRw).toBe(false); // still read-only .git
+});
+
+test("--repo-ephemeral manifest reflects ephemeral mode", () => {
+  const m = buildManifest("work", planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY);
+  expect(m.repo).toBe(".");
+  expect(m.repoEphemeral).toBe(true);
+  expect(m.repoRw).toBe(false);
+  const json = JSON.parse(capabilityJson(m));
+  expect(json.granted.repoEphemeral).toBe(true);
+  expect(json.granted.repoGit).toBe("ro"); // still read-only
+});
+
+test("--repo-ephemeral prompt describes isolated copy", () => {
+  const prompt = capabilityPrompt(buildManifest("work", planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY));
+  expect(prompt).toMatch(/EPHEMERAL worktree/);
+  expect(prompt).toMatch(/isolated copy/);
+  expect(prompt).toMatch(/\.git is READ-ONLY/);
+});
+
+test("regular --repo does not set repoEphemeral", () => {
+  const l = planLaunch(["--repo", "."], EMPTY);
+  expect(l.repo).toBe(".");
+  expect(l.repoEphemeral).toBe(false);
+  const m = buildManifest("work", l, EMPTY);
+  expect(JSON.parse(capabilityJson(m)).granted.repoEphemeral).toBe(false);
+});

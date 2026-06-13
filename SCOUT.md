@@ -73,13 +73,25 @@ governed.
 
 ## Status
 
-The `--scout` preset is **wired in the launcher** (`knownDoors()` in
+**Implemented.** The `--scout` preset is wired in the launcher (`knownDoors()` in
 `claude-box.ts`): `claude-box … --scout` forwards `<scoutd.sock>` →
-`/run/scoutd.sock` and exports `SCOUTD_SOCK`, and the capability surface names it
-granted/denied like the other doors. Its ocap acceptance test
-(`tests/ocap.test.ts`) stays `test.todo` until `scoutd` + the pod land — the same
-posture as `--keeper`/`--net` (door registry exists before the daemon deploys).
+`/run/scoutd.sock` and exports `SCOUTD_SOCK`.
 
-`scoutd` itself is an external daemon (lives with keeperd/beadsd/netd in the pod,
-`prx-zj8`) and is **still to build** — follow keeperd's framing (see
-`PRX-DAEMON-HANDOFF.md`). Pairs with NETD.md (egress) and REPOD.md (local repo).
+- **scoutd.ts** — the daemon (same NDJSON protocol as keeperd)
+- **lib/scout.ts** — in-box client library
+- **scoutd-image** — OCI image via `nix build .#scoutd-image`
+- **quadlet/scoutd.container** — systemd unit for running in podman machine
+
+The daemon supports:
+- `status` — health check + allowlist
+- `repo` — fetch GitHub repo metadata
+- `pr` — fetch PR metadata, diff, comments
+- `issue` — fetch issue metadata + comments
+- `fetch` — fetch arbitrary URL (allowlist enforced)
+- `download` — download file content (base64)
+
+Tokens: set `SCOUTD_ALLOW` to customize the allowlist (default: GitHub + npm + pypi).
+Place a GitHub token at `~/.claude-box/scout_github_token` for private repo access.
+
+Its ocap acceptance test (`tests/ocap.test.ts`) stays `test.todo` until the pod lands.
+Pairs with NETD.md (egress) and REPOD.md (local repo).

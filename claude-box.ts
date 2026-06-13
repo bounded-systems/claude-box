@@ -37,11 +37,21 @@ import {
   deniedDoorSection,
   transportString,
   unix,
+  tcp,
   attenuate,
 } from "./guest-room/mod.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
+
+// ── TCP mode ports (for macOS ↔ podman machine) ──────────────────────────────
+// When daemons run on the macOS host with --port, containers reach them via
+// host.containers.internal:PORT. These are the canonical ports for TCP mode.
+const TCP_PORTS: Record<string, number> = {
+  keeperd: 3001,
+  netd: 3128,  // HTTP proxy port
+  scoutd: 3002,
+};
 
 // ── Guest catalog ─────────────────────────────────────────────────────────────
 // A *guest* is a runtime identity: which image runs, what entrypoint, and what
@@ -95,6 +105,15 @@ const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
+
+// In TCP mode (DOORS_TCP=1), the proxy points directly to netd on the host.
+const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
+
+/** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
+ *  Set DOORS_TCP=1 or run `doors serve` to enable TCP mode. */
+function isTcpMode(env: Env): boolean {
+  return env.DOORS_TCP === "1" || env.DOORS_TCP === "true";
+}
 
 type Env = Record<string, string | undefined>;
 
@@ -295,9 +314,27 @@ function knownRooms(): RoomCatalog {
 
 /** Resolve a door against claude-box's catalog. Thin product binding over the
  *  engine's resolveDoor (guest-room/mod.ts): known names get their canonical
- *  path + rulebook; any other name becomes a generic service door. */
+ *  path + rulebook; any other name becomes a generic service door.
+ *
+ *  In TCP mode (DOORS_TCP=1), doors use TCP transports:
+ *  - host: tcp("127.0.0.1", port) — where daemons listen
+ *  - guest: tcp("host.containers.internal", port) — where containers connect */
 function resolveDoor(name: string, host: string | undefined, env: Env = process.env): DoorGrant {
-  return resolveDoorIn(knownDoors(env), name, host, env);
+  const base = resolveDoorIn(knownDoors(env), name, host, env);
+
+  // In TCP mode, override transports for known doors with TCP ports
+  if (isTcpMode(env)) {
+    const daemonName = `${name}d`;  // net → netd, keeper → keeperd, etc.
+    const port = TCP_PORTS[daemonName];
+    if (port !== undefined) {
+      return {
+        ...base,
+        host: tcp("127.0.0.1", port),
+        guest: tcp("host.containers.internal", port),
+      };
+    }
+  }
+  return base;
 }
 
 const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, isolated workloads
@@ -709,21 +746,42 @@ async function run(
   if (guestPreset.needsConfig) {
     argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
   }
-  // Network is a DOOR, not a NIC. Default to NO interface (nothing to exfiltrate
-  // through, even with a repo mounted); the netd door (below) is the only
-  // policed way out. `--net-open` is the loud, explicit, unsafe ambient-egress
-  // escape — used only when no netd is running.
+  // Network posture: TCP mode vs Unix socket mode
+  //
+  // TCP mode (DOORS_TCP=1): Daemons run on TCP ports on the macOS host. The
+  // container uses the default network and reaches daemons via
+  // host.containers.internal:PORT. netd's allowlist is the security boundary.
+  //
+  // Unix socket mode: Daemons run on Unix sockets. The container uses
+  // --network=none and mounts the socket directory. An in-box socat relay
+  // bridges 127.0.0.1:3128 → the netd socket. This provides hard network
+  // isolation but doesn't work over virtiofs (macOS ↔ podman machine).
+  const tcpMode = isTcpMode(env);
   const netDoor = doors.find((d) => d.name === "net");
+
   if (netOpen) {
     console.error(
       "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
     );
+  } else if (tcpMode && doors.length > 0) {
+    // TCP mode: use default network so container can reach host.containers.internal
+    // netd's allowlist is the security boundary (HTTPS_PROXY → netd)
+    if (netDoor) {
+      argv.push(
+        "--env",
+        `HTTPS_PROXY=${NETD_TCP_PROXY}`,
+        "--env",
+        `HTTP_PROXY=${NETD_TCP_PROXY}`,
+        "--env",
+        `ALL_PROXY=${NETD_TCP_PROXY}`,
+        "--env",
+        "NO_PROXY=localhost,127.0.0.1",
+      );
+    }
   } else {
+    // Unix socket mode: hard network isolation, relay via mounted socket
     argv.push("--network=none");
     if (netDoor) {
-      // The image entrypoint relays 127.0.0.1:3128 → the netd door; point every
-      // egress client at it. The box holds no egress of its own — it can only
-      // ASK netd, which owns the allowlist.
       argv.push(
         "--env",
         `HTTPS_PROXY=${NETD_PROXY}`,
@@ -736,21 +794,26 @@ async function run(
       );
     }
   }
-  // Forward doors by mounting the socket directory (not individual files) to
-  // avoid virtiofs statfs issues with sockets shared across macOS↔VM boundary.
-  // All doors share ~/.claude-box/run → /run/doors; env vars point to sockets.
+
+  // Forward doors: TCP mode vs Unix socket mode
   if (doors.length > 0) {
-    // Validate socket directory once (all doors share the same host dir)
-    const hostDir = getRunDir(env);
-    assertSocketDir(`${hostDir}/placeholder`, undefined); // check dir exists & is private
-    argv.push("-v", `${hostDir}:/run/doors`);
-    // Export env var for each granted door
-    for (const d of doors) {
-      const hostPath = unixPath(d.host);
-      const guestPath = unixPath(d.guest);
-      // Verify the socket exists (daemon running)
-      assertSocketExists(hostPath, d.name);
-      argv.push("--env", `${d.env}=${guestPath}`);
+    if (tcpMode) {
+      // TCP mode: no socket mounts needed, just set env vars to TCP endpoints
+      for (const d of doors) {
+        const endpoint = transportString(d.guest);
+        argv.push("--env", `${d.env}=${endpoint}`);
+      }
+    } else {
+      // Unix socket mode: mount socket directory, set env vars to socket paths
+      const hostDir = getRunDir(env);
+      assertSocketDir(`${hostDir}/placeholder`, undefined);
+      argv.push("-v", `${hostDir}:/run/doors`);
+      for (const d of doors) {
+        const hostPath = unixPath(d.host);
+        const guestPath = unixPath(d.guest);
+        assertSocketExists(hostPath, d.name);
+        argv.push("--env", `${d.env}=${guestPath}`);
+      }
     }
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
@@ -1170,6 +1233,39 @@ async function buildAndLoadImage(
 }
 
 async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
+  // Handle help first (no podman check needed)
+  if (subcmd === "-h" || subcmd === "--help" || !subcmd) {
+    console.log(`claude-box doors — manage door services
+
+Usage:
+  claude-box doors serve             run all daemons in foreground (TCP mode, for macOS)
+  claude-box doors init              one-shot setup (build images, install units, start)
+  claude-box doors ensure            start any stopped services (fast, no rebuild)
+  claude-box doors status [svc...]   show status of door services
+  claude-box doors start [svc...]    start door services
+  claude-box doors stop [svc...]     stop door services
+  claude-box doors restart [svc...]  restart door services
+  claude-box doors logs <svc>        follow logs for a service
+
+Services: ${DOOR_SERVICES.join(", ")}
+
+TCP Mode (macOS):
+  'doors serve' runs daemons on TCP ports (not Unix sockets) because virtiofs
+  can't share sockets between macOS and the podman machine VM. Containers reach
+  daemons via host.containers.internal:PORT. To launch a box in TCP mode:
+
+    DOORS_TCP=1 claude-box --room dev --repo .
+
+  TCP ports: keeperd=${TCP_PORTS.keeperd}, netd=${TCP_PORTS.netd}, scoutd=${TCP_PORTS.scoutd}
+
+Examples:
+  claude-box doors serve             run daemons on TCP (Ctrl+C to stop)
+  DOORS_TCP=1 claude-box --room dev  launch box with TCP doors
+  claude-box doors init              first-time setup (containerized, for Linux)
+  claude-box doors status            status of all doors`);
+    return subcmd === "-h" || subcmd === "--help" ? 0 : 1;
+  }
+
   const useMachine = await hasPodmanMachine();
 
   const runSystemctl = async (
@@ -1385,13 +1481,16 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
       return 0;
     }
     case "serve": {
-      // Run all door daemons in foreground (orchestrated, for macOS host)
-      console.log("claude-box doors serve — starting daemons on host...\n");
+      // Run all door daemons in foreground with TCP ports (for macOS host).
+      // TCP mode is required because Unix sockets don't work over virtiofs
+      // (macOS ↔ podman machine boundary). Containers reach daemons via
+      // host.containers.internal:PORT.
+      console.log("claude-box doors serve — starting daemons on host (TCP mode)...\n");
 
-      const daemons: Array<{ name: string; script: string }> = [
-        { name: "keeperd", script: "keeperd.ts" },
-        { name: "netd", script: "netd/netd.ts" },
-        { name: "scoutd", script: "scoutd.ts" },
+      const daemons: Array<{ name: string; script: string; port: number }> = [
+        { name: "keeperd", script: "keeperd.ts", port: TCP_PORTS.keeperd },
+        { name: "netd", script: "netd/netd.ts", port: TCP_PORTS.netd },
+        { name: "scoutd", script: "scoutd.ts", port: TCP_PORTS.scoutd },
       ];
 
       // Find the repo root (where this script lives)
@@ -1404,7 +1503,8 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
 
       for (const d of daemons) {
         const scriptPath = `${scriptDir}/${d.script}`;
-        const proc = Bun.spawn([bunPath, scriptPath, "serve"], {
+        // Start daemon in TCP mode with --port
+        const proc = Bun.spawn([bunPath, scriptPath, "serve", "--port", String(d.port)], {
           stdout: "pipe",
           stderr: "pipe",
           env: { ...process.env },
@@ -1439,10 +1539,12 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
           }
         })();
 
-        console.log(`  ${d.name}: started (pid ${proc.pid})`);
+        console.log(`  ${d.name}: started on port ${d.port} (pid ${proc.pid})`);
       }
 
-      console.log("\nAll daemons running. Press Ctrl+C to stop.\n");
+      console.log("\nAll daemons running on TCP. Press Ctrl+C to stop.");
+      console.log("\nTo launch a box with TCP mode, set DOORS_TCP=1:");
+      console.log("  DOORS_TCP=1 claude-box --room dev --repo .\n");
 
       // Handle SIGINT to clean up
       process.on("SIGINT", () => {
@@ -1470,27 +1572,9 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
       return 1;
     }
     default:
-      console.log(`claude-box doors — manage door services
-
-Usage:
-  claude-box doors serve             run all daemons in foreground (recommended for macOS)
-  claude-box doors init              one-shot setup (build images, install units, start)
-  claude-box doors ensure            start any stopped services (fast, no rebuild)
-  claude-box doors status [svc...]   show status of door services
-  claude-box doors start [svc...]    start door services
-  claude-box doors stop [svc...]     stop door services
-  claude-box doors restart [svc...]  restart door services
-  claude-box doors logs <svc>        follow logs for a service
-
-Services: ${DOOR_SERVICES.join(", ")}
-
-Examples:
-  claude-box doors serve             run daemons in foreground (Ctrl+C to stop)
-  claude-box doors init              first-time setup (containerized, for Linux)
-  claude-box doors status            status of all doors
-  claude-box doors start keeperd     start just keeperd
-  claude-box doors logs netd         follow netd logs`);
-      return subcmd === "-h" || subcmd === "--help" ? 0 : 1;
+      console.error(`claude-box: unknown doors subcommand '${subcmd}'`);
+      console.error("Run 'claude-box doors --help' for usage.");
+      return 1;
   }
 }
 
@@ -1572,7 +1656,10 @@ export {
   capabilityPrompt,
   transportString,
   unix,
+  tcp,
   unixPath,
+  isTcpMode,
+  TCP_PORTS,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset };
 

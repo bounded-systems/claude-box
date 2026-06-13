@@ -3,9 +3,12 @@
 // This module knows nothing about any particular guest: no guest identity, no
 // image, no container runtime. A ROOM is walls plus a furnished set of DOORS; a
 // DOOR is a single (name, socket) capability brokered by a daemon that holds the
-// authority the room never does. The room hands its guest a RULEBOOK keyed to
-// exactly the doors present — a card per granted door (how to use it) and a card
-// per denied door (there is no rule; do not attempt).
+// authority the room never does. A door may be ATTENUATED — narrowed by opaque
+// caveats the broker enforces — and attenuation is append-only, so a door can
+// only ever be handed onward equally or more restricted, never wider. The room
+// hands its guest a RULEBOOK keyed to exactly the doors present — a card per
+// granted door (how to use it, and any restriction on it) and a card per denied
+// door (there is no rule; do not attempt).
 //
 // A consumer supplies the door CATALOG and the room bundles; guest-room resolves
 // grants, derives the honest granted/denied surface, and renders the rulebook
@@ -49,6 +52,11 @@ export type DoorGrant = {
   host: string;
   grants: string;
   use: string;
+  /** Attenuation: opaque restrictions narrowing this door (see `attenuate`).
+   *  The engine carries them and renders them honestly into the rulebook; it
+   *  never interprets them — the broker behind the door enforces them, and the
+   *  catalog owner defines their grammar. Absent ⇒ the door is unrestricted. */
+  caveats?: string[];
 };
 
 /** The product's door catalog: the doors this kind of room can furnish. */
@@ -87,6 +95,21 @@ export function resolveDoor(
     grants: `service door "${name}"`,
     use: `Reach the ${name} service at ${inBox} ($${ENV}). You hold the door, not the service's keys.`,
   };
+}
+
+/** Attenuation — derive a strictly *narrower* door from one you already hold.
+ *  A caveat is an opaque restriction (e.g. a single host, a read-only mode): the
+ *  engine carries and renders it, but never interprets it — the broker behind
+ *  the door enforces it, and the catalog owner owns its grammar. Append-only by
+ *  construction, so authority is monotonically non-increasing: a holder can add
+ *  caveats but never drop them, and so can pass a door onward (e.g. to a
+ *  sub-room) only equally or more restricted, never wider. This is the
+ *  object-capability attenuation rule; the caveats are macaroon-shaped. Blank
+ *  caveats are dropped; attenuating by nothing returns the grant unchanged. */
+export function attenuate(grant: DoorGrant, caveats: string[]): DoorGrant {
+  const add = caveats.map((c) => c.trim()).filter(Boolean);
+  if (!add.length) return grant;
+  return { ...grant, caveats: [...(grant.caveats ?? []), ...add] };
 }
 
 /** Expand a named room to its door grants. Throws (fail closed, not a silent
@@ -131,9 +154,16 @@ export function capabilityPreamble(workcell: string): string[] {
   ];
 }
 
-/** One card per granted door: name, what it grants, and how to use it. */
+/** One card per granted door: name, what it grants, and how to use it. An
+ *  attenuated door also states its restriction, so the surface stays honest —
+ *  a narrowed door must not read as if it were the full grant. */
 export function grantedDoorLines(doors: DoorGrant[]): string[] {
-  return doors.map((d) => `- ${d.name}: ${d.grants}. ${d.use}`);
+  return doors.map((d) => {
+    const card = `- ${d.name}: ${d.grants}. ${d.use}`;
+    return d.caveats?.length
+      ? `${card} RESTRICTED to: ${d.caveats.join("; ")} — requests outside this are denied.`
+      : card;
+  });
 }
 
 /** The DENIED section: a card per absent door (no rule; do not attempt), or an

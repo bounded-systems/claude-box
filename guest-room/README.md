@@ -29,6 +29,33 @@ stay. The room hands its guest a **rulebook** keyed to exactly the doors present
 — a how-to card per granted door, and a *no-rule* card per absent one — so the
 surface is honest about what is **denied**, not only what is granted.
 
+A door can be **attenuated**: narrowed by opaque *caveats* the broker behind it
+enforces (a single host, a read-only mode). Attenuation is append-only, so
+authority only ever decreases — a holder can hand a door onward equally or more
+restricted, never wider (`attenuate(grant, caveats)`). The rulebook states the
+restriction on a narrowed door, so the honest surface extends to it. The caveat
+*grammar* is the consumer's; the engine carries and renders, never interprets —
+the same seam that keeps it guest-agnostic. (This is the object-capability
+attenuation rule; the caveats are macaroon-shaped.)
+
+## Revocation — and why this needs no coordination store
+
+Caveats travel *with* the grant (in the launch manifest); nothing about a door
+is stored centrally. That keeps the model fail-closed and free of any cluster to
+operate — no etcd, no quorum, no shared mutable state — because authority is a
+local, unforgeable reference (the socket you hold), not a row some service must
+agree on. Reaching for a consensus store here would re-introduce exactly the
+ambient, central authority the room is built to eliminate.
+
+The boundary worth watching is **delegation across hosts**. Attenuated doors are
+bearer-shaped (macaroons), and bearer tokens are weak at *revocation*. While
+delegation stays on one host, revocation is local: with a trusted host-side
+caveat table it is just an edit, and the broker behind the door is the single
+point that says yes/no. Only if delegation ever spans hosts **and** needs fast
+revocation does a shared revocation signal arise — and even then prefer short
+**TTLs + re-minting**, or a **signed revocation epoch the broker serves**, over a
+coordination service. Revisit a store only when both of those are true.
+
 ## What's here
 
 ```

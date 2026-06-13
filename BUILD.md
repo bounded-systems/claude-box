@@ -109,7 +109,28 @@ Notes:
   sudo launchctl kickstart -k system/systems.determinate.nix-daemon
   ```
 
-### 4. Build + load
+### 4. Trust paths coming back from the builder
+
+Paths built on a remote builder are copied into your local store, and the daemon
+**rejects unsigned paths** unless the requesting user is trusted:
+
+```
+error: cannot add path '/nix/store/…' because it lacks a signature by a trusted key
+```
+
+Add yourself to `trusted-users`. Determinate Nix owns `/etc/nix/nix.conf` but
+includes `/etc/nix/nix.custom.conf` — put overrides there:
+
+```sh
+# /etc/nix/nix.custom.conf
+echo "trusted-users = root $(whoami)" | sudo tee -a /etc/nix/nix.custom.conf
+sudo launchctl kickstart -k system/systems.determinate.nix-daemon
+```
+
+(Trusted users may import unsigned paths; this is the intended way to accept
+output from your own builder. Avoid the blunter `require-sigs = false`.)
+
+### 5. Build + load
 
 ```sh
 cd <repo>
@@ -155,4 +176,5 @@ git-ignored; never commit `keys/` or `*.qcow2`.
 | `Nix daemon disconnected unexpectedly (maybe it crashed?)` | SSH works but no Nix in the VM | install Nix in the VM (step 1) |
 | `failed to start SSH master connection` | host alias unreachable / wrong port | fix the `~/.ssh/config` `Host` block (step 2) |
 | `Permission denied (publickey)` under `sudo nix build` | daemon (root) can't read the key | give root a readable `IdentityFile` |
+| `cannot add path '…' because it lacks a signature by a trusted key` | your user isn't trusted, so unsigned builder output is rejected | add `trusted-users = root <you>` (step 4) |
 | `HV_SYS_REG_SMCR_EL1` assertion | QEMU/HVF + SME on M3/M4 | use a **vz** builder (this doc), not `.#linux-builder` |

@@ -1399,9 +1399,12 @@ async function cmdDoors(subcmd: string, services: string[]): Promise<number> {
 
       const children: Array<{ name: string; proc: ReturnType<typeof Bun.spawn> }> = [];
 
+      // Use the current bun executable (works inside nix run)
+      const bunPath = process.execPath;
+
       for (const d of daemons) {
         const scriptPath = `${scriptDir}/${d.script}`;
-        const proc = Bun.spawn(["bun", scriptPath, "serve"], {
+        const proc = Bun.spawn([bunPath, scriptPath, "serve"], {
           stdout: "pipe",
           stderr: "pipe",
           env: { ...process.env },

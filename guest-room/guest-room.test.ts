@@ -104,6 +104,26 @@ const steps = new StepRegistry()
     expect(denied.map((d) => d.name)).not.toContain(name);
   });
 
+// ── the seam is enforced, not just documented ────────────────────────────────
+// "The room doesn't know it's Claude" is the whole thesis of the extraction.
+// Make it a mechanical invariant: the engine source must name no guest, so the
+// module can't silently re-couple to claude-box (or any future tenant). If this
+// goes red, a guest leaked into the room.
+describe("the engine stays guest-agnostic", () => {
+  // The engine itself — NOT the test fixture (which names a non-Claude hotel) or
+  // the README (which references the consumer to illustrate the mapping).
+  const engineFiles = ["mod.ts", "gherkin.ts"];
+  const guestIdentities = /\b(claude|anthropic|podman|keeperd|netd|scoutd|launcherd)\b/i;
+
+  for (const file of engineFiles) {
+    test(`${file} names no guest`, () => {
+      const src = readFileSync(`${import.meta.dir}/${file}`, "utf8");
+      const hit = src.match(guestIdentities);
+      expect(hit ? `${file}: "${hit[0]}"` : null).toBeNull();
+    });
+  }
+});
+
 // Discover and register every feature. Synchronous I/O (node:fs) so bun
 // registers the tests during module evaluation.
 const featuresDir = `${import.meta.dir}/features`;

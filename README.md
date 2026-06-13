@@ -9,11 +9,26 @@ container itself is credential-free (see [CAPABILITIES.md](./CAPABILITIES.md)).
 
 **Prerequisites:** [nix](https://nixos.org/download) (with flakes), [podman](https://podman.io/docs/installation) + `podman machine` (macOS)
 
+**macOS — one call:** `nix run .#setup` does the whole bringup (prereqs →
+`podman machine` → build+load the image → start the doors on TCP). Then, in
+another terminal:
+
+```sh
+nix run .#setup                              # one-time bringup, leaves doors running
+DOORS_TCP=1 claude-box --room dev --repo .   # launch a box (TCP mode — see note below)
+```
+
+On macOS the doors run in **TCP mode** (`DOORS_TCP=1`): virtiofs can't share
+Unix sockets across the macOS ↔ podman-machine boundary, so daemons listen on
+TCP ports and containers reach them via `host.containers.internal`.
+
+**Manual / Linux:**
+
 ```sh
 # 1. Build and load the Claude image
 nix build .#claude-image && podman load -i result
 
-# 2. Initialize door services (one-time setup)
+# 2. Initialize door services (one-time setup; Linux/quadlet)
 claude-box doors init
 
 # 3. Launch with full capabilities
@@ -95,7 +110,7 @@ anywhere.
 bun test
 
 # Type check
-bunx tsc --noEmit
+bun x tsc --noEmit   # `bunx` is a separate binary not all bun installs ship; `bun x` always works
 ```
 
 ### Starting the doors (daemons)

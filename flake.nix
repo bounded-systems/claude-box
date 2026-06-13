@@ -427,7 +427,11 @@
             keeperd-image = self.packages.aarch64-linux.keeperd-image;
             netd-image = self.packages.aarch64-linux.netd-image;
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
-            default = self.packages.aarch64-linux.claude-image;
+            # The default is the CLI, not the image. Installing/running a
+            # `.tar.gz` (the old default) put junk entries in `nix profile` and
+            # spewed "not including …claude-personal.tar.gz" on every op — an
+            # image tarball is never a useful profile/`nix run` target.
+            default = self.packages.aarch64-darwin.claude-box;
 
             # The host launcher: a typed Bun CLI, nix-built, run via PINNED bun.
             # (`bun --compile` would embed the runtime but fetches it from the
@@ -487,44 +491,111 @@
                 exec ${pkgs.bun}/bin/bun ${./.}/scoutd.ts "$@"
               '';
 
-            # doors-serve — run all door daemons in foreground (orchestrated)
-            # For macOS development: one command starts keeperd, netd, scoutd
+            # doors-serve — run all door daemons in foreground (TCP mode).
+            # Delegates to `claude-box doors serve` so there is ONE orchestrator
+            # and ONE source of truth for the TCP ports (TCP_PORTS in
+            # claude-box.ts). The old inline version started daemons on Unix
+            # sockets (no --port) — broken on macOS, where virtiofs can't share
+            # sockets into the podman-machine VM.
             #   nix run .#doors-serve
             doors-serve =
               let pkgs = pkgsFor "aarch64-darwin";
               in pkgs.writeShellScriptBin "doors-serve" ''
-                set -e
-                echo "doors-serve: starting daemons..."
+                exec ${self.packages.aarch64-darwin.claude-box}/bin/claude-box doors serve "$@"
+              '';
 
-                cleanup() {
-                  echo ""
-                  echo "Stopping daemons..."
-                  kill $KEEPERD_PID $NETD_PID $SCOUTD_PID 2>/dev/null || true
-                  wait
-                  echo "Done."
-                }
-                trap cleanup EXIT INT TERM
+            # setup — one-call local bringup for macOS (determinate, pinned).
+            # Takes a fresh checkout from clone to a running box without the
+            # manual dance: prereqs → podman machine → build+load image → doors.
+            #   nix run .#setup                  # full bringup, then serve doors
+            #   nix run .#setup -- --setup-only  # stop after the image build
+            setup =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "claude-box-setup" ''
+                set -euo pipefail
 
-                ${self.packages.aarch64-darwin.keeperd}/bin/keeperd serve &
-                KEEPERD_PID=$!
-                echo "  keeperd: started (pid $KEEPERD_PID)"
+                serve=1
+                for arg in "$@"; do
+                  case "$arg" in
+                    --setup-only) serve=0 ;;
+                    -h|--help)
+                      echo "claude-box setup — one-call local bringup (macOS)"
+                      echo ""
+                      echo "  nix run .#setup                 prereqs, podman machine, build+load image, then serve doors"
+                      echo "  nix run .#setup -- --setup-only stop after the image (do not start doors)"
+                      echo ""
+                      echo "Run from the repo root. After setup, launch a box in another terminal:"
+                      echo "  DOORS_TCP=1 claude-box --room dev --repo ."
+                      exit 0 ;;
+                    *) echo "claude-box setup: unknown arg '$arg' (try --help)" >&2; exit 2 ;;
+                  esac
+                done
 
-                ${self.packages.aarch64-darwin.netd}/bin/netd serve &
-                NETD_PID=$!
-                echo "  netd: started (pid $NETD_PID)"
+                say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+                die() { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
-                ${self.packages.aarch64-darwin.scoutd}/bin/scoutd serve &
-                SCOUTD_PID=$!
-                echo "  scoutd: started (pid $SCOUTD_PID)"
+                say "1/3  Prereqs"
+                command -v nix    >/dev/null || die "nix not found — install Nix (flakes enabled)."
+                command -v podman >/dev/null || die "podman not found — 'brew install podman'."
+                echo "  nix:    $(command -v nix)"
+                echo "  podman: $(command -v podman)"
 
+                say "2/3  podman machine"
+                if podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then
+                  echo "  machine exists — starting (no-op if already running)"
+                  podman machine start 2>/dev/null || true
+                else
+                  echo "  no machine — initializing + starting (first run pulls the VM image)"
+                  podman machine init
+                  podman machine start
+                fi
+
+                say "3/3  Build + load the image"
+                echo "  nix build .#claude-image  (offloads to the aarch64-linux builder on macOS)"
+                nix build .#claude-image \
+                  || die "image build failed. On Apple Silicon this needs an aarch64-linux (vz) builder — see BUILD.md."
+                podman load -i result
+                podman image exists localhost/claude-personal:dev \
+                  || die "image did not load into podman."
+                echo "  image OK: localhost/claude-personal:dev"
+
+                printf '\n\033[1m== Setup complete\033[0m\n'
+                echo "Launch a box in ANOTHER terminal (TCP mode):"
+                echo "    DOORS_TCP=1 claude-box --room dev --repo ."
                 echo ""
-                echo "All daemons running. Press Ctrl+C to stop."
-                echo ""
 
-                wait
+                if [ "$serve" = "1" ]; then
+                  say "Starting doors (TCP mode) — Ctrl+C to stop"
+                  exec ${self.packages.aarch64-darwin.claude-box}/bin/claude-box doors serve
+                else
+                  echo "Start the doors when ready:"
+                  echo "    nix run .#doors-serve        # (or: claude-box doors serve)"
+                fi
               '';
           };
         };
+
+      # One-call local bringup: prereqs → podman machine → image → doors.
+      apps.aarch64-darwin.setup = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.setup}/bin/claude-box-setup";
+      };
+
+      # `nix run .` / `.#claude-box` → the CLI (matches the package default).
+      apps.aarch64-darwin.default = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.claude-box}/bin/claude-box";
+      };
+      apps.aarch64-darwin.claude-box = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.claude-box}/bin/claude-box";
+      };
+
+      # `nix run .#doors-serve` → all door daemons on TCP (foreground).
+      apps.aarch64-darwin.doors-serve = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.doors-serve}/bin/doors-serve";
+      };
 
       apps.aarch64-darwin.provenance = {
         type = "app";

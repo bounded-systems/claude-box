@@ -287,7 +287,7 @@
               '';
 
               netdEntrypoint = pkgs.writeShellScript "netd-entrypoint" ''
-                exec bun /app/netd/netd.ts --unix /run/doors/netd.sock "$@"
+                exec bun /app/netd/netd.ts serve --socket /run/doors/netd.sock "$@"
               '';
             in
             pkgs.dockerTools.buildLayeredImage {

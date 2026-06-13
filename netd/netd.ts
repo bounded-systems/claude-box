@@ -8,7 +8,7 @@
  * bytes — end-to-end TLS is preserved), FAILS CLOSED (anything not allowed →
  * 403), and AUDITS every decision. Contract: ../NETD.md.
  *
- *   nix run .#netd                     # listen on $NETD_SOCK or /run/netd.sock
+ *   nix run .#netd                     # listen on $NETD_SOCK or ~/.claude-box/run/netd.sock
  *   nix run .#netd -- --port 3128      # listen on TCP 127.0.0.1:3128 (host/pod)
  *   NETD_ALLOW="api.anthropic.com,.anthropic.com" nix run .#netd
  *
@@ -24,9 +24,19 @@
  * supported`), which is exactly what the pod provides.
  */
 import { connect, listen, type Socket } from "bun";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, mkdirSync } from "node:fs";
 
 const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
+
+function defaultSocketPath(): string {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime) return `${runtime}/netd.sock`;
+  const home = process.env.HOME ?? "/tmp";
+  // Auto-create ~/.claude-box/run on macOS (no XDG_RUNTIME_DIR)
+  const runDir = `${home}/.claude-box/run`;
+  try { mkdirSync(runDir, { recursive: true, mode: 0o700 }); } catch {}
+  return `${runDir}/netd.sock`;
+}
 
 /** Allowlist entry: exact host, or ".suffix" (matches the apex + any subdomain). */
 function allowed(host: string, allow: string[]): boolean {
@@ -124,7 +134,7 @@ const handlers = {
 };
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
-let unix = process.env.NETD_SOCK || "/run/netd.sock";
+let unix = process.env.NETD_SOCK || defaultSocketPath();
 let port: number | undefined;
 const argv = Bun.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {

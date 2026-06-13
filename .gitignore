@@ -9,3 +9,6 @@ keys/
 *.qcow2
 nixos.qcow2
 .claude/settings.local.json
+
+# Bun's local install cache — must never be committed.
+.bun/

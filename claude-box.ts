@@ -28,7 +28,6 @@ import {
   type DoorGrant,
   type DoorCatalog,
   type RoomCatalog,
-  defaultHostSock,
   resolveDoor as resolveDoorIn,
   expandRoom,
   deniedDoors,

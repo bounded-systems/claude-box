@@ -379,10 +379,20 @@ function resolveDoor(name: string, host: string | undefined, env: Env = process.
     const daemonName = `${name}d`;  // net → netd, keeper → keeperd, etc.
     const port = TCP_PORTS[daemonName];
     if (port !== undefined) {
+      // TCP mode mounts NO /run/doors — the door is reached over the host gateway.
+      // The transport override below is correct, but base.use still names the unix
+      // path, which is the exact "wired but undiallable" lie a live box hit (net
+      // worked via HTTPS_PROXY; scout's guidance pointed at an absent socket). Keep
+      // the guidance honest by swapping the unix path for the real TCP endpoint —
+      // the same value $${ENV} carries. (The full transport-agnostic client is
+      // prx-o92; this just stops the guidance from misleading the agent.)
+      const endpoint = `host.containers.internal:${port}`;
+      const unixHint = `/run/doors/${daemonName}.sock`;
       return {
         ...base,
         host: tcp("127.0.0.1", port),
         guest: tcp("host.containers.internal", port),
+        use: base.use.split(unixHint).join(endpoint),
       };
     }
   }

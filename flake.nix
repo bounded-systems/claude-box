@@ -161,7 +161,11 @@
                 # mounted volume — the isolation boundary, separate from work.
                 "CLAUDE_CONFIG_DIR=${configDir}"
                 # Disable telemetry — the box has no route to statsig.anthropic.com
-                # and the failed connection attempts are just noise.
+                # and the failed connection attempts flood the netd log.
+                # NONESSENTIAL_TRAFFIC is the master switch: it stops the statsig
+                # feature-gating calls (the actual flood) plus error reporting and
+                # the autoupdater. The two below are kept for explicitness.
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
                 "DISABLE_AUTOUPDATER=1"
                 "DISABLE_ERROR_REPORTING=1"
               ];

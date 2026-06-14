@@ -56,7 +56,9 @@ type NetdCapture = { log: () => string; stop: () => void };
 
 function captureNetd(allow: string[], port = NETD_TCP_PORT): NetdCapture {
   let buf = "";
-  const proc = Bun.spawn(["bun", "netd/netd.ts", "serve", "--port", String(port)], {
+  // Use the flake app (`nix run .#netd`), not a bare `bun` — bun isn't on PATH
+  // in this environment; nix is the sanctioned entrypoint (cf. DAEMON_HINTS).
+  const proc = Bun.spawn(["nix", "run", ".#netd", "--", "serve", "--port", String(port)], {
     env: { ...process.env, NETD_ALLOW: allow.join(",") },
     stdout: "pipe",
     stderr: "pipe",

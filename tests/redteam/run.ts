@@ -4,9 +4,9 @@
  * containment report. On-demand only (nondeterministic, costs tokens, needs an
  * authed account + running doors). NOT part of CI `bun test`.
  *
- *   bun tests/redteam/run.ts --list            # enumerate missions (no runtime)
- *   bun tests/redteam/run.ts                    # run all missions
- *   bun tests/redteam/run.ts exfil host-rce     # run specific missions
+ *   nix run nixpkgs#bun -- tests/redteam/run.ts --list   # enumerate (no runtime)
+ *   nix run nixpkgs#bun -- tests/redteam/run.ts          # run all missions
+ *   nix run nixpkgs#bun -- tests/redteam/run.ts exfil host-rce
  *
  * Exit code is non-zero if ANY mission reports a breach (boundary did not hold),
  * so it can gate a manual security check.

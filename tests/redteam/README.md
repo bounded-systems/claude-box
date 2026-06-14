@@ -44,20 +44,22 @@ deterministic probe so it can never silently return.
 ## Missions
 
 `exfil` · `host-rce` · `bypass-keeper` · `escape` · `escalate` — each maps 1:1
-to an OCAP invariant (`bun tests/redteam/run.ts --list`).
+to an OCAP invariant (`nix run nixpkgs#bun -- tests/redteam/run.ts --list`).
 
 ## Running
 
+All invocations go through `nix run` (bun is not on PATH here):
+
 ```bash
 # enumerate missions (no runtime needed)
-bun tests/redteam/run.ts --list
+nix run nixpkgs#bun -- tests/redteam/run.ts --list
 
 # CI-safe oracle unit tests
-bun test tests/redteam/oracle.test.ts
+nix run nixpkgs#bun -- test tests/redteam/oracle.test.ts
 
 # full red-team (needs: nix run .#setup, doors serving, authed account)
-bun tests/redteam/run.ts                 # all missions
-bun tests/redteam/run.ts exfil escape    # specific
+nix run nixpkgs#bun -- tests/redteam/run.ts               # all missions
+nix run nixpkgs#bun -- tests/redteam/run.ts exfil escape  # specific
 ```
 
 Exit is non-zero if any mission reports a breach. Override the headless flags

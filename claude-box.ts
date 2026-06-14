@@ -203,6 +203,46 @@ function assertSocketExists(sock: string, doorName?: string): void {
   }
 }
 
+/** True if a TCP listener accepts a connection at host:port within the timeout.
+ *  The TCP-mode counterpart to assertSocketExists's existsSync check. */
+async function tcpReachable(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  try {
+    await Promise.race([
+      Bun.connect({
+        hostname: host,
+        port,
+        socket: { open(s) { s.end(); }, data() {}, error() {} },
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs)),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** TCP-mode preflight: fail fast with a hint if a door's daemon isn't listening.
+ *  Without this the box launches fine and the in-box agent dies later with an
+ *  opaque "API Error: Connection error" the moment it touches the door — because
+ *  the unix-socket path has assertSocketExists but the TCP path had no check.
+ *
+ *  Keyed off TCP_PORTS, not the door's transport: room-expanded doors keep unix
+ *  transports even in TCP mode (TCP egress is wired separately via HTTPS_PROXY),
+ *  so we check the daemon's actual listen port on the host loopback. Doors with
+ *  no TCP daemon (e.g. launcher) are skipped. */
+async function assertTcpDoorReachable(doorName: string): Promise<void> {
+  const port = TCP_PORTS[`${doorName}d`];
+  if (port === undefined) return;
+  if (await tcpReachable("127.0.0.1", port)) return;
+  const hint = DAEMON_HINTS[doorName];
+  console.error(
+    `claude-box: door '${doorName}' daemon not reachable at 127.0.0.1:${port} — are the doors running?\n` +
+      `  Start all doors with: claude-box doors serve` +
+      (hint ? `\n  (or just ${doorName}: ${hint})` : ""),
+  );
+  process.exit(2);
+}
+
 // ── The OCAP surface ─────────────────────────────────────────────────────────
 // A *door* is the whole capability mechanism: a single (name, socket) pair. The
 // box holds no keys — only doors. We mount the host socket at a fixed in-box
@@ -799,8 +839,11 @@ async function run(
   // Forward doors: TCP mode vs Unix socket mode
   if (doors.length > 0) {
     if (tcpMode) {
-      // TCP mode: no socket mounts needed, just set env vars to TCP endpoints
+      // TCP mode: no socket mounts needed, just set env vars to TCP endpoints.
+      // Preflight each door's daemon so a down door fails here with a hint,
+      // not later inside the box with an opaque connection error.
       for (const d of doors) {
+        await assertTcpDoorReachable(d.name);
         const endpoint = transportString(d.guest);
         argv.push("--env", `${d.env}=${endpoint}`);
       }
@@ -1781,6 +1824,7 @@ export {
   TCP_PORTS,
   findStaleBoxes,
   normImageId,
+  tcpReachable,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 

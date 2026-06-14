@@ -10,6 +10,7 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import {
   handleRequest,
   handleStatus,
+  loadToken,
   allowed,
   parseGitHubRepo,
   VERSION,
@@ -162,6 +163,59 @@ test("download: blocked host returns error", async () => {
   const resp = await handleRequest(JSON.stringify({ id: "1", method: "download", params: { url: "https://malware.io/file" } }));
   expect(resp.ok).toBe(false);
   expect(resp.error?.code).toBe("NOT_ALLOWED");
+});
+
+// ── Token injection (SCOUT-POD: source-agnostic, no host path) ────────────────
+
+const NO_FILE = "/nonexistent/scoutd-token-file";
+const TOKEN_ENVS = ["SCOUTD_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const;
+
+/** Run fn with all token env vars cleared, restoring them (and the daemon's
+ *  loaded token) afterward so global state never leaks across tests. */
+async function withTokenEnv(
+  set: Partial<Record<(typeof TOKEN_ENVS)[number], string>>,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const saved = Object.fromEntries(TOKEN_ENVS.map((k) => [k, process.env[k]]));
+  try {
+    for (const k of TOKEN_ENVS) delete process.env[k];
+    for (const [k, v] of Object.entries(set)) process.env[k] = v;
+    await fn();
+  } finally {
+    for (const k of TOKEN_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+    loadToken(NO_FILE); // reset the daemon's token (no env, no file ⇒ null)
+  }
+}
+
+const hasToken = async () =>
+  ((await handleStatus({})) as { hasToken: boolean }).hasToken;
+
+test("loadToken: an injected env secret is used with NO host file", async () => {
+  await withTokenEnv({ SCOUTD_TOKEN: "ghs_injected_test_value" }, async () => {
+    loadToken(NO_FILE);
+    expect(await hasToken()).toBe(true);
+  });
+});
+
+test("loadToken: GH_TOKEN and GITHUB_TOKEN are accepted too", async () => {
+  await withTokenEnv({ GH_TOKEN: "gho_test" }, async () => {
+    loadToken(NO_FILE);
+    expect(await hasToken()).toBe(true);
+  });
+  await withTokenEnv({ GITHUB_TOKEN: "ghp_test" }, async () => {
+    loadToken(NO_FILE);
+    expect(await hasToken()).toBe(true);
+  });
+});
+
+test("loadToken: no env + no file ⇒ no token (public only)", async () => {
+  await withTokenEnv({}, async () => {
+    loadToken(NO_FILE);
+    expect(await hasToken()).toBe(false);
+  });
 });
 
 // Note: We don't test actual GitHub API calls here (that requires network + token).

@@ -19,7 +19,7 @@
  */
 
 import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, relative, isAbsolute } from "node:path";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
 // supplies the door catalog (knownDoors) and room bundles (knownRooms); the
 // engine resolves grants, derives the honest granted/denied surface, and renders
@@ -152,6 +152,17 @@ function getRunDir(env: Env): string {
 /** Default host socket for a daemon, private-dir-first. */
 function defaultHostSock(daemon: string, env: Env): string {
   return `${getRunDir(env)}/${daemon}.sock`;
+}
+
+/** Resolve a --writable subtree to a repo-relative path, rejecting escapes.
+ *  Returned rel is used to bind-mount repo/<rel> writable over a read-only /work,
+ *  so it must stay strictly inside the repo (no "", ".", "..", or absolute path). */
+function resolveWritableSubtree(repoAbs: string, sub: string): string {
+  const rel = relative(repoAbs, resolve(repoAbs, sub));
+  if (rel === "" || rel === "." || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`--writable must be a subtree of the repo, got: ${sub}`);
+  }
+  return rel;
 }
 
 /** Extract the path from a unix transport; throws if not unix (podman substrate
@@ -396,6 +407,8 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --repo PATH         mount worktree at /work (.git read-only)
   --repo-ephemeral .  ephemeral worktree (parallel-safe, cleaned up on exit)
   --repo-rw PATH      UNSAFE: worktree AND .git writable
+  --writable PATH     narrow the writable surface: /work read-only except PATH
+                      (repeatable; .git stays read-only; writes via --keeper)
   --net               forward the netd door — policed egress
   --net-open          UNSAFE: full ambient egress, no allowlist
   --keeper            forward the keeperd door (signed git writes)
@@ -492,6 +505,9 @@ type Launch = {
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
+  /** --writable subtrees: when non-empty, /work is mounted READ-ONLY and only
+   *  these paths are bind-mounted writable (narrowed blast radius). */
+  writable: string[];
   doors: DoorGrant[];
   netOpen: boolean;
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
@@ -510,6 +526,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoRw = false;
   let repoEphemeral = false;
   let netOpen = false;
+  const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
   const guestArgs: string[] = [];
   const add = (d: DoorGrant) => doors.set(d.name, d);
@@ -541,6 +558,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // behaviour). For when there's no keeperd and you must commit in-box.
       repo = tail[++i];
       repoRw = true;
+      continue;
+    }
+    if (t === "--writable") {
+      // Repeatable: narrow the writable surface to these subtrees (the rest of
+      // /work is read-only). Validated against the repo at launch.
+      const p = tail[++i];
+      if (p) writable.push(p);
       continue;
     }
     if (t === "--net-open") {
@@ -611,6 +635,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     repo,
     repoRw,
     repoEphemeral,
+    writable,
     doors: [...doors.values()],
     netOpen,
     guestArgs,
@@ -623,6 +648,7 @@ type Manifest = {
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
+  writable: string[];
   doors: DoorGrant[];
   netOpen: boolean;
   denied: { name: string; flag: string; deny: string }[];
@@ -642,7 +668,7 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -664,6 +690,9 @@ function capabilityJson(m: Manifest): string {
       repoGit: m.repo ? (m.repoRw ? "rw" : "ro") : null,
       // Ephemeral worktree: parallel-safe, edits are isolated per-box.
       repoEphemeral: m.repoEphemeral,
+      // Narrowed writable surface: when set, /work is read-only except these
+      // subtrees (null ⇒ the whole worktree is writable).
+      writable: m.writable.length ? m.writable : null,
       doors: m.doors.map((d) => ({
         name: d.name,
         socket: transportString(d.guest),
@@ -693,6 +722,10 @@ function capabilityPrompt(m: Manifest): string {
     } else if (m.repoEphemeral) {
       lines.push(
         `- repo: ${m.repo} at /work — EPHEMERAL worktree (--repo-ephemeral). This is an isolated copy; your edits are local to this box and do not affect the original or other boxes. .git is READ-ONLY. Route commits through the keeper door.`,
+      );
+    } else if (m.writable.length) {
+      lines.push(
+        `- repo: ${m.repo} at /work — /work is READ-ONLY except: ${m.writable.join(", ")}. Edits outside those subtrees will fail. .git is READ-ONLY; route commits through the keeper door.`,
       );
     } else {
       lines.push(
@@ -764,7 +797,7 @@ async function run(
   env: Env = process.env,
 ): Promise<number> {
   assertAccount(account);
-  const { guest, repo, repoRw, repoEphemeral, doors, netOpen, guestArgs } = launch;
+  const { guest, repo, repoRw, repoEphemeral, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);
   const argv = [
@@ -888,16 +921,43 @@ async function run(
       }
     }
 
-    // Mount the worktree RW at /work; map the host user → the in-box `claude`
-    // uid so host-owned files line up (writable + no git "dubious ownership"),
-    // WITHOUT chowning the repo.
+    // Narrowed writable surface (--writable): mount /work READ-ONLY and bind
+    // only the named subtrees writable on top, so an errant agent can touch
+    // nothing outside its lane. --repo-rw is the all-writable escape, so the two
+    // don't combine. Ignored without --repo.
+    const narrowWritable = writable.length > 0 && !repoRw;
+
+    // Mount the worktree at /work; map the host user → the in-box `claude` uid so
+    // host-owned files line up (writable + no git "dubious ownership") WITHOUT
+    // chowning the repo. RO base when narrowing; subtree mounts follow.
     argv.push(
       "-v",
-      `${mountPath}:/work`,
+      narrowWritable ? `${mountPath}:/work:ro` : `${mountPath}:/work`,
       "-w",
       "/work",
       "--userns=keep-id:uid=1000,gid=1000",
     );
+    if (narrowWritable) {
+      for (const sub of writable) {
+        let rel: string;
+        try {
+          rel = resolveWritableSubtree(mountPath, sub);
+        } catch (e) {
+          console.error(`claude-box: ${(e as Error).message}`);
+          process.exit(2);
+        }
+        const hostSub = `${mountPath}/${rel}`;
+        if (!existsSync(hostSub)) {
+          console.error(`claude-box: --writable path does not exist in the repo: ${sub}`);
+          process.exit(2);
+        }
+        // Bind the subtree writable over the read-only /work (later mount wins).
+        argv.push("-v", `${hostSub}:/work/${rel}`);
+      }
+      console.error(
+        `claude-box: --writable — /work is READ-ONLY except: ${writable.join(", ")}`,
+      );
+    }
     // Tell the box what the host path is, so keeperd requests can translate
     // /work → the actual host path (keeperd runs on the host, not in the box).
     // For ephemeral worktrees, use the original repo path so commits apply there.
@@ -1825,6 +1885,7 @@ export {
   findStaleBoxes,
   normImageId,
   tcpReachable,
+  resolveWritableSubtree,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 

@@ -254,6 +254,8 @@ describe("L2 attestation", () => {
     const mockLaunch = {
       repo: "/work",
       repoRw: false,
+      repoEphemeral: false,
+      writable: [],
       doors: [{ name: "keeper", guest: { kind: "unix", path: "/run/keeperd.sock" } as const, env: "KEEPERD_SOCK", host: { kind: "unix", path: "/tmp/keeperd.sock" } as const, grants: "git writes", use: "route writes" }],
       netOpen: false,
       claudeArgs: [],

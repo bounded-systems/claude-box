@@ -2,8 +2,8 @@
  * netd tests — allowlist and caveat enforcement.
  *
  * These are unit tests for the allowlist matching logic; they don't start the
- * actual proxy server. The proxy behavior is integration-tested via the
- * features/net.feature spec.
+ * actual proxy server. The live proxy is integration-tested in
+ * tests/netd.proxy.test.ts (real listener + raw HTTP CONNECT).
  *
  *   nix run nixpkgs#bun -- test tests/netd.test.ts
  */

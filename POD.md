@@ -47,13 +47,19 @@ podman machine (Linux VM)
 ### OCAP is *strengthened*, not weakened
 Sidecars share only the **network** namespace — not filesystem, not process
 space. So:
-- The box still **holds no credentials**: keeperd's signing key lives in the
-  *keeperd* container (runtime secret), unreadable by the box.
+- The box still **holds no credentials**, and — per the door model
+  ([DOORS.md](DOORS.md)) — **neither does the pod**: standing secrets stay in one
+  host-side broker/signer; doors hold only attenuated, ephemeral derivatives, and
+  the egress proxy injects them so requests go out naked.
 - The repo door / egress scoping we hand-rolled (`--repo-origin`'s git-pull door,
-  the per-launch scoped netd) become **just the pod's netd** — no separate
-  lifecycle.
+  the per-launch scoped netd) become **just doors in the pod** — one per egress
+  capability, each `(scope, lifetime)`, revoked by deleting its grant.
 - The doors are now part of **that box's capability namespace**, not a global
   service. One holder, one capability.
+
+The full per-door model — ephemeral process over a persistent grant, demand-driven
+lifetime, proxy-injected credentials, host-vs-path scope — lives in
+[DOORS.md](DOORS.md). POD.md is just the *container* (the pod) those doors run in.
 
 ## Verified (spike)
 
@@ -81,29 +87,35 @@ host listener on `3128`). The architecture holds.
 Opt-in `--pod` mode, parallel to the existing host-daemon path, then flip the
 default once the sidecars are solid:
 
-1. **netd sidecar first** (no secret). `--pod` creates the pod, starts netd as a
+1. **netd sidecar first** (secret-free). `--pod` creates the pod, starts netd as a
    sidecar with the launch's allowlist, runs the box with `HTTPS_PROXY=localhost`,
    tears the pod down on exit. (The egress door is the one that's been fragile —
    start there.)
-2. **scoutd sidecar** — GitHub read token injected as a runtime secret.
-3. **keeperd sidecar** — *the careful one*: the signing key is the crown jewel.
-   Inject it as a runtime secret into the keeperd container only; the box (a
-   separate container) cannot read it. Attest as today (L3).
+2. **scoutd sidecar** — secret-free for public reads; private reads use a
+   proxy-injected, repo-scoped, expiring token (the standing App key stays in the
+   broker, never the pod). See [DOORS.md](DOORS.md).
+3. **keeperd sidecar** — signs by **delegating to the host-side signer**; the
+   signing key never enters the pod. The box (and the keeperd container) hold no
+   standing secret. Attest as today (L3).
 4. **Lifecycle hardening** — pod cleanup on crash/timeout, one pod per
    account/launch id, `claude-box doctor`-style detection of orphaned pods.
 5. **Deprecate** the host-daemon + `host.containers.internal` path once `--pod`
    is the default.
 
 ## Open questions
-- **Keeper key provisioning** into the keeperd sidecar (podman secret? mounted
-  tmpfs from a host secret broker?) — must never touch the box container.
+- **The broker/signer** ([DOORS.md](DOORS.md)) — where standing secrets live and
+  how doors request attenuated, expiring derivatives. The pod stays secret-free;
+  the broker is the one trust anchor to design and harden.
+- **The persistent grant store** — the durable source of truth a door's behavior
+  is a function of; revocation is a write here. Needs a home and a consistency model.
 - **Pod lifecycle** on operator crash — orphaned pods leak; need a reaper.
 - **Coexistence** with the current TCP-doors mode during migration.
 
 ## Roadmap
 This is `prx-asr` (assemble the per-repo pod + wire the doors), `prx-anj` /
-`prx-634` (keeperd/beadsd box images, signing key as runtime secret), and
-`prx-zj8` (containerize the fleet). POD.md is the spec they execute against.
+`prx-634` (keeperd/beadsd box images, brokered secrets), and `prx-zj8`
+(containerize the fleet). POD.md + [DOORS.md](DOORS.md) are the spec they execute
+against.
 
 See also: [NETD.md](NETD.md), [KEEPERD.md](KEEPERD.md), [OCAP.md](OCAP.md),
 [REPOD.md](REPOD.md).

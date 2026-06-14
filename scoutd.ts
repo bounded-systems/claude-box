@@ -71,12 +71,28 @@ function allowed(host: string): boolean {
 let githubToken: string | null = null;
 
 function loadToken(tokenPath: string): void {
+  // Source-agnostic injection (SCOUT-POD.md): an injected env secret — `gh auth
+  // token`, `op read`, or a cloud secret manager — takes priority over a host
+  // file path, so the daemon carries NO host assumption and lifts into the cloud
+  // unchanged. The token VALUE is never logged (it must not enter a transcript).
+  const envToken = (
+    process.env.SCOUTD_TOKEN ||
+    process.env.GH_TOKEN ||
+    process.env.GITHUB_TOKEN ||
+    ""
+  ).trim();
+  if (envToken) {
+    githubToken = envToken;
+    log("INFO", "loaded GitHub token from env (injected secret)");
+    return;
+  }
   if (existsSync(tokenPath)) {
     githubToken = readFileSync(tokenPath, "utf-8").trim();
     log("INFO", `loaded GitHub token from ${tokenPath}`);
-  } else {
-    log("INFO", `no GitHub token at ${tokenPath} (public repos only)`);
+    return;
   }
+  githubToken = null;
+  log("INFO", "no GitHub token (public repos only)");
 }
 
 // ── Utility ──────────────────────────────────────────────────────────────────
@@ -560,8 +576,11 @@ The daemon listens for NDJSON requests:
 
 Environment:
   SCOUTD_ALLOW  comma-separated allowlist (default: github.com, npm, pypi)
+  SCOUTD_TOKEN / GH_TOKEN / GITHUB_TOKEN
+                injected GitHub token (takes priority over --token file; never
+                logged). Source-agnostic: gh auth token / op / a cloud secret.
 
-See SCOUT.md for details.`);
+See SCOUT.md and SCOUT-POD.md for details.`);
 
   return cmd === "-h" || cmd === "--help" ? 0 : 1;
 }
@@ -576,6 +595,7 @@ export {
   handleIssue,
   handleFetch,
   handleDownload,
+  loadToken,
   allowed,
   parseGitHubRepo,
   VERSION,

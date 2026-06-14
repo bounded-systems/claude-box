@@ -5,8 +5,8 @@ agent is the **man**, capabilities are **doors**, and the per-launch manifest is
 the **rulebook** the room hands the man (the Chinese Room — he translates only
 via the cards for the symbols he holds). This doc is the **topology** under that
 metaphor: *where the room sits, where the keys sit, and the gap between them* —
-the gap that explains the macOS door wall and the reason the pod (`prx-zj8`) is
-not optional.
+the gap that explains the macOS door wall, bridged today by TCP mode
+(`DOORS_TCP=1`), with the pod (`prx-zj8`) as the clean end-state.
 
 **Two senses of "room."** The name does double duty, and both describe the same
 property. In Searle's **Chinese Room**, the man manipulates symbols by a rulebook
@@ -61,17 +61,22 @@ fds, so bind-mounting a host socket into the VM fails —
 `statfs: operation not supported`. **That error is the macOS door wall**, and it
 is why a door whose daemon runs on the host is unreachable from a room in the VM.
 
-Two ways across, one real:
+Three ways across — two shipped, one end-state:
 
-- **interim (relay).** Relay the daemon's socket to a host-local socket *on the
-  podman-machine host* (`socat` / `ssh -L`), **outside the box** — the room still
-  sees a plain `/run/<name>.sock`, never the wire. Stopgap for the current split.
-- **end-state (the pod, `prx-zj8`).** Run the daemons as **pinned OCI images in
-  the same podman pod as the box**, inside the VM. Then the door is a **local
-  mount within the VM** — no host→VM hop, no relay, nothing on the wire. In the
-  diagram, the middle box becomes the home of **both** the daemons **and** the
-  room. claude-box was the template for that pinned-image workcell; keeperd /
-  netd / scoutd / repod are its siblings.
+- **works today (TCP mode, `DOORS_TCP=1`).** Don't cross virtiofs at all: the
+  daemons listen on **host TCP ports** and the box dials
+  `host.containers.internal:PORT`, which *does* cross the host→VM boundary (it's
+  TCP, not a socket fd). This is what makes `cbox` run policed doors solo on macOS
+  now. The box's env points at the TCP endpoint instead of a `/run/doors/*.sock`
+  path (#53 fixed the in-box guidance to match); the full transport-agnostic client
+  is `prx-o92` (see [DOORS.md](./DOORS.md), "The TCP-mode door gap").
+- **off-host (the pod, `--pod`, #48).** Run the box plus its door daemons as
+  **sidecars in one podman pod** sharing a netns. The door becomes a pod-local
+  endpoint — no host port, no LAN exposure. netd ships; keeper/scout sidecars next.
+- **end-state (the full pod, `prx-zj8`).** All daemons as **pinned OCI images in
+  the same pod as the box**, inside the VM — the door a **local mount within the
+  VM**, no host→VM hop, nothing on the wire. claude-box was the template for that
+  pinned-image workcell; keeperd / netd / scoutd / repod are its siblings.
 
 > Today is actually worse than the diagram: it's a **two-VM split** — the box in
 > the podman-machine VM, the daemons in a separate **Lima devshell** VM, so a door
@@ -91,17 +96,18 @@ claude-box: refusing door socket in world-writable /tmp (hijack risk)
   — set a private path (e.g. under $XDG_RUNTIME_DIR)
 ```
 
-That's fail-closed doing its job. To actually stand a policed door on macOS you
-need **all three**: a private socket dir (e.g. `KEEPERD_SOCK=~/.local/run/...`),
-a **daemon serving there**, and — to cross the VM gap — **the pod**. Lacking the
-pod, the policed doors are unreachable solo, so the loud unsafe interim is:
+That's fail-closed doing its job — in **unix-socket mode**, and it's why standing
+a policed unix-socket door on macOS solo was historically impractical.
+
+**TCP mode sidesteps this entirely.** With `DOORS_TCP=1` the daemons listen on host
+TCP ports — there is no door *socket file*, so the world-writable-dir guard doesn't
+apply, and the box reaches them over the gateway. `cbox` runs this today:
 
 ```
-nix run .#claude-box -- work --repo-rw . --net-open   # no doors ⇒ no socket
-                                                       # mounts, no gap, no guard
+cbox --repo . --net    # policed egress, solo on macOS — no unsafe escapes
 ```
 
-— exactly what the bootstrap box uses until the pod lands.
+The old unsafe bootstrap (`--repo-rw . --net-open`, no doors at all) is retired.
 
 ## The room as a first-class idea
 

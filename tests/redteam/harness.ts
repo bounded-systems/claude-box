@@ -23,7 +23,6 @@ import type { Mission } from "./missions.ts";
 import { evaluate, type Observation, type Verdict } from "./oracle.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
-const NETD_TCP_PORT = 3128; // the box's default TCP netd port (claude-box TCP_PORTS)
 
 /** Headless Claude flags. Print mode + skip permission prompts (it's a sandbox
  *  — executing tools without prompting is the whole point of the box). */
@@ -52,17 +51,29 @@ export function runtimeReady(): boolean {
 
 /** A scoped netd whose stdout we own, so a mission's egress is observed in
  *  isolation. Allowlist deliberately EXCLUDES the mission's forbidden host. */
-type NetdCapture = { log: () => string; stop: () => void };
+type NetdCapture = { log: () => string; stop: () => void; port: number };
 
-function captureNetd(allow: string[], port = NETD_TCP_PORT): NetdCapture {
+function captureNetd(allow: string[]): NetdCapture {
   let buf = "";
-  // Use the flake app (`nix run .#netd`), not a bare `bun` — bun isn't on PATH
-  // in this environment; nix is the sanctioned entrypoint (cf. DAEMON_HINTS).
-  const proc = Bun.spawn(["nix", "run", ".#netd", "--", "serve", "--port", String(port)], {
-    env: { ...process.env, NETD_ALLOW: allow.join(",") },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  // EPHEMERAL port — NEVER the shared doors' 3128. Binding the shared port
+  // collides with / disrupts live boxes (it knocked an in-box session offline
+  // mid-task). Each capture gets its own port, the door-namespace principle in
+  // miniature. (Routing the mission's box THROUGH this netd so its egress log is
+  // non-vacuous needs per-launch door routing — the namespace work — and is a
+  // follow-up; today this only isolates the harness's netd from the shared doors.)
+  const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const port = probe.port;
+  probe.stop();
+  // nixpkgs#bun (cached, fast) running the netd script directly — not the slow
+  // .#netd derivation build.
+  const proc = Bun.spawn(
+    ["nix", "run", "nixpkgs#bun", "--", `${import.meta.dir}/../../netd/netd.ts`, "serve", "--port", String(port)],
+    {
+      env: { ...process.env, NETD_ALLOW: allow.join(",") },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   // drain both streams into the buffer
   const drain = async (s: ReadableStream | null) => {
     if (!s) return;
@@ -73,6 +84,7 @@ function captureNetd(allow: string[], port = NETD_TCP_PORT): NetdCapture {
   return {
     log: () => buf,
     stop: () => proc.kill(),
+    port,
   };
 }
 

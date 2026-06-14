@@ -223,6 +223,36 @@ function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: s
   return { allowed: true };
 }
 
+/**
+ * Check attenuation: child doors must be a subset of parent doors.
+ * This is a core OCAP security invariant — a box cannot grant itself
+ * capabilities it doesn't have. Returns true if allowed.
+ */
+function checkAttenuation(
+  requestedDoors: string[],
+  parentDoors: string[] | undefined,
+  depth: number,
+): { allowed: boolean; reason?: string; violations?: string[] } {
+  // Root launches (depth 0) have no parent — no attenuation check needed
+  if (depth === 0 || parentDoors === undefined) {
+    return { allowed: true };
+  }
+
+  // Child launches must have doors ⊆ parent doors
+  const parentSet = new Set(parentDoors);
+  const violations = requestedDoors.filter((d) => !parentSet.has(d));
+
+  if (violations.length > 0) {
+    return {
+      allowed: false,
+      reason: `attenuation violation: child requested doors [${violations.join(", ")}] not in parent [${parentDoors.join(", ")}]`,
+      violations,
+    };
+  }
+
+  return { allowed: true };
+}
+
 // ── L2 Attestation + Key Management ──────────────────────────────────────────
 
 type SigningKey = {
@@ -593,6 +623,10 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     : undefined;
   const token = params._token as string | undefined;
 
+  // Parent doors (for attenuation check on nested launches)
+  // In-box callers pass their manifest's doors so we can enforce child ⊆ parent
+  const parentDoors = params._parentDoors as string[] | undefined;
+
   // Validate account
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
     throw { code: "INVALID_ACCOUNT", message: `invalid account name: ${account}` };
@@ -631,6 +665,17 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
       // Room implies netOpen
       (params as Record<string, unknown>).netOpen = true;
     }
+  }
+
+  // Check attenuation: child doors must be subset of parent doors
+  // This is checked AFTER room expansion so the full door set is validated
+  const attenuationCheck = checkAttenuation(doorSpecs, parentDoors, depth);
+  if (!attenuationCheck.allowed) {
+    throw {
+      code: "ATTENUATION_VIOLATION",
+      message: attenuationCheck.reason,
+      violations: attenuationCheck.violations,
+    };
   }
 
   // Resolve doors
@@ -1005,6 +1050,7 @@ export {
   checkRateLimit,
   checkConcurrentLimit,
   checkDepthLimit,
+  checkAttenuation,
   recordLaunch,
 };
 export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };

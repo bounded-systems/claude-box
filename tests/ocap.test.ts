@@ -195,15 +195,32 @@ boxTest("--repo-rw: .git is writable (unsafe escape)", () => {
 
 const DOORS_VOLUME = process.env.DOORS_VOLUME ?? "systemd-claude-doors";
 
-/** Check if a door socket is available (via podman volume). */
+/** Check if a door daemon is actually serving. The doors volume can exist with
+ *  NO daemons running (set up but never started, or stopped), and a stopped
+ *  daemon often leaves a STALE socket file behind — so `test -S` passes while
+ *  every connection is refused. Mere volume/socket existence is therefore not
+ *  enough: mount the volume read-only in a throwaway box and probe a real
+ *  connection, so door tests SKIP (not fail) unless a daemon is live. */
 function doorAvailable(door: string): boolean {
   if (!RUNTIME_READY) return false;
-  // Check if the volume exists and has the socket
-  const p = Bun.spawnSync(
+  // Cheap pre-check: if the volume is absent there is nothing to mount.
+  const vol = Bun.spawnSync(
     ["podman", "volume", "inspect", DOORS_VOLUME],
     { stdout: "pipe", stderr: "pipe" },
   );
-  return p.exitCode === 0;
+  if (vol.exitCode !== 0) return false;
+  // Liveness probe: a stale socket file refuses connections (ECONNREFUSED) and
+  // an absent one is ENOENT — only a live daemon accepts the connection.
+  const probe = boxWithDoors(`bun -e '
+    const t = setTimeout(() => { console.log("DEAD"); process.exit(0); }, 2000);
+    try {
+      await Bun.connect({ unix: "/run/doors/${door}.sock", socket: {
+        open(s) { clearTimeout(t); console.log("LIVE"); s.end(); process.exit(0); },
+        error() { clearTimeout(t); console.log("DEAD"); process.exit(0); },
+      }});
+    } catch { clearTimeout(t); console.log("DEAD"); process.exit(0); }
+  '`);
+  return probe.out.includes("LIVE");
 }
 
 /** Run inside the box with door sockets mounted. */
@@ -224,16 +241,19 @@ function boxWithDoors(script: string, extraArgs: string[] = []): { code: number;
   };
 }
 
-const DOORS_READY = doorAvailable("keeperd");
-const doorTest = test.skipIf(!DOORS_READY);
+// Gate each door tier on its OWN socket being served, so a doors volume with
+// only some daemons up skips the tiers that aren't (rather than failing them).
+const keeperTest = test.skipIf(!doorAvailable("keeperd"));
+const scoutTest = test.skipIf(!doorAvailable("scoutd"));
+const netTest = test.skipIf(!doorAvailable("netd"));
 
 // --keeper: the keeperd door is reachable via socket
-doorTest("--keeper: keeperd socket is accessible", () => {
+keeperTest("--keeper: keeperd socket is accessible", () => {
   const r = boxWithDoors("test -S /run/doors/keeperd.sock && echo 'socket exists' || echo 'no socket'");
   expect(r.out).toContain("socket exists");
 });
 
-doorTest("--keeper: can query keeperd status", () => {
+keeperTest("--keeper: can query keeperd status", () => {
   const r = boxWithDoors(`echo '{"id":"1","method":"status"}' | bun -e '
     const sock = await Bun.connect({ unix: "/run/doors/keeperd.sock", socket: {
       data(s, d) { console.log(d.toString()); s.end(); }
@@ -244,12 +264,12 @@ doorTest("--keeper: can query keeperd status", () => {
 });
 
 // --scout: the scoutd door is reachable
-doorTest("--scout: scoutd socket is accessible", () => {
+scoutTest("--scout: scoutd socket is accessible", () => {
   const r = boxWithDoors("test -S /run/doors/scoutd.sock && echo 'socket exists' || echo 'no socket'");
   expect(r.out).toContain("socket exists");
 });
 
-doorTest("--scout: can query scoutd status", () => {
+scoutTest("--scout: can query scoutd status", () => {
   const r = boxWithDoors(`echo '{"id":"1","method":"status"}' | bun -e '
     const sock = await Bun.connect({ unix: "/run/doors/scoutd.sock", socket: {
       data(s, d) { console.log(d.toString()); s.end(); }
@@ -260,7 +280,7 @@ doorTest("--scout: can query scoutd status", () => {
 });
 
 // --net: the netd door provides policed egress
-doorTest("--net: netd socket is accessible", () => {
+netTest("--net: netd socket is accessible", () => {
   const r = boxWithDoors("test -S /run/doors/netd.sock && echo 'socket exists' || echo 'no socket'");
   expect(r.out).toContain("socket exists");
 });

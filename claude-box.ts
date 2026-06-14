@@ -372,6 +372,7 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   claude-box doors status     show door service status
   claude-box status           show launcherd status
   claude-box ps               list running boxes
+  claude-box doctor           flag boxes pinned to a stale image (after a rebuild)
   claude-box kill <id>        terminate a running box`;
 
 type Meta = Record<string, { desc?: string }>;
@@ -1164,6 +1165,122 @@ async function cmdKill(launchId: string): Promise<number> {
   }
 }
 
+// ── doctor: detect boxes pinned to a stale image ─────────────────────────────
+// A container is a live process booted from one immutable image id and holds it
+// for life. `nix run .#setup` rebuilds the image and moves the mutable `:dev`
+// tag, but already-running boxes keep the id they started from — so a box can
+// silently outlive the fix that's already on the new image (e.g. #34's statsig
+// switch). The image ids let us DETECT the drift; doctor acts on that detection.
+
+/** A running box reduced to what the staleness check needs. */
+type RunningBox = { id: string; imageId: string; status?: string };
+
+/** Normalize a podman image id for comparison (drop the sha256: prefix). */
+function normImageId(id: string): string {
+  return id.replace(/^sha256:/, "");
+}
+
+/**
+ * Pure staleness check: which running boxes are NOT on the current image.
+ * podman reports ids in short or long form, so two ids match when either is a
+ * prefix of the other. Boxes with an empty/unknown image id are treated as
+ * stale (we can't prove they're current).
+ */
+function findStaleBoxes(
+  boxes: RunningBox[],
+  currentImageId: string,
+): RunningBox[] {
+  const cur = normImageId(currentImageId);
+  if (!cur) return [...boxes]; // no baseline → can't prove any box is current
+  return boxes.filter((b) => {
+    const bid = normImageId(b.imageId);
+    if (!bid) return true;
+    return !(cur.startsWith(bid) || bid.startsWith(cur));
+  });
+}
+
+/** Current image id behind the `:dev` tag, or "" if the image isn't loaded. */
+async function currentImageId(): Promise<string> {
+  const proc = Bun.spawn(
+    ["podman", "image", "inspect", IMAGE, "--format", "{{.Id}}"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const out = (await new Response(proc.stdout).text()).trim();
+  return (await proc.exited) === 0 ? out : "";
+}
+
+/** Running boxes launched under the `:dev` tag, with their pinned image ids. */
+async function runningBoxes(): Promise<RunningBox[]> {
+  const proc = Bun.spawn(
+    [
+      "podman",
+      "ps",
+      "--filter",
+      `ancestor=${IMAGE}`,
+      "--format",
+      "{{.ID}}\t{{.ImageID}}\t{{.Status}}",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const out = (await new Response(proc.stdout).text()).trim();
+  if ((await proc.exited) !== 0 || !out) return [];
+  return out.split("\n").map((line) => {
+    const [id, imageId, status] = line.split("\t");
+    return { id, imageId, status };
+  });
+}
+
+async function cmdDoctor(): Promise<number> {
+  const cur = await currentImageId();
+  if (!cur) {
+    console.error(
+      `claude-box doctor: image ${IMAGE} is not loaded.\n` +
+        `Run 'nix run .#setup' to build and load it.`,
+    );
+    return 1;
+  }
+
+  const boxes = await runningBoxes();
+  const stale = findStaleBoxes(boxes, cur);
+
+  console.log(`current image: ${normImageId(cur).slice(0, 12)} (${IMAGE})`);
+  console.log(`running boxes: ${boxes.length}\n`);
+
+  if (boxes.length === 0) {
+    console.log("no running boxes — nothing to check.");
+    return 0;
+  }
+
+  for (const b of boxes) {
+    const isStale = stale.includes(b);
+    const tag = isStale ? "STALE" : "current";
+    console.log(
+      `  ${b.id.slice(0, 12)}  img=${normImageId(b.imageId).slice(0, 12)}  ${tag}  ${b.status ?? ""}`.trimEnd(),
+    );
+  }
+
+  if (stale.length === 0) {
+    console.log("\nall boxes are on the current image. ✓");
+    return 0;
+  }
+
+  // Detection only — never auto-kill. A box may hold a live session or unsaved
+  // work, so recreating is the operator's call. We print the exact commands.
+  const ids = stale.map((b) => b.id.slice(0, 12)).join(" ");
+  console.log(
+    `\n${stale.length} box(es) pinned to an older image — they won't pick up\n` +
+      `changes that are already in the current image (rebuild moved the tag,\n` +
+      `but a running container keeps the image id it booted from).\n\n` +
+      `Recreate them to pick up the latest image (this stops their session —\n` +
+      `commit or stash any in-box work first):\n\n` +
+      `  podman stop ${ids}\n` +
+      `  podman rm   ${ids}\n` +
+      `  # then relaunch, e.g.:  DOORS_TCP=1 claude-box --room dev --repo .`,
+  );
+  // Non-zero so scripts/CI can gate on drift.
+  return 1;
+}
+
 // ── Door management (Quadlet services) ────────────────────────────────────────
 
 const DOOR_SERVICES = ["keeperd", "netd", "scoutd"] as const;
@@ -1617,6 +1734,8 @@ async function main(): Promise<number> {
       return cmdStatus();
     case "ps":
       return cmdPs();
+    case "doctor":
+      return cmdDoctor();
     case "kill":
       return cmdKill(rest[0] ?? "");
     case "attach":
@@ -1660,8 +1779,10 @@ export {
   unixPath,
   isTcpMode,
   TCP_PORTS,
+  findStaleBoxes,
+  normImageId,
 };
-export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset };
+export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 
 if (import.meta.main) {
   process.exit(await main());

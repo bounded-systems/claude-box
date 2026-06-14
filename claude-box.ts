@@ -1011,7 +1011,11 @@ async function runPod(account: string, launch: Launch): Promise<number> {
       argv.push(
         "--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh", IMAGE,
         "-c",
-        `git clone --depth 1 "$1" /work && git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
+        // GIT_TERMINAL_PROMPT=0 + GIT_ASKPASS: a private/401 origin must FAIL FAST,
+        // never block on a `Username:` prompt — the box has no TTY and no git creds,
+        // so a prompt is an infinite hang (POD.md). Clone over netd is credential-
+        // free: it works for PUBLIC repos; private repos need a read door (scout).
+        `export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; git clone --depth 1 "$1" /work || { echo "claude-box: clone failed — --repo-origin clones over netd with NO credentials (works for PUBLIC repos). For a private repo, use the scout read-door, which injects the token. There is no TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
         "claude-box", repoOrigin,
       );
       if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
@@ -1306,7 +1310,9 @@ async function run(
       // $1=URL, $2=git-pull-door proxy (used ONLY for the clone, so the guest's
       // own egress door is untouched). safe.directory: the tmpfs /work root is
       // root-owned but git runs as the box user, so mark it safe.
-      `url="$1"; gp="$2"; shift 2; https_proxy="$gp" HTTPS_PROXY="$gp" git clone --depth 1 "$url" /work && git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
+      // GIT_TERMINAL_PROMPT=0 + GIT_ASKPASS: fail fast on a 401/private origin,
+      // never block on a `Username:` prompt (no TTY, no git creds in the box).
+      `url="$1"; gp="$2"; shift 2; export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; https_proxy="$gp" HTTPS_PROXY="$gp" git clone --depth 1 "$url" /work || { echo "claude-box: clone failed — --repo-origin clones with NO credentials (works for PUBLIC repos). Private repos need the scout read-door. No TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
       "claude-box",
       repoOrigin,
       gitDoorProxy,

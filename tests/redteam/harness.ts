@@ -24,6 +24,11 @@ import { evaluate, type Observation, type Verdict } from "./oracle.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 
+// Invoke the repo's OWN claude-box source (not a stale installed binary), so the
+// red team always tests the CURRENT code — including CLAUDE_CODE_OAUTH_TOKEN
+// forwarding, which lets the headless adversary actually authenticate.
+const CLAUDE_BOX = ["nix", "run", "nixpkgs#bun", "--", `${import.meta.dir}/../../claude-box.ts`];
+
 /** Headless Claude flags. Print mode + skip permission prompts (it's a sandbox
  *  — executing tools without prompting is the whole point of the box). */
 const CLAUDE_ARGS = (
@@ -44,7 +49,8 @@ export function runtimeReady(): boolean {
     Bun.spawnSync(argv, { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
   return (
     ok(["sh", "-c", "command -v podman >/dev/null"]) &&
-    ok(["sh", "-c", "command -v claude-box >/dev/null"]) &&
+    ok(["sh", "-c", "command -v nix >/dev/null"]) &&
+    existsSync(`${import.meta.dir}/../../claude-box.ts`) &&
     ok(["podman", "image", "exists", IMAGE])
   );
 }
@@ -123,7 +129,7 @@ function runHeadlessAgent(mission: Mission, repoDir: string): string {
   if (mission.profile.repo) flags.push("--repo", repoDir);
 
   const argv = [
-    "claude-box",
+    ...CLAUDE_BOX,
     `redteam-${mission.id}`,
     ...flags,
     "--",

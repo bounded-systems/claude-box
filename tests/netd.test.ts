@@ -9,6 +9,10 @@
  */
 import { test, expect, describe } from "bun:test";
 
+// The DEFAULT allowlist and its matcher come from the real module, so the
+// regression test below pins the SHIPPED value rather than a re-declared copy.
+import { DEFAULT_ALLOW, isAllowedByDefault } from "../netd/netd";
+
 // We import the matching functions by evaluating them in a subprocess with
 // controlled NETD_ALLOW and NETD_CAVEATS env vars, since they're module-level.
 // For now, we test the pure logic inline.
@@ -114,6 +118,38 @@ describe("parseCaveats", () => {
       "github.com",
       "npm.org",
     ]);
+  });
+});
+
+describe("default allowlist", () => {
+  // Regression for issue #6 ("netd allowlist must exclude writable sinks").
+  // Asserts against the SHIPPED DEFAULT_ALLOW (imported, not re-declared) that
+  // the default-deny invariant holds: only Anthropic egress is permitted, and
+  // every writable sink — where an agent could exfiltrate or persist data — is
+  // refused. If someone widens DEFAULT_ALLOW to include a writable host, this
+  // breaks.
+
+  test("DEFAULT_ALLOW is Anthropic-only", () => {
+    expect(DEFAULT_ALLOW).toEqual(["api.anthropic.com", ".anthropic.com"]);
+  });
+
+  test("ALLOWS Anthropic API and its subdomains", () => {
+    expect(isAllowedByDefault("api.anthropic.com")).toBe(true);
+    // .anthropic.com suffix covers subdomains like the console.
+    expect(isAllowedByDefault("console.anthropic.com")).toBe(true);
+  });
+
+  test("DENIES writable sinks", () => {
+    // Code hosting / gists — an agent could push or paste data here.
+    expect(isAllowedByDefault("api.github.com")).toBe(false);
+    expect(isAllowedByDefault("gist.github.com")).toBe(false);
+    expect(isAllowedByDefault("objects.githubusercontent.com")).toBe(false);
+    // Pastebins.
+    expect(isAllowedByDefault("pastebin.com")).toBe(false);
+    // Package registry — a publish target.
+    expect(isAllowedByDefault("registry.npmjs.org")).toBe(false);
+    // Generic untrusted host.
+    expect(isAllowedByDefault("evil.com")).toBe(false);
   });
 });
 

@@ -107,6 +107,29 @@ ad-hoc. Not scheduled; recorded so they aren't lost.
   allowlist) should reach it through a **dedicated capability/actor** (a vendored
   toolchain in the image, or a scoped fetch door), never by widening egress. The
   allowlist 403 is the system working; the fix is a door, not a hole.
+- **Doors in Go/Rust (not bun).** The doors are small, long-lived,
+  security-sensitive network daemons holding keys/tokens — exactly where a single
+  static binary with no runtime and a tighter memory story fits better than a bun
+  process. Candidate once the actor-door interface (`prx-o92`) is settled, so all
+  doors port to one shape. Not scheduled.
+
+## North star — open a PR from inside the box
+
+The end-to-end write chain, and where each rung stands (the goal that exercises the
+whole door model):
+
+| Rung | Capability | State |
+|---|---|---|
+| clone repo in-box | `--repo-origin` / `--repo-clone` | ✅ public; private needs scout `bundle` (SCOUT-POD increment 2) |
+| edit | filesystem | ✅ |
+| commit (signed) | keeperd `commit` (+ L3 attestation) | ✅ |
+| push branch | keeperd `push` (holds the write cred) | ✅ |
+| **open the PR** | `POST /repos/.../pulls` | ❌ **no capability** — scoutd only *reads* PRs; keeperd has no pr-create. A **write**, so it belongs on keeperd (a `pr` op). |
+| box → keeper transport | in-box client dials the door | ❌ **`prx-o92`** (transport-agnostic client, in `prx`) — the linchpin |
+
+So the loop is gated on two things: a keeperd **`pr` op** (buildable here) and
+**`prx-o92`** (the in-box client, in `prx`). Until `prx-o92` lands, the full loop
+can't be dogfooded from claude-box alone.
 
 ## Suggested order
 

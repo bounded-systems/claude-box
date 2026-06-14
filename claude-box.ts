@@ -109,6 +109,10 @@ const NETD_PROXY = "http://127.0.0.1:3128";
 // In TCP mode (DOORS_TCP=1), the proxy points directly to netd on the host.
 const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
 
+// netd's base allowlist (mirrors netd.ts DEFAULT_ALLOW). A --repo-origin launch
+// gets a scoped netd allowing THESE plus its origin host — nothing wider.
+const NETD_DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
+
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
  *  Set DOORS_TCP=1 or run `doors serve` to enable TCP mode. */
 function isTcpMode(env: Env): boolean {
@@ -409,7 +413,7 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --repo-clone PATH   isolated clone w/ own writable .git (full in-box git,
                       real repo never mounted; reconcile via --keeper)
   --repo-origin URL   NO host mount: box clones URL into a tmpfs /work itself
-                      (needs --net; netd must allow the origin host)
+                      (auto scoped-egress door to the origin host; needs DOORS_TCP)
   --repo-rw PATH      UNSAFE: worktree AND .git writable
   --writable PATH     narrow the writable surface: /work read-only except PATH
                       (repeatable; .git stays read-only; writes via --keeper)
@@ -864,6 +868,43 @@ async function removeEphemeralWorktree(
   // Ignore errors — best effort cleanup
 }
 
+/** The egress host a git URL connects to — used to scope a --repo-origin door
+ *  to exactly that host (plus anthropic), nothing wider. */
+function originHostOf(url: string): string {
+  const https = /^https?:\/\/([^/]+)/.exec(url);
+  if (https) return https[1].split("@").pop()!.split(":")[0].toLowerCase();
+  const ssh = /^(?:ssh:\/\/)?[^@/]+@([^:/]+)/.exec(url);
+  if (ssh) return ssh[1].toLowerCase();
+  throw new Error(`cannot derive origin host from ${url}`);
+}
+
+/** Start a per-launch netd scoped to `allow`, on a free port. Returns the port +
+ *  a stop(). Lets --repo-origin reach its origin host through a POLICED door
+ *  without widening the shared netd or resorting to --net-open. */
+async function startScopedNetd(
+  allow: string[],
+): Promise<{ port: number; stop: () => void }> {
+  const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const port = probe.port;
+  probe.stop();
+  // Run the netd script via the cached nixpkgs#bun (fast) rather than building
+  // the .#netd derivation (slow cold-start on every launch). Same netd code.
+  const proc = Bun.spawn(
+    ["nix", "run", "nixpkgs#bun", "--", `${import.meta.dir}/netd/netd.ts`, "serve", "--port", String(port)],
+    {
+      env: { ...process.env, NETD_ALLOW: allow.join(",") },
+      stdout: "ignore",
+      stderr: "ignore",
+    },
+  );
+  for (let i = 0; i < 150; i++) {
+    if (await tcpReachable("127.0.0.1", port, 400)) return { port, stop: () => proc.kill() };
+    await Bun.sleep(200);
+  }
+  proc.kill();
+  throw new Error("scoped netd failed to start");
+}
+
 async function run(
   account: string,
   launch: Launch,
@@ -906,10 +947,40 @@ async function run(
   const tcpMode = isTcpMode(env);
   const netDoor = doors.find((d) => d.name === "net");
 
+  // --repo-origin without --net-open: a per-launch SCOPED netd that allows ONLY
+  // {anthropic + the origin host}. It's the box's sole egress — covering both
+  // the in-box clone → origin and claude → anthropic — so the clone is policed,
+  // not ambient. Torn down on exit.
+  let scopedNetd: { port: number; stop: () => void } | undefined;
+  if (repoOrigin && !netOpen) {
+    if (!tcpMode) {
+      console.error(
+        "claude-box: --repo-origin needs TCP mode for its scoped egress door — set DOORS_TCP=1 (or use --net-open).",
+      );
+      process.exit(2);
+    }
+    const host = originHostOf(repoOrigin);
+    scopedNetd = await startScopedNetd([...NETD_DEFAULT_ALLOW, host]);
+    const proxy = `http://host.containers.internal:${scopedNetd.port}`;
+    argv.push(
+      "--env", `HTTPS_PROXY=${proxy}`,
+      "--env", `HTTP_PROXY=${proxy}`,
+      "--env", `ALL_PROXY=${proxy}`,
+      "--env", `https_proxy=${proxy}`,
+      "--env", `http_proxy=${proxy}`,
+      "--env", "NO_PROXY=localhost,127.0.0.1",
+    );
+    console.error(
+      `claude-box: --repo-origin — scoped egress door allows only ${host} + anthropic (netd :${scopedNetd.port})`,
+    );
+  }
+
   if (netOpen) {
     console.error(
       "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
     );
+  } else if (scopedNetd) {
+    // egress already wired to the scoped origin door above — skip the shared netd
   } else if (tcpMode && doors.length > 0) {
     // TCP mode: use default network so container can reach host.containers.internal
     // netd's allowlist is the security boundary (HTTPS_PROXY → netd)
@@ -1140,6 +1211,12 @@ async function run(
       `claude-box: cleaning up ephemeral worktree ${ephemeralWorktree}`,
     );
     await removeEphemeralWorktree(originalRepo, ephemeralWorktree);
+  }
+
+  // Tear down the per-launch scoped origin door.
+  if (scopedNetd) {
+    console.error(`claude-box: stopping scoped egress door (netd :${scopedNetd.port})`);
+    scopedNetd.stop();
   }
 
   // Clean up the isolated clone on exit (a plain temp dir, not a worktree).
@@ -2023,6 +2100,7 @@ export {
   normImageId,
   tcpReachable,
   resolveWritableSubtree,
+  originHostOf,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 

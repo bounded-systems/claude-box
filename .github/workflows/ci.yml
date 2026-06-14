@@ -1,0 +1,29 @@
+name: CI
+
+# Gate the repo on `bun test` — the project's source of truth (no tsconfig/tsc;
+# Bun's ambient types are the typecheck). Runs on every PR and on pushes to main,
+# so main can't silently go red the way it did before this workflow existed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same ref supersedes in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bun test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin for reproducibility; bump as the project's Bun moves.
+          bun-version: 1.3.11
+      # No `bun install` — the repo has no package.json/deps; tests import
+      # bun:test, node: builtins, and local .ts only.
+      - name: Run tests
+        run: bun test

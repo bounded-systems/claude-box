@@ -106,8 +106,11 @@ default once the sidecars are solid:
 - **The broker/signer** ([DOORS.md](DOORS.md)) — where standing secrets live and
   how doors request attenuated, expiring derivatives. The pod stays secret-free;
   the broker is the one trust anchor to design and harden.
-- **The persistent grant store** — the durable source of truth a door's behavior
-  is a function of; revocation is a write here. Needs a home and a consistency model.
+- **The persistent grant store** — modeled as a **declarative asset catalog**
+  reconciled by the trust kernel ([DOORS.md](DOORS.md), "OCAP, but Dagster"):
+  grants are assets, doors are materializations, revocation is removing a
+  declaration, lineage is the existing provenance chain. Open: its home + a
+  consistency model.
 - **Pod lifecycle** on operator crash — orphaned pods leak; need a reaper.
 - **Coexistence** with the current TCP-doors mode during migration.
 

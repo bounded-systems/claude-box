@@ -42,6 +42,44 @@ explicit verb is **early revocation** (e.g. the git-pull door, deleted once the
 clone completes). `behavior = f(grant)` → deterministic and reproducible; the
 grant store is the single trust anchor to secure.
 
+## Grants as a declarative asset graph (OCAP, but Dagster)
+
+The shape above — *declare durable grants; an ephemeral process materializes the
+door; `behavior = f(grant)`; revoke by deleting the declaration* — is a
+**reconciliation system**. It is the same shape as a declarative asset
+orchestrator (Dagster being the reference one), and naming it that turns the two
+fuzziest parts of this design (the "grant store" and "how revocation/rotation
+works") into known-good, principled machinery:
+
+| Declarative-asset orchestrator | claude-box doors |
+|---|---|
+| **Asset** (declared, durable) | a **grant** in the store |
+| **Materialization** (ephemeral run) | a **door process**, on demand |
+| `asset = f(upstream, config)` | `door = f(grant)` |
+| **Remove asset from the graph** | **revoke** → reconciler tears the door down |
+| **Freshness policy / declarative automation** | demand-driven lifetime; token **expiry → rematerialize** (rotation is free) |
+| **Sensor** | box request → door materializes |
+| **Resource** | the **broker/signer** (holds the root secret) |
+| **Partition** | per-box / per-repo scope |
+| **Reconciler** (actual vs declared) | the **trust kernel** |
+
+- **The grant store is the asset catalog.** Declared grants are the source of
+  truth; the reconciler makes the set of running doors match the declared set.
+  Revocation, rotation, and demand-materialization are all just reconciliation —
+  not bespoke lifecycle code.
+- **Asset lineage is the capability delegation chain.** "This repo-scoped token
+  was attenuated from the App-key asset; this commit signature from the
+  signing-key asset" *is* lineage. claude-box already produces it — the L1/L2/L3
+  attestation and the [OCAP provenance](OCAP.md) contract (SLSA-shaped) **are**
+  the lineage graph. Provenance isn't a separate feature; it's the asset graph
+  read backwards.
+
+**Borrow the model, not the runtime.** Take the *shape* — declared grants,
+reconciliation, lineage — but the reconciler that grants and revokes
+capabilities must be a hardened **trust kernel**, not orchestrator glue with its
+own attack surface. The declarative-asset-with-lineage framing is exactly right;
+the enforcement boundary stays small and audited.
+
 ## Scope & the TLS boundary
 
 A door scopes *what* the box can reach. How tight depends on where the proxy sits

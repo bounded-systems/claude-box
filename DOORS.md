@@ -23,6 +23,42 @@ underlying authority (a network route, a signing key, a read token); it holds a
    box's behalf*; the box's requests are unauthenticated. Secrets never enter the
    box (and, with a broker, never the pod).
 
+## Vocabulary: guests, rooms, dispatch (this IS the actor model)
+
+A door is one edge in an object-capability **actor** graph. Naming it precisely
+makes the whole model fall out:
+
+- **Guest** — a runtime *actor*: one identity that runs (`claude`, `bun`, `node`).
+  A guest holds **no ambient authority** — only references to other guests it may
+  dispatch to.
+- **Room** — a *declared capability set*: the named bundle of dispatch-edges a
+  guest is granted (`dev` = keeper + net + scout). The room is the declaration of
+  what the guest may reach — nothing wider.
+- **Launch = `spawn(guest, room)`** — a guest entered into a room. Not a guest,
+  not a room; the *composition*. (`claude-box --guest claude --room dev`; `cbox`
+  is a convenience wrapper over it.)
+- **Capability = dispatch to a guest.** A box never *holds* keeper/scout/net
+  authority — it sends a message (`op` + `params`) to the guest that holds it
+  (`keeperd`/`scoutd`/`netd`), which performs it and returns a result. Authority
+  is **delegated by dispatch, never accumulated.**
+- **Door = one dispatch edge** — "this guest may dispatch these ops to that
+  guest." The heterogeneous wiring (net via `HTTPS_PROXY`, keeper/scout via unix
+  sockets) is an artifact to retire: **one uniform `dispatch(guest, op, params)`
+  interface**, transport-agnostic underneath (the `DoorTransport` abstraction).
+- **Spawning = attenuating dispatch.** To gain a capability it lacks, a guest
+  dispatches a *spawn* (the launcher) and gets a new guest with a **subset** of
+  its own capabilities (child ⊆ parent — the attenuation contract). Authority
+  narrows down every dispatch chain.
+- **Even auth is a dispatched capability.** A box should not hold its API token;
+  "inference egress" is a capability obtained by dispatching to the net guest,
+  which **injects** the credential (secret-free — see below). `cbox`'s env-token
+  is the *interim*; the clean form is dispatch.
+
+This collapses the door zoo into **one primitive — guests dispatching to guests
+over a declared, attenuating capability graph.** It dissolves the TCP-mode door
+gap (one interface, no per-door transport to get wrong) and is the
+actor-unification on the roadmap (`prx-o92`, `prx-435`).
+
 ## Lifetime & revocation — there is no "persistent" door
 
 Every door is scoped to a **need-window** — the time its access is actually

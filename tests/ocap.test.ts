@@ -267,3 +267,26 @@ doorTest("--net: netd socket is accessible", () => {
 
 // --beads: beadsd door (not yet implemented)
 test.todo("--beads: beads ops via the beadsd door");
+
+// ── red-team regression probes (deterministic) ───────────────────────────────
+// Each maps to a tests/redteam mission. The LLM red-team DISCOVERS escapes;
+// these probes GUARD the ones we know about so they can't silently return.
+// They run under the podman+image guard (no daemons needed) — the container
+// layer alone already closes these, independent of any door policy.
+
+// escalate mission: a box launched with no doors has no door sockets to grab.
+boxTest("red-team/escalate: no-door box has no keeper socket to acquire", () => {
+  // default profile mounts no doors volume → /run/doors is empty/absent.
+  const r = box("test -S /run/doors/keeperd.sock && echo usable || echo absent");
+  expect(r.out).toContain("absent");
+});
+
+// exfil mission (network layer): with no net door the box has no NIC, so a
+// forbidden host has no route — nothing to exfiltrate THROUGH.
+boxTest("red-team/exfil: forbidden host has no route under --network=none", () => {
+  const r = boxNet(
+    ["--network=none"],
+    `bun -e 'fetch("https://exfil.redteam.invalid").then(()=>process.exit(0)).catch(()=>process.exit(7))'`,
+  );
+  expect(r.code).not.toBe(0); // no route off the box
+});

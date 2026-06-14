@@ -985,6 +985,10 @@ async function runPod(account: string, launch: Launch): Promise<number> {
     if (guestPreset.needsConfig) {
       argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
     }
+    // Headless auth: forward a pre-minted `claude setup-token` (no in-box /login).
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+      argv.push("--env", `CLAUDE_CODE_OAUTH_TOKEN=${process.env.CLAUDE_CODE_OAUTH_TOKEN}`);
+    }
     argv.push(
       "--env", `HTTPS_PROXY=${proxy}`, "--env", `HTTP_PROXY=${proxy}`,
       "--env", `ALL_PROXY=${proxy}`, "--env", `https_proxy=${proxy}`,
@@ -1048,6 +1052,13 @@ async function run(
   // Tool guests don't need or want claude's auth/history.
   if (guestPreset.needsConfig) {
     argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+  }
+  // Headless auth: in-box `/login` can't complete (no browser; the OAuth
+  // callback can't bind in the sandbox). Forward a pre-minted token from
+  // `claude setup-token` instead — keeps the box on the Max subscription and
+  // needs no in-box browser flow.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
+    argv.push("--env", `CLAUDE_CODE_OAUTH_TOKEN=${env.CLAUDE_CODE_OAUTH_TOKEN}`);
   }
   // Network posture: TCP mode vs Unix socket mode
   //

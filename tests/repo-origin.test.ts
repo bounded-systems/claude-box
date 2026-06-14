@@ -15,6 +15,7 @@ import {
   buildManifest,
   capabilityJson,
   capabilityPrompt,
+  originHostOf,
 } from "../claude-box.ts";
 
 const ENV = { HOME: "/tmp" } as Record<string, string | undefined>;
@@ -45,6 +46,15 @@ test("manifest surface reports the origin (json + in-box rulebook)", () => {
   const prompt = capabilityPrompt(m);
   expect(prompt).toContain("FRESH CLONE FROM ORIGIN");
   expect(prompt).toContain("NO host mount");
+});
+
+test("originHostOf derives the egress host for the scoped door", () => {
+  // https → host (strip scheme, userinfo, port, path)
+  expect(originHostOf("https://github.com/octocat/Hello-World")).toBe("github.com");
+  expect(originHostOf("https://user@gitlab.com:443/a/b.git")).toBe("gitlab.com");
+  // ssh forms
+  expect(originHostOf("git@github.com:octocat/Hello-World.git")).toBe("github.com");
+  expect(originHostOf("ssh://git@code.example.org/a/b")).toBe("code.example.org");
 });
 
 test("no --repo-origin ⇒ surface reports null (not an origin-clone launch)", () => {

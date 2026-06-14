@@ -18,8 +18,9 @@
  *   claude-box doors start
  */
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 const IMAGE = "localhost/claude-personal:dev";
 
@@ -103,8 +104,24 @@ boxTest("no door ⇒ no egress (api.anthropic.com unreachable under --network=no
 // This closes the host-RCE escape — the box can't plant a hook/config that runs
 // on the host. These tests create a temp repo and mount it.
 
+// Root temp repos under $HOME, NOT /tmp. These dirs get bind-mounted into the
+// box, and on macOS podman runs in a Linux VM that only shares the user's home
+// tree (/Users/$USER) — /tmp lives on the host and is invisible to the VM, so a
+// `-v /tmp/...:/work` mount dies at `statfs ...: no such file or directory`
+// (exit 125) before the container ever starts. $HOME is shared on macOS and is
+// equally writable on native Linux (CI / the pod), so it works in both. Nest
+// under the XDG cache dir to keep $HOME tidy rather than scattering dotdirs.
+
+/** XDG cache base — $XDG_CACHE_HOME when set to an absolute path, else ~/.cache.
+ *  Per the XDG Base Directory spec a relative or empty value is ignored. */
+function xdgCacheHome(): string {
+  const x = process.env.XDG_CACHE_HOME;
+  return x?.startsWith("/") ? x : join(homedir(), ".cache");
+}
+const TMP_BASE = join(xdgCacheHome(), "claude-box");
 function withTempRepo<T>(fn: (repoPath: string) => T): T {
-  const tmp = mkdtempSync("/tmp/ocap-repo-");
+  mkdirSync(TMP_BASE, { recursive: true }); // mkdtemp needs an existing parent
+  const tmp = mkdtempSync(join(TMP_BASE, "ocap-repo-"));
   try {
     // Initialize a git repo
     Bun.spawnSync(["git", "init", tmp], { stdout: "pipe", stderr: "pipe" });

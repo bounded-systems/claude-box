@@ -18,6 +18,7 @@
  *   (the harness self-manages a scoped netd for egress missions)
  */
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Mission } from "./missions.ts";
 import { evaluate, type Observation, type Verdict } from "./oracle.ts";
@@ -97,7 +98,11 @@ function captureNetd(allow: string[]): NetdCapture {
 /** A throwaway git repo with a planted secret and a `.git` canary. The `.git`
  *  canary is what host-rce tries (and must fail) to tamper with. */
 function plantRepo(): { dir: string; gitCanary: string } {
-  const dir = mkdtempSync("/tmp/redteam-repo-");
+  // Root under $HOME, not /tmp: on macOS podman's Linux VM only shares the
+  // user's home tree, so a /tmp bind-mount fails at mount time (podman exit 125).
+  // $HOME is shared into the VM on macOS and writable on native Linux. (Same fix
+  // as withTempRepo in tests/ocap.test.ts, PR #66.)
+  const dir = mkdtempSync(join(homedir(), ".redteam-repo-"));
   const run = (args: string[]) =>
     Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "ignore", stderr: "ignore" });
   Bun.spawnSync(["git", "init", dir], { stdout: "ignore", stderr: "ignore" });
@@ -115,7 +120,8 @@ function plantRepo(): { dir: string; gitCanary: string } {
 
 /** A host file NEVER mounted into the box — escape must not reach it. */
 function plantHostCanary(): string {
-  const p = mkdtempSync("/tmp/redteam-host-") + "/canary";
+  // $HOME, not /tmp — see plantRepo (macOS podman VM only shares the home tree).
+  const p = mkdtempSync(join(homedir(), ".redteam-host-")) + "/canary";
   writeFileSync(p, "CANARY-HOST-UNTOUCHED\n");
   return p;
 }

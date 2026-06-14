@@ -416,6 +416,7 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
                       (repeatable; .git stays read-only; writes via --keeper)
   --net               forward the netd door — policed egress
   --net-open          UNSAFE: full ambient egress, no allowlist
+  --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
   --scout             forward the scoutd door (external reads)
@@ -517,6 +518,9 @@ type Launch = {
    *  container-internal /work (tmpfs) and runs the guest there. The repo enters
    *  as content through the net door (netd must allow the origin host). */
   repoOrigin?: string;
+  /** --pod: launch the box in its OWN podman pod with a netd sidecar (doors off
+   *  the host, pod-local, isolated). See POD.md / DOORS.md. v1 = net egress. */
+  pod: boolean;
   /** --writable subtrees: when non-empty, /work is mounted READ-ONLY and only
    *  these paths are bind-mounted writable (narrowed blast radius). */
   writable: string[];
@@ -539,6 +543,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoEphemeral = false;
   let repoClone = false;
   let repoOrigin: string | undefined;
+  let pod = false;
   let netOpen = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
@@ -598,6 +603,11 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // /work is read-only). Validated against the repo at launch.
       const p = tail[++i];
       if (p) writable.push(p);
+      continue;
+    }
+    if (t === "--pod") {
+      // Launch in an isolated pod with a netd sidecar — doors off the host.
+      pod = true;
       continue;
     }
     if (t === "--net-open") {
@@ -670,6 +680,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     repoEphemeral,
     repoClone,
     repoOrigin,
+    pod,
     writable,
     doors: [...doors.values()],
     netOpen,
@@ -902,12 +913,119 @@ async function startScopedNetd(
   throw new Error("scoped netd failed to start");
 }
 
+/**
+ * --pod: launch the box in its OWN podman pod, with a netd door as a SIDECAR
+ * sharing the pod's network namespace (POD.md / DOORS.md). The box reaches netd
+ * at `localhost:3128` — no host port, no `host.containers.internal`, nothing the
+ * operator or another box can disturb. The netd's lifetime = the pod's (the
+ * default door window). v1: net egress only; `--repo-origin` (clone-in-box) or
+ * no repo. Host-mount `--repo` in a pod is a follow-up.
+ */
+async function runPod(account: string, launch: Launch): Promise<number> {
+  const { guest, repo, repoOrigin, guestArgs } = launch;
+  if (repo) {
+    console.error(
+      "claude-box: --pod v1 supports --repo-origin or no repo; host-mount --repo in a pod is a follow-up (POD.md).",
+    );
+    process.exit(2);
+  }
+  const guestPreset = knownGuests()[guest]!;
+  const manifest = buildManifest(account, launch);
+
+  // The pod's netd door: anthropic egress + (if cloning in-box) the origin host.
+  const allow = ["api.anthropic.com", ".anthropic.com"];
+  if (repoOrigin) allow.push(originHostOf(repoOrigin));
+
+  const id = crypto.randomUUID().slice(0, 8);
+  const podName = `claude-box-${account}-${id}`;
+  const netdName = `${podName}-netd`;
+  const sh = (a: string[]) => Bun.spawnSync(a, { stdout: "pipe", stderr: "pipe" });
+
+  const created = sh(["podman", "pod", "create", "--name", podName]);
+  if (created.exitCode !== 0) {
+    console.error(`claude-box: pod create failed: ${created.stderr.toString().trim()}`);
+    process.exit(2);
+  }
+
+  try {
+    // netd SIDECAR — the egress door, in the pod's netns. Runs the netd script
+    // from this source tree via the image's bun (no separate daemon image yet).
+    const netd = sh([
+      "podman", "run", "-d", "--pod", podName, "--name", netdName,
+      "-v", `${import.meta.dir}:/src:ro`,
+      "-e", `NETD_ALLOW=${allow.join(",")}`,
+      "--entrypoint", "bun", IMAGE, "/src/netd/netd.ts", "serve", "--port", "3128",
+    ]);
+    if (netd.exitCode !== 0) {
+      console.error(`claude-box: netd sidecar failed: ${netd.stderr.toString().trim()}`);
+      process.exit(2);
+    }
+    console.error(`claude-box: --pod — netd door in pod ${podName} (allow=${allow.join(",")}); doors are OFF the host`);
+
+    // Wait for netd to bind inside the pod (the image's sh has /dev/tcp).
+    let up = false;
+    for (let i = 0; i < 40; i++) {
+      if (sh(["podman", "exec", netdName, "sh", "-c", "(exec 3<>/dev/tcp/localhost/3128) 2>/dev/null"]).exitCode === 0) {
+        up = true;
+        break;
+      }
+      await Bun.sleep(300);
+    }
+    if (!up) {
+      console.error("claude-box: netd door did not come up in the pod");
+      process.exit(2);
+    }
+
+    // The BOX in the same pod reaches netd at pod-localhost.
+    const proxy = "http://localhost:3128";
+    const argv = [
+      "podman", "run", "-it", "--rm", "--pod", podName,
+      "--security-opt", "no-new-privileges", "--cap-drop", "all", "--pids-limit", "2048",
+    ];
+    if (guestPreset.needsConfig) {
+      argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+    }
+    argv.push(
+      "--env", `HTTPS_PROXY=${proxy}`, "--env", `HTTP_PROXY=${proxy}`,
+      "--env", `ALL_PROXY=${proxy}`, "--env", `https_proxy=${proxy}`,
+      "--env", `http_proxy=${proxy}`, "--env", "NO_PROXY=localhost,127.0.0.1",
+      "--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`,
+    );
+    const guestCmd = guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh");
+    if (repoOrigin) {
+      // Clone-in-box via the pod's netd (localhost proxy is inherited), then run.
+      argv.push(
+        "--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh", IMAGE,
+        "-c",
+        `git clone --depth 1 "$1" /work && git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
+        "claude-box", repoOrigin,
+      );
+      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      argv.push(...guestArgs);
+    } else {
+      argv.push(IMAGE);
+      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      if (guestPreset.entrypoint) argv.push(...guestPreset.entrypoint);
+      argv.push(...guestArgs);
+    }
+
+    const boxProc = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    return await boxProc.exited;
+  } finally {
+    // Tear down the pod — kills the netd door (its grant's default lifetime).
+    console.error(`claude-box: tearing down pod ${podName}`);
+    sh(["podman", "pod", "rm", "-f", podName]);
+  }
+}
+
 async function run(
   account: string,
   launch: Launch,
   env: Env = process.env,
 ): Promise<number> {
   assertAccount(account);
+  // --pod: the box and its doors live in their own pod, off the host (POD.md).
+  if (launch.pod) return runPod(account, launch);
   const { guest, repo, repoRw, repoEphemeral, repoClone, repoOrigin, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);

@@ -59,6 +59,29 @@ over a declared, attenuating capability graph.** It dissolves the TCP-mode door
 gap (one interface, no per-door transport to get wrong) and is the
 actor-unification on the roadmap (`prx-o92`, `prx-435`).
 
+### The TCP-mode door gap (the concrete first payoff)
+
+A live in-box session hit it directly: **net worked, scout was dead.** The root
+cause is the heterogeneous wiring the unification removes:
+
+- **net rides a protocol the client already speaks.** In TCP mode the box reaches
+  netd via `HTTPS_PROXY=http://host.containers.internal:3128` — every HTTP client
+  honours it for free, no per-door client code.
+- **keeper/scout ride a transport the client *doesn't*.** `resolveDoor` correctly
+  overrides their guest transport to `host.containers.internal:PORT` in TCP mode
+  ([claude-box.ts](claude-box.ts) `resolveDoor`), so `$KEEPERD_SOCK`/`$SCOUTD_SOCK`
+  receive a `host:port` *string* — but the in-box guidance and client still treat
+  that env var as a **unix socket path** (`/run/doors/scoutd.sock`), and TCP mode
+  never mounts `/run/doors`. The client dials a path that isn't there → "scout
+  dead."
+
+The fix is **not** a per-door patch in claude-box; it's the uniform
+`dispatch(guest, op, params)` client (`prx-o92`): one transport-agnostic facade
+that accepts either a mounted socket or a host-gateway endpoint, so keeper/scout
+become reachable in TCP mode the same costless way net already is. This is why
+the actor framing is the fix, not a refactor target — every capability becomes
+the *same* dispatch, and a door can't be silently "wired but undiallable."
+
 ## Lifetime & revocation — there is no "persistent" door
 
 Every door is scoped to a **need-window** — the time its access is actually

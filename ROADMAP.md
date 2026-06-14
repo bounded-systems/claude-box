@@ -87,6 +87,27 @@ every door a direct local mount) remains the clean end-state. See ROOM.md.
   un-`todo` the ocap tests on a real host. `scripts/bringup-macos.sh` is the
   checklist.
 
+## Future directions (the actor model)
+
+These fall straight out of treating every capability as a **dispatch to a guest
+that holds it** ([DOORS.md](./DOORS.md)) rather than something baked in or fetched
+ad-hoc. Not scheduled; recorded so they aren't lost.
+
+- **Multi-repo / multi-subtree boxes.** Make `--repo` / `--repo-origin` (and
+  `--writable`) **repeatable**: a box holds N repo-actors, each at its own mount
+  (`/work/<name>`), each with its **own** scoped keeper + git-pull door (the
+  per-origin scoping #45 already built, generalized to one per repo). A commit to
+  repo A dispatches to A's door and *cannot* reach B — authority is per-repo, not
+  ambient. `--repo-origin URL:subtree` (sparse checkout) gives subtrees-from-many-
+  repos in one box. This is a small extension of the shipped write-model ladder
+  (#42–#45), not a new paradigm — `--repo` becomes repeatable, mounts get names,
+  the git-pull door is minted per origin.
+- **Tooling as a door, not an egress hole.** A box needing a tool it must fetch
+  (e.g. `tsc` pulling TypeScript from npm — which correctly 403s against the netd
+  allowlist) should reach it through a **dedicated capability/actor** (a vendored
+  toolchain in the image, or a scoped fetch door), never by widening egress. The
+  allowlist 403 is the system working; the fix is a door, not a hole.
+
 ## Suggested order
 
 1. **Finish the pod** — `--pod` (#48) runs the box + a netd sidecar off-host today;

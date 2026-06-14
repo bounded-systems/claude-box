@@ -408,6 +408,8 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --repo-ephemeral .  ephemeral worktree (parallel-safe, cleaned up on exit)
   --repo-clone PATH   isolated clone w/ own writable .git (full in-box git,
                       real repo never mounted; reconcile via --keeper)
+  --repo-origin URL   NO host mount: box clones URL into a tmpfs /work itself
+                      (needs --net; netd must allow the origin host)
   --repo-rw PATH      UNSAFE: worktree AND .git writable
   --writable PATH     narrow the writable surface: /work read-only except PATH
                       (repeatable; .git stays read-only; writes via --keeper)
@@ -510,6 +512,10 @@ type Launch = {
   /** --repo-clone: mount an isolated clone with its OWN writable .git (real repo
    *  never mounted). Full in-box git; reconcile to the source via keeper. */
   repoClone: boolean;
+  /** --repo-origin URL: NO host mount at all. The box clones URL into a writable
+   *  container-internal /work (tmpfs) and runs the guest there. The repo enters
+   *  as content through the net door (netd must allow the origin host). */
+  repoOrigin?: string;
   /** --writable subtrees: when non-empty, /work is mounted READ-ONLY and only
    *  these paths are bind-mounted writable (narrowed blast radius). */
   writable: string[];
@@ -531,6 +537,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoRw = false;
   let repoEphemeral = false;
   let repoClone = false;
+  let repoOrigin: string | undefined;
   let netOpen = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
@@ -571,6 +578,18 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // mounted). Full in-box git; reconcile commits to the source via keeper.
       repo = tail[++i];
       repoClone = true;
+      continue;
+    }
+    if (t === "--repo-origin") {
+      // No host mount: the box clones URL into a tmpfs /work itself. The repo
+      // enters as content through the net door (netd must allow the origin host).
+      const url = tail[++i] ?? "";
+      if (!/^(https?:\/\/|git@[\w.-]+:|ssh:\/\/)/.test(url)) {
+        throw new Error(
+          `--repo-origin needs an https/ssh git URL, got: ${JSON.stringify(url)}`,
+        );
+      }
+      repoOrigin = url;
       continue;
     }
     if (t === "--writable") {
@@ -649,6 +668,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     repoRw,
     repoEphemeral,
     repoClone,
+    repoOrigin,
     writable,
     doors: [...doors.values()],
     netOpen,
@@ -663,6 +683,7 @@ type Manifest = {
   repoRw: boolean;
   repoEphemeral: boolean;
   repoClone: boolean;
+  repoOrigin?: string;
   writable: string[];
   doors: DoorGrant[];
   netOpen: boolean;
@@ -683,7 +704,7 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -708,6 +729,9 @@ function capabilityJson(m: Manifest): string {
       // Isolated clone: full in-box git on a throwaway .git; the real repo is
       // never mounted — reconcile commits to the source via the keeper door.
       repoClone: m.repoClone,
+      // Origin clone: NO host mount; the box cloned this URL into a container-
+      // internal /work through the net door. null ⇒ not an origin-clone launch.
+      repoOrigin: m.repoOrigin ?? null,
       // Narrowed writable surface: when set, /work is read-only except these
       // subtrees (null ⇒ the whole worktree is writable).
       writable: m.writable.length ? m.writable : null,
@@ -732,6 +756,11 @@ function capabilityPrompt(m: Manifest): string {
     "GRANTED:",
     "- config: your own account's auth/history (a private volume).",
   ];
+  if (m.repoOrigin) {
+    lines.push(
+      `- repo: ${m.repoOrigin} at /work — a FRESH CLONE FROM ORIGIN. There is NO host mount; the box cloned the repo into a container-internal /work through the net door. Full in-box git; this is a throwaway checkout, so push back through the keeper door. The host filesystem is not exposed at all.`,
+    );
+  }
   if (m.repo) {
     if (m.repoRw) {
       lines.push(
@@ -841,7 +870,7 @@ async function run(
   env: Env = process.env,
 ): Promise<number> {
   assertAccount(account);
-  const { guest, repo, repoRw, repoEphemeral, repoClone, writable, doors, netOpen, guestArgs } = launch;
+  const { guest, repo, repoRw, repoEphemeral, repoClone, repoOrigin, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);
   const argv = [
@@ -1057,19 +1086,47 @@ async function run(
     }
     }
   }
+  // --repo-origin: no host mount. /work is a writable container-internal tmpfs;
+  // override the entrypoint to clone the origin into it, then exec the guest in
+  // the checkout. The URL is passed POSITIONALLY ($1), never interpolated into
+  // the script, so it can't inject shell. Egress is the net door (netd must
+  // allow the origin host). These podman opts must precede the image.
+  const guestCmd = guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh");
+  if (repoOrigin) {
+    argv.push("--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh");
+  }
+
   // Use the guest's image and entrypoint.
   argv.push(guestPreset.image);
-  // For claude guest, inject the honest surface into the agent's context
-  // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
-  // don't need or parse system prompts — they just run their command.
-  if (guest === "claude") {
-    argv.push("--append-system-prompt", capabilityPrompt(manifest));
+
+  if (repoOrigin) {
+    // sh -c '<script>' <arg0> <URL> <guest args…> : $1=URL (clone target), then
+    // shift so "$@" is exactly the guest args handed to the guest command.
+    argv.push(
+      "-c",
+      // safe.directory: the tmpfs /work root is root-owned but git runs as the
+      // box user, so mark it safe to avoid git's "dubious ownership" refusal.
+      `git clone --depth 1 "$1" /work && git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
+      "claude-box",
+      repoOrigin,
+    );
+    if (guest === "claude") {
+      argv.push("--append-system-prompt", capabilityPrompt(manifest));
+    }
+    argv.push(...guestArgs);
+  } else {
+    // For claude guest, inject the honest surface into the agent's context
+    // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
+    // don't need or parse system prompts — they just run their command.
+    if (guest === "claude") {
+      argv.push("--append-system-prompt", capabilityPrompt(manifest));
+    }
+    // Add entrypoint override if the guest specifies one, then the args.
+    if (guestPreset.entrypoint) {
+      argv.push(...guestPreset.entrypoint);
+    }
+    argv.push(...guestArgs);
   }
-  // Add entrypoint override if the guest specifies one, then the args.
-  if (guestPreset.entrypoint) {
-    argv.push(...guestPreset.entrypoint);
-  }
-  argv.push(...guestArgs);
   const proc = Bun.spawn(argv, {
     stdin: "inherit",
     stdout: "inherit",

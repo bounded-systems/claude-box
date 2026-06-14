@@ -111,7 +111,14 @@ boxTest("no door ⇒ no egress (api.anthropic.com unreachable under --network=no
 // (exit 125) before the container ever starts. $HOME is shared on macOS and is
 // equally writable on native Linux (CI / the pod), so it works in both. Nest
 // under the XDG cache dir to keep $HOME tidy rather than scattering dotdirs.
-const TMP_BASE = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "claude-box");
+
+/** XDG cache base — $XDG_CACHE_HOME when set to an absolute path, else ~/.cache.
+ *  Per the XDG Base Directory spec a relative or empty value is ignored. */
+function xdgCacheHome(): string {
+  const x = process.env.XDG_CACHE_HOME;
+  return x?.startsWith("/") ? x : join(homedir(), ".cache");
+}
+const TMP_BASE = join(xdgCacheHome(), "claude-box");
 function withTempRepo<T>(fn: (repoPath: string) => T): T {
   mkdirSync(TMP_BASE, { recursive: true }); // mkdtemp needs an existing parent
   const tmp = mkdtempSync(join(TMP_BASE, "ocap-repo-"));

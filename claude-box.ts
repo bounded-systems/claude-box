@@ -109,9 +109,6 @@ const NETD_PROXY = "http://127.0.0.1:3128";
 // In TCP mode (DOORS_TCP=1), the proxy points directly to netd on the host.
 const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
 
-// netd's base allowlist (mirrors netd.ts DEFAULT_ALLOW). A --repo-origin launch
-// gets a scoped netd allowing THESE plus its origin host — nothing wider.
-const NETD_DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
 
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
  *  Set DOORS_TCP=1 or run `doors serve` to enable TCP mode. */
@@ -762,7 +759,7 @@ function capabilityPrompt(m: Manifest): string {
   ];
   if (m.repoOrigin) {
     lines.push(
-      `- repo: ${m.repoOrigin} at /work — a FRESH CLONE FROM ORIGIN. There is NO host mount; the box cloned the repo into a container-internal /work through the net door. Full in-box git; this is a throwaway checkout, so push back through the keeper door. The host filesystem is not exposed at all.`,
+      `- repo: ${m.repoOrigin} at /work — a FRESH CLONE FROM ORIGIN. There is NO host mount; the box cloned the repo into a container-internal /work through a git-pull door scoped to ONLY the origin host (separate from your anthropic egress, and used only for that one clone). Full in-box git with no further egress; this is a throwaway checkout, so push back through the keeper door. The host filesystem is not exposed at all.`,
     );
   }
   if (m.repo) {
@@ -947,31 +944,25 @@ async function run(
   const tcpMode = isTcpMode(env);
   const netDoor = doors.find((d) => d.name === "net");
 
-  // --repo-origin without --net-open: a per-launch SCOPED netd that allows ONLY
-  // {anthropic + the origin host}. It's the box's sole egress — covering both
-  // the in-box clone → origin and claude → anthropic — so the clone is policed,
-  // not ambient. Torn down on exit.
-  let scopedNetd: { port: number; stop: () => void } | undefined;
+  // The git-pull door is SEPARATE from the guest's egress: a per-launch netd
+  // scoped to ONLY the origin host (never anthropic), used SOLELY for the clone.
+  // The guest's own egress (claude → anthropic) is a different door (--net). This
+  // is built in, not configurable — there is no flag to widen the git door or
+  // skip it; the only escape is --net-open (which drops policing entirely).
+  let gitDoor: { port: number; stop: () => void } | undefined;
+  let gitDoorProxy = ""; // empty ⇒ clone uses the container's ambient/no proxy
   if (repoOrigin && !netOpen) {
     if (!tcpMode) {
       console.error(
-        "claude-box: --repo-origin needs TCP mode for its scoped egress door — set DOORS_TCP=1 (or use --net-open).",
+        "claude-box: --repo-origin needs TCP mode for its scoped git-pull door — set DOORS_TCP=1.",
       );
       process.exit(2);
     }
     const host = originHostOf(repoOrigin);
-    scopedNetd = await startScopedNetd([...NETD_DEFAULT_ALLOW, host]);
-    const proxy = `http://host.containers.internal:${scopedNetd.port}`;
-    argv.push(
-      "--env", `HTTPS_PROXY=${proxy}`,
-      "--env", `HTTP_PROXY=${proxy}`,
-      "--env", `ALL_PROXY=${proxy}`,
-      "--env", `https_proxy=${proxy}`,
-      "--env", `http_proxy=${proxy}`,
-      "--env", "NO_PROXY=localhost,127.0.0.1",
-    );
+    gitDoor = await startScopedNetd([host]); // ONLY the origin host
+    gitDoorProxy = `http://host.containers.internal:${gitDoor.port}`;
     console.error(
-      `claude-box: --repo-origin — scoped egress door allows only ${host} + anthropic (netd :${scopedNetd.port})`,
+      `claude-box: --repo-origin — git-pull door scoped to ONLY ${host} (netd :${gitDoor.port}); the guest's egress is a separate door`,
     );
   }
 
@@ -979,8 +970,6 @@ async function run(
     console.error(
       "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
     );
-  } else if (scopedNetd) {
-    // egress already wired to the scoped origin door above — skip the shared netd
   } else if (tcpMode && doors.length > 0) {
     // TCP mode: use default network so container can reach host.containers.internal
     // netd's allowlist is the security boundary (HTTPS_PROXY → netd)
@@ -1175,11 +1164,13 @@ async function run(
     // shift so "$@" is exactly the guest args handed to the guest command.
     argv.push(
       "-c",
-      // safe.directory: the tmpfs /work root is root-owned but git runs as the
-      // box user, so mark it safe to avoid git's "dubious ownership" refusal.
-      `git clone --depth 1 "$1" /work && git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
+      // $1=URL, $2=git-pull-door proxy (used ONLY for the clone, so the guest's
+      // own egress door is untouched). safe.directory: the tmpfs /work root is
+      // root-owned but git runs as the box user, so mark it safe.
+      `url="$1"; gp="$2"; shift 2; https_proxy="$gp" HTTPS_PROXY="$gp" git clone --depth 1 "$url" /work && git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
       "claude-box",
       repoOrigin,
+      gitDoorProxy,
     );
     if (guest === "claude") {
       argv.push("--append-system-prompt", capabilityPrompt(manifest));
@@ -1214,9 +1205,9 @@ async function run(
   }
 
   // Tear down the per-launch scoped origin door.
-  if (scopedNetd) {
-    console.error(`claude-box: stopping scoped egress door (netd :${scopedNetd.port})`);
-    scopedNetd.stop();
+  if (gitDoor) {
+    console.error(`claude-box: stopping git-pull door (netd :${gitDoor.port})`);
+    gitDoor.stop();
   }
 
   // Clean up the isolated clone on exit (a plain temp dir, not a worktree).

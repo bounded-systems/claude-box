@@ -46,7 +46,7 @@ only the second is a container.
 Run the personal Claude as a **pinned OCI container**.
 
 - **Image** — built with **nix `dockerTools.streamLayeredImage`** from the
-  pinned nixpkgs (`claude-code` = 2.0.53 @ rev `bb813de`, license *unfree*,
+  pinned nixpkgs (`claude-code` = 2.1.175 @ rev `9f11f82`, license *unfree*,
   `aarch64-linux` ✓) plus the agent toolchain it needs to be useful (git, gh,
   ripgrep, bun, prx). Reproducible build → **deterministic digest**. Double pin:
   the nixpkgs rev *and* the resulting image digest.
@@ -79,7 +79,8 @@ A self-updating curl binary, by contrast, is an unbounded, unaudited mutation.
    (the Lima VM as a remote builder, a `nix-darwin` `linux-builder`, or CI).
    `dockerTools` produces Linux images; an `aarch64-darwin` host can't build
    them alone. **Open logistic.**
-4. **Pinned nixpkgs lags upstream** (claude 2.0.53 vs the installer's 2.1.168).
+4. **Pinned nixpkgs lags upstream** (the pin tracks nixpkgs, which trails the
+   native installer — e.g. pinned 2.1.175 vs the installer's 2.1.177).
    Upgrades become a deliberate, reviewable **sha bump** — a feature, but it
    means no automatic version/security updates; someone must bump the lock.
 5. **A useful Claude needs the whole dev toolchain** (git/gh/rg/bun/prx) +

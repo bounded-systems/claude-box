@@ -85,12 +85,12 @@ describe("grantedDoorLines", () => {
   test("renders door with caveats as RESTRICTED", () => {
     const door = makeDoor("net", ["host=github.com"]);
     const lines = grantedDoorLines([door]);
-    expect(lines[0]).toContain("RESTRICTED: host=github.com");
+    expect(lines[0]).toContain("RESTRICTED to: host=github.com");
   });
 
-  test("renders multiple caveats comma-separated", () => {
+  test("renders multiple caveats semicolon-separated", () => {
     const door = makeDoor("net", ["host=github.com", "host=api.anthropic.com"]);
     const lines = grantedDoorLines([door]);
-    expect(lines[0]).toContain("RESTRICTED: host=github.com, host=api.anthropic.com");
+    expect(lines[0]).toContain("RESTRICTED to: host=github.com; host=api.anthropic.com");
   });
 });

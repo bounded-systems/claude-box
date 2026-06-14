@@ -18,7 +18,7 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, rmSync } from "node:fs";
 import { dirname, resolve, relative, isAbsolute } from "node:path";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
 // supplies the door catalog (knownDoors) and room bundles (knownRooms); the
@@ -406,6 +406,8 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --guest NAME        select runtime (claude | bun | node | deno | python)
   --repo PATH         mount worktree at /work (.git read-only)
   --repo-ephemeral .  ephemeral worktree (parallel-safe, cleaned up on exit)
+  --repo-clone PATH   isolated clone w/ own writable .git (full in-box git,
+                      real repo never mounted; reconcile via --keeper)
   --repo-rw PATH      UNSAFE: worktree AND .git writable
   --writable PATH     narrow the writable surface: /work read-only except PATH
                       (repeatable; .git stays read-only; writes via --keeper)
@@ -505,6 +507,9 @@ type Launch = {
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
+  /** --repo-clone: mount an isolated clone with its OWN writable .git (real repo
+   *  never mounted). Full in-box git; reconcile to the source via keeper. */
+  repoClone: boolean;
   /** --writable subtrees: when non-empty, /work is mounted READ-ONLY and only
    *  these paths are bind-mounted writable (narrowed blast radius). */
   writable: string[];
@@ -525,6 +530,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repo: string | undefined;
   let repoRw = false;
   let repoEphemeral = false;
+  let repoClone = false;
   let netOpen = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
@@ -558,6 +564,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // behaviour). For when there's no keeperd and you must commit in-box.
       repo = tail[++i];
       repoRw = true;
+      continue;
+    }
+    if (t === "--repo-clone") {
+      // Isolated clone with its OWN writable .git (the real repo is never
+      // mounted). Full in-box git; reconcile commits to the source via keeper.
+      repo = tail[++i];
+      repoClone = true;
       continue;
     }
     if (t === "--writable") {
@@ -635,6 +648,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     repo,
     repoRw,
     repoEphemeral,
+    repoClone,
     writable,
     doors: [...doors.values()],
     netOpen,
@@ -648,6 +662,7 @@ type Manifest = {
   repo?: string;
   repoRw: boolean;
   repoEphemeral: boolean;
+  repoClone: boolean;
   writable: string[];
   doors: DoorGrant[];
   netOpen: boolean;
@@ -668,7 +683,7 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -690,6 +705,9 @@ function capabilityJson(m: Manifest): string {
       repoGit: m.repo ? (m.repoRw ? "rw" : "ro") : null,
       // Ephemeral worktree: parallel-safe, edits are isolated per-box.
       repoEphemeral: m.repoEphemeral,
+      // Isolated clone: full in-box git on a throwaway .git; the real repo is
+      // never mounted — reconcile commits to the source via the keeper door.
+      repoClone: m.repoClone,
       // Narrowed writable surface: when set, /work is read-only except these
       // subtrees (null ⇒ the whole worktree is writable).
       writable: m.writable.length ? m.writable : null,
@@ -722,6 +740,10 @@ function capabilityPrompt(m: Manifest): string {
     } else if (m.repoEphemeral) {
       lines.push(
         `- repo: ${m.repo} at /work — EPHEMERAL worktree (--repo-ephemeral). This is an isolated copy; your edits are local to this box and do not affect the original or other boxes. .git is READ-ONLY. Route commits through the keeper door.`,
+      );
+    } else if (m.repoClone) {
+      lines.push(
+        `- repo: ${m.repo} at /work — ISOLATED CLONE (--repo-clone). You have FULL in-box git: commit, branch, rebase freely. This is a throwaway clone; nothing reaches the real repo until you reconcile through the keeper door. The real repo is not mounted, so you cannot corrupt it.`,
       );
     } else if (m.writable.length) {
       lines.push(
@@ -778,6 +800,28 @@ async function createEphemeralWorktree(repo: string): Promise<string> {
   return worktreePath;
 }
 
+/** Create an isolated clone of the repo at a temp path: a STANDALONE repo with
+ *  its OWN writable .git (origin → the source). The box gets full in-box git
+ *  (commit/branch) and the writes land in the throwaway clone, never the real
+ *  .git — so in-box git ergonomics WITHOUT the host-RCE risk of --repo-rw.
+ *  `--local` hardlinks objects (fast, cheap); git objects are immutable so the
+ *  source is never mutated. Reconcile the clone's commits to the source via the
+ *  keeper door (increment 2). Caller removes the dir when done. */
+async function createIsolatedClone(repo: string): Promise<string> {
+  const id = crypto.randomUUID().slice(0, 8);
+  const tmpDir = process.env.TMPDIR ?? "/tmp";
+  const clonePath = `${tmpDir}/claude-box-clone-${id}`;
+  const proc = Bun.spawn(
+    ["git", "clone", "--local", "--no-hardlinks", repo, clonePath],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const err = (await new Response(proc.stderr).text()).trim();
+  if ((await proc.exited) !== 0) {
+    throw new Error(`failed to create isolated clone: ${err}`);
+  }
+  return clonePath;
+}
+
 /** Remove an ephemeral git worktree. */
 async function removeEphemeralWorktree(
   repo: string,
@@ -797,7 +841,7 @@ async function run(
   env: Env = process.env,
 ): Promise<number> {
   assertAccount(account);
-  const { guest, repo, repoRw, repoEphemeral, writable, doors, netOpen, guestArgs } = launch;
+  const { guest, repo, repoRw, repoEphemeral, repoClone, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);
   const argv = [
@@ -896,8 +940,9 @@ async function run(
   // The machine-readable surface for the in-box runtime (prx tool-gating).
   argv.push("--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`);
 
-  // Track ephemeral worktree for cleanup
+  // Track ephemeral worktree / isolated clone for cleanup
   let ephemeralWorktree: string | undefined;
+  let cloneDir: string | undefined;
   let originalRepo: string | undefined;
 
   if (repo) {
@@ -919,13 +964,27 @@ async function run(
         console.error(`claude-box: failed to create ephemeral worktree: ${e}`);
         process.exit(2);
       }
+    } else if (repoClone) {
+      // Isolated clone with its OWN writable .git. The real repo is never
+      // mounted, so the box gets full in-box git ergonomics with zero risk to
+      // the source. Reconcile via the keeper door; the clone is removed on exit.
+      try {
+        cloneDir = await createIsolatedClone(abs);
+        mountPath = cloneDir;
+        console.error(
+          `claude-box: --repo-clone — isolated clone at ${cloneDir} (full in-box git; real repo untouched)`,
+        );
+      } catch (e) {
+        console.error(`claude-box: failed to create isolated clone: ${e}`);
+        process.exit(2);
+      }
     }
 
     // Narrowed writable surface (--writable): mount /work READ-ONLY and bind
     // only the named subtrees writable on top, so an errant agent can touch
-    // nothing outside its lane. --repo-rw is the all-writable escape, so the two
-    // don't combine. Ignored without --repo.
-    const narrowWritable = writable.length > 0 && !repoRw;
+    // nothing outside its lane. --repo-rw / --repo-clone are fully-writable
+    // modes, so the two don't combine. Ignored without --repo.
+    const narrowWritable = writable.length > 0 && !repoRw && !repoClone;
 
     // Mount the worktree at /work; map the host user → the in-box `claude` uid so
     // host-owned files line up (writable + no git "dubious ownership") WITHOUT
@@ -961,7 +1020,15 @@ async function run(
     // Tell the box what the host path is, so keeperd requests can translate
     // /work → the actual host path (keeperd runs on the host, not in the box).
     // For ephemeral worktrees, use the original repo path so commits apply there.
-    argv.push("--env", `CLAUDE_BOX_HOST_REPO=${abs}`);
+    // For an isolated clone, point at the clone — that's what /work IS, and
+    // reconciliation reads the clone's commits.
+    argv.push("--env", `CLAUDE_BOX_HOST_REPO=${repoClone ? mountPath : abs}`);
+    if (repoClone) {
+      // The clone IS /work, self-contained with its own WRITABLE .git. It's a
+      // throwaway (real repo never mounted), so writable .git is SAFE here — no
+      // host-RCE, since a planted hook only runs inside this disposable clone.
+      // Nothing more to mount; skip the .git :ro overlay below.
+    } else {
     // A worktree's git dir lives in a bare repo OUTSIDE the worktree; mount that
     // common dir at its host path so `git` resolves inside the box.
     const common = await gitCommonDir(mountPath);
@@ -987,6 +1054,7 @@ async function run(
         // normal repo: .git is inside the worktree — overlay it :ro over /work.
         argv.push("-v", `${mountPath}/.git:/work/.git:ro`);
       }
+    }
     }
   }
   // Use the guest's image and entrypoint.
@@ -1015,6 +1083,18 @@ async function run(
       `claude-box: cleaning up ephemeral worktree ${ephemeralWorktree}`,
     );
     await removeEphemeralWorktree(originalRepo, ephemeralWorktree);
+  }
+
+  // Clean up the isolated clone on exit (a plain temp dir, not a worktree).
+  // NOTE (increment 2): reconcile the clone's commits to the source via keeper
+  // BEFORE this removal once that path lands; today the clone is discarded.
+  if (cloneDir) {
+    console.error(`claude-box: cleaning up isolated clone ${cloneDir}`);
+    try {
+      rmSync(cloneDir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
   }
 
   return exitCode;

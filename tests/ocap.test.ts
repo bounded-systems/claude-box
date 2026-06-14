@@ -189,6 +189,48 @@ boxTest("--repo-rw: .git is writable (unsafe escape)", () => {
   });
 });
 
+// ── credential-free write path (GH-5 / issue #5) ──
+// keeperd is the ONLY write path. `gh` was dropped from the toolchain and no
+// push credential ships in the image, so a session cannot establish a direct
+// push that bypasses keeperd. These probes assert the NEGATIVE: there is no
+// usable push credential at rest in a default box. They need only the image
+// (no daemons), so they run under the boxTest tier.
+
+boxTest("credential-free: gh is absent (no `gh auth login` push path)", () => {
+  const r = box("command -v gh >/dev/null 2>&1 && echo present || echo absent");
+  expect(r.out).toBe("absent");
+});
+
+boxTest("credential-free: no stored git credentials or credential helper", () => {
+  const r = box(
+    "git config --global --get credential.helper >/dev/null 2>&1 && echo helper || echo no-helper; " +
+    'test -f "$HOME/.git-credentials" && echo has-creds || echo no-creds',
+  );
+  expect(r.out).toContain("no-helper");
+  expect(r.out).toContain("no-creds");
+});
+
+boxTest("credential-free: no ssh key or forwarded agent (no git-over-ssh push path)", () => {
+  // openssh ships for transport, but NO private key is baked in or forwarded,
+  // and no agent socket is exposed — so there is no ssh push authority either.
+  const r = box(
+    'ls "$HOME"/.ssh/id_* 2>/dev/null | grep -v "\\.pub$" | head -1; ' +
+    'test -n "$SSH_AUTH_SOCK" && echo agent || echo no-agent',
+  );
+  expect(r.out).toBe("no-agent"); // no private-key line precedes the marker
+});
+
+boxTest("credential-free: a direct push cannot authenticate (keeperd is the only write path)", () => {
+  // With no credential at rest and prompting disabled, a push to any remote
+  // MUST fail — there is no ambient push right to bypass keeperd with.
+  const r = box(
+    "cd /tmp && rm -rf credtest && git init -q credtest && cd credtest && " +
+    'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x && ' +
+    "GIT_TERMINAL_PROMPT=0 git push https://github.invalid/nope.git HEAD 2>&1; echo exit=$?",
+  );
+  expect(r.out).not.toContain("exit=0"); // the push did not succeed
+});
+
 // ── door grant profiles ──
 // These require the actual daemons to be running and accessible via socket.
 // We check for the socket and skip if not available.

@@ -35,7 +35,7 @@ import {
 
 const log = createLogger("netd");
 
-const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
+export const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
 
 /** Allowlist entry: exact host, or ".suffix" (matches the apex + any subdomain). */
 function matchesPattern(host: string, pattern: string): boolean {
@@ -47,6 +47,16 @@ function matchesPattern(host: string, pattern: string): boolean {
 /** Check if host matches any pattern in the list. */
 function matchesAny(host: string, patterns: string[]): boolean {
   return patterns.some((p) => matchesPattern(host, p));
+}
+
+/**
+ * Check a host against the built-in DEFAULT_ALLOW, ignoring any NETD_ALLOW /
+ * NETD_CAVEATS env overrides. Pins the issue #6 invariant ("netd allowlist must
+ * exclude writable sinks"): the default allowlist is Anthropic-only and must
+ * default-deny writable sinks (github, gists, pastebins, npm registry, etc.).
+ */
+export function isAllowedByDefault(host: string): boolean {
+  return matchesAny(host, DEFAULT_ALLOW);
 }
 
 /** Parse caveats from NETD_CAVEATS. Returns host patterns from host=... caveats. */
@@ -168,8 +178,8 @@ const handlers = {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 // Aligned with keeperd/scoutd: `netd serve --socket PATH` (--unix kept as alias).
-const args = Bun.argv.slice(2);
-const cmd = args[0];
+// Guarded by import.meta.main so importing this module (e.g. from tests) does
+// not start a listener or process.exit on the test runner's argv.
 
 function showUsage(): void {
   console.log(`netd — allowlist egress proxy for the claude-box --net door
@@ -187,7 +197,12 @@ Environment:
 `);
 }
 
-if (cmd === "serve") {
+const args = Bun.argv.slice(2);
+const cmd = args[0];
+
+if (!import.meta.main) {
+  // Imported as a module (tests, other daemons) — skip the CLI dispatch.
+} else if (cmd === "serve") {
   let socketPath = defaultSocketPath("netd");
   let port: number | undefined;
   for (let i = 1; i < args.length; i++) {

@@ -23,7 +23,7 @@ declaration, projected onto the `podman run` mounts/sockets).
 | Grant | What it gives | How |
 |---|---|---|
 | **config volume** *(default)* | the account's own auth/history/projects | `-v claude-<acct>-config:/home/claude/.config/claude:U` |
-| **`--repo <path>`** | work on a real project | worktree RW at `/work`, **`.git` read-only** (no host-RCE; commits via keeper). `--repo-ephemeral` creates a temp worktree (parallel-safe). `--repo-rw` is the unsafe `.git`-writable escape. See [REPOD.md](./REPOD.md) |
+| **`--repo <path>`** | work on a real project | worktree RW at `/work`, **`.git` read-only** (no host-RCE; commits via keeper). `--writable PATH` narrows the writable surface to subtrees; `--repo-ephemeral` is a parallel-safe temp worktree; `--repo-clone` is an isolated clone with full in-box git (real repo never mounted); `--repo-origin URL` clones in-box from origin with **zero host mount**; `--repo-rw` is the unsafe `.git`-writable escape. See [REPOD.md](./REPOD.md) |
 | **`--net [sock]`** | **policed egress** (incl. the model API) | `--network=none` + forward the **netd** door (socket) — see below |
 | **`--keeper`** | **git writes** (commit/push/refs), *signed* | forward the **keeperd** door (socket) — see below |
 | **`--scout`** | **external reads** (repos/PRs/URLs) | forward the **scoutd** door — content, not creds; the read twin of keeper, see [SCOUT.md](./SCOUT.md) |
@@ -115,49 +115,59 @@ that can establish push rights, so keeperd is the *only* way to write history �
 not merely the recommended one. (The remaining footgun is still *handing* the
 box a credential — mounting a key or `-e GH_TOKEN=…` — so don't.)
 
-## Transport is interchangeable — the door is the capability
+## Transport and the contract — what's interchangeable, and what isn't
 
-*How* a door reaches the box is an implementation detail; the grant is unchanged
-("this one door, no shell"). Today the box runs in the **podman-machine** VM
-while the daemons run in the **Lima devshell** VM, so a door hops
-container → host → Lima-VM. Across that two-VM gap:
+*What* a door grants is fixed by the daemon behind it ("this one door, no shell").
+*How* the box reaches it has several transports — but they are **not** equal on the
+one axis that matters for ocap: **who else can reach the door.** That axis is the
+contract, and it degrades as you move off the socket:
 
-| Transport | Across the gap |
-|---|---|
-| unix-socket bind-mount (`-v keeperd.sock`) | **flaky** — a socket over virtiofs into a *nested* container often won't connect |
-| podman host-gateway TCP (`host.containers.internal:PORT`) | **robust**, podman-native; needs the door on a host port; token auth (keeperd holds the keys) |
-| `ssh -L` (forward the socket) | **robust**; lock the key to forwarding-only (no shell) — ssh is *transport*, not authority |
+| Transport | Who can reach the door | ocap contract |
+|---|---|---|
+| **unix-socket bind-mount** (`-v keeperd.sock`) | only the fd-holder — mounted into *this* box, nothing else | **purest** — possessing the fd *is* the grant; unforgeable, no token, no port to knock on |
+| **pod-local TCP** (`--pod`, shared netns `localhost:PORT`) | only **pod members** — the netns is the boundary; no host port, no LAN | **near-equal** — pod membership is the grant; scoped, no host-wide surface |
+| **host-gateway TCP** (`DOORS_TCP=1`, `host.containers.internal:PORT`) | **anything host-local that can route to the port** — ambient reachability | **weakest** — possession is no longer the grant; leans on `127.0.0.1` binding + the daemon's own policy; true possession-semantics would need a bearer token (the in-box secret the box exists to avoid) |
 
-**Recommended end-state — remove the gap by consolidating on podman (`prx-zj8`):**
-run the services (keeperd / beadsd / dolt) as **pinned OCI images in a podman
-pod**, and launch claude-box **into that pod**. Then every door is a **direct
-local mount** — `-v /run/keeperd.sock` / `localhost` — no ssh, no TCP, no
-forwarding, nothing on the wire. One runtime, every service a pinned image
-(claude-box was the template). "direct" isn't a separate transport; it's what
-you get once there's no gap. The ssh-`-L` / host-gateway-TCP rows above are
-**interim stopgaps** for the current two-VM split only. The capability is
-identical in every case; only the plumbing differs. (Retires the Lima daemon-VM;
-reshapes `prx-5ed` from prx-owns-VM → prx-owns-image-fleet.)
+So "transport is interchangeable" is only half true: the **capability** (what the
+door does) is identical, but the **scoping guarantee** (what else can reach it)
+falls from unforgeable fd-possession → netns membership → ambient host-local
+reachability. That degradation is the whole reason to prefer the socket — and to
+treat host-gateway TCP as a **concession, not a peer.**
 
-**Launcher decision — the box always sees a unix socket.** The launcher forwards
-each door as a **unix-socket bind-mount only** (`--keeper`, `--beads`), because
-the socket is the ocap-purest, fastest, most portable shape:
+**The ideal — unix socket; the box sees the fd, holds no secret.** On a single Linux
+host (and in the consolidated pod, `prx-zj8`) every door is a direct
+`-v /run/<name>.sock` mount: the fd is the capability, possessing it is the grant,
+**no token or key in the box**, no port for anything else to knock on. This is the
+contract the box is *designed* around, and where it should always land. Bonus:
+local kernel IPC (no TLS/ssh handshake), and it deploys identically anywhere the pod
+runs.
 
-- **ocap** — the socket *fd* is the capability; possessing it is the grant. No
-  port for anything else to knock on, and **no token or key in the box** (a TCP
-  door needs a bearer token, an `ssh -L` door needs a key — both reintroduce the
-  ambient secret the box exists to avoid).
-- **speed** — local kernel IPC, no TLS/ssh handshake.
-- **portability** — in the consolidated pod it's a direct `-v /run/keeperd.sock`
-  mount that deploys identically anywhere the pod runs.
+**The macOS concession — `DOORS_TCP=1`.** A socket can't cross the host→VM virtiofs
+hop ([ROOM.md](./ROOM.md)), so on macOS the daemons listen on host TCP ports and the
+box dials `host.containers.internal:PORT`. This **ships and works today** (it's what
+`cbox` runs) — but it is honestly the *weakest* tier above. It is kept acceptable by
+three things, none of them the transport itself:
 
-So the box's **contract is fixed**: a unix socket at `/run/keeperd.sock` (and
-`/run/beadsd.sock`). The two-VM gap is bridged **outside** the box — relay
-keeperd's socket to a host-local socket (e.g. `socat` / `ssh -L` *on the
-podman-machine host*, never inside the box) and point `$KEEPERD_SOCK` /
-`$BEADSD_SOCK` at it. The TCP / in-box-ssh rows above stay rejected: the box
-never sees the wire. When the pod lands (`prx-zj8`), the relay disappears and the
-same `--keeper` launch becomes a direct local mount with zero changes.
+- bound to **`127.0.0.1`** (loopback), never `0.0.0.0` — not LAN-exposed;
+- the **daemon still enforces policy** (netd allowlist, keeper signing rules), so an
+  unauthorized connector is bounded, not free;
+- it's a **single-user trusted dev host** — a deliberately narrow threat model.
+
+The residual gap is real (ambient host-local reachability; no possession-semantics
+without a token) — which is exactly why `--pod` exists and why the unix-socket
+end-state is the target, not a nicety.
+
+**`--pod` recovers most of the contract.** Running the daemons as sidecars in the
+box's pod (shared netns) makes the door a `localhost:PORT` reachable **only by pod
+members** — no host-wide port, no LAN. Pod membership becomes the grant: not the
+unforgeable fd, but a real boundary, far closer to the socket than host-gateway TCP.
+
+The unifying move underneath all of this is the **actor model** ([DOORS.md](./DOORS.md)):
+a door is a *dispatch to a guest that holds the authority*, and the transport is just
+how the message travels. `prx-o92` collapses these tiers into **one transport-agnostic
+client**, so the box asks for a capability the same way regardless of which tier
+carries it — and *scoping* becomes a property of the grant, not an accident of the
+plumbing.
 
 ## The surface is honest — the box knows what it can't do
 

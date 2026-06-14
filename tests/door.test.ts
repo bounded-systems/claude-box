@@ -22,14 +22,14 @@ const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
 // ── one generic primitive, named presets over it ──
 test("preset door: --keeper resolves to the canonical keeperd door", () => {
   const d = resolveDoor("keeper", undefined, EMPTY);
-  expect(d.guest).toEqual({ kind: "unix", path: "/run/keeperd.sock" });
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/doors/keeperd.sock" });
   expect(d.env).toBe("KEEPERD_SOCK");
   expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/keeperd.sock" });
 });
 
 test("preset door: --scout resolves to the canonical scoutd read door", () => {
   const d = resolveDoor("scout", undefined, EMPTY);
-  expect(d.guest).toEqual({ kind: "unix", path: "/run/scoutd.sock" });
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/doors/scoutd.sock" });
   expect(d.env).toBe("SCOUTD_SOCK");
   expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/scoutd.sock" });
 });
@@ -44,7 +44,7 @@ test("--scout grants the scout read door (content, not credential)", () => {
 test("preset host socket is overridable via env (same launch, any transport)", () => {
   const d = resolveDoor("keeper", undefined, { HOME: "/tmp", KEEPERD_SOCK: "/relay/k.sock" });
   expect(d.host).toEqual({ kind: "unix", path: "/relay/k.sock" });
-  expect(d.guest).toEqual({ kind: "unix", path: "/run/keeperd.sock" }); // the box's contract is fixed
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/doors/keeperd.sock" }); // the box's contract is fixed
 });
 
 test("generic door: any service attaches by socket, deriving path + env", () => {
@@ -133,7 +133,7 @@ test("a no-grant box still names its denials (knows what it cannot do)", () => {
 // ── network is a door, with launch effects ──
 test("preset door: --net resolves to the canonical netd door", () => {
   const d = resolveDoor("net", undefined, EMPTY);
-  expect(d.guest).toEqual({ kind: "unix", path: "/run/netd.sock" });
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/doors/netd.sock" });
   expect(d.env).toBe("NETD_SOCK");
   expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/netd.sock" }); // default; run() fails closed on world-writable dirs
 });
@@ -168,14 +168,14 @@ test("machine-readable surface (for prx tool-gating) reflects the grants", () =>
   const json = JSON.parse(capabilityJson(buildManifest("work", planLaunch(["--keeper", "--repo", "."], EMPTY), EMPTY)));
   expect(json.workcell).toBe("claude-box");
   expect(json.granted.repo).toBe(".");
-  expect(json.granted.doors[0]).toMatchObject({ name: "keeper", socket: "/run/keeperd.sock", env: "KEEPERD_SOCK" });
+  expect(json.granted.doors[0]).toMatchObject({ name: "keeper", socket: "/run/doors/keeperd.sock", env: "KEEPERD_SOCK" });
   expect(json.denied.map((d: { name: string }) => d.name)).toContain("beads");
 });
 
 // ── launcher door (spawn sub-boxes) ──
 test("preset door: --launcher resolves to the canonical launcherd door", () => {
   const d = resolveDoor("launcher", undefined, EMPTY);
-  expect(d.guest).toEqual({ kind: "unix", path: "/run/launcherd.sock" });
+  expect(d.guest).toEqual({ kind: "unix", path: "/run/doors/launcherd.sock" });
   expect(d.env).toBe("LAUNCHERD_SOCK");
   expect(d.host).toEqual({ kind: "unix", path: "/tmp/.claude-box/run/launcherd.sock" });
 });

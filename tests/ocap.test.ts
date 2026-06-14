@@ -18,7 +18,7 @@
  *   claude-box doors start
  */
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -109,9 +109,12 @@ boxTest("no door ⇒ no egress (api.anthropic.com unreachable under --network=no
 // tree (/Users/$USER) — /tmp lives on the host and is invisible to the VM, so a
 // `-v /tmp/...:/work` mount dies at `statfs ...: no such file or directory`
 // (exit 125) before the container ever starts. $HOME is shared on macOS and is
-// equally writable on native Linux (CI / the pod), so it works in both.
+// equally writable on native Linux (CI / the pod), so it works in both. Nest
+// under the XDG cache dir to keep $HOME tidy rather than scattering dotdirs.
+const TMP_BASE = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "claude-box");
 function withTempRepo<T>(fn: (repoPath: string) => T): T {
-  const tmp = mkdtempSync(join(homedir(), ".ocap-repo-"));
+  mkdirSync(TMP_BASE, { recursive: true }); // mkdtemp needs an existing parent
+  const tmp = mkdtempSync(join(TMP_BASE, "ocap-repo-"));
   try {
     // Initialize a git repo
     Bun.spawnSync(["git", "init", tmp], { stdout: "pipe", stderr: "pipe" });

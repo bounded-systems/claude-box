@@ -79,7 +79,7 @@ function parseCaveats(raw: string | undefined): string[] {
 }
 
 /** Per-connection state: pre-tunnel header buffer, the upstream socket, tunnel flag. */
-type Cx = { head: Uint8Array; up?: Socket<unknown>; tunnel: boolean };
+export type Cx = { head: Uint8Array; up?: Socket<unknown>; tunnel: boolean };
 
 // Base allowlist from NETD_ALLOW (or default)
 const ALLOW = (process.env.NETD_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? [])
@@ -150,7 +150,9 @@ function onHead(client: Socket<Cx>, headEnd: number): void {
   });
 }
 
-const handlers = {
+/** Bun socket handlers for the proxy listener. Exported so the proxy can be
+ *  driven in-process by tests (start with Bun.listen({ socket: handlers })). */
+export const handlers = {
   open(client: Socket<Cx>) {
     client.data = { head: new Uint8Array(0), tunnel: false };
   },

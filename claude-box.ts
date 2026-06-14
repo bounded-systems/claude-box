@@ -514,6 +514,68 @@ async function gitCommonDir(repo: string): Promise<string | undefined> {
   return out || undefined;
 }
 
+/** Pure: assemble the repo bind-mount argv fragment for a launch. Extracted from
+ *  run() so the .git posture — read-only host-RCE boundary (--repo) vs the unsafe
+ *  writable-.git escape (--repo-rw) — is unit-testable WITHOUT spawning podman.
+ *  The caller does the side-effecting work first: resolve `common`/`external`
+ *  (the async git query) and validate `writableRels` (escape + existence). This
+ *  is then a pure function of its inputs. Mount ORDER matters: the /work base
+ *  comes first, then writable subtrees, then the .git overlay — later mount wins
+ *  (podman), so the .git :ro overlay always lands on top of the writable base. */
+function planRepoMount(opts: {
+  mountPath: string;
+  repoRw: boolean;
+  repoClone: boolean;
+  narrowWritable: boolean;
+  writableRels: string[];
+  common?: string;
+  external: boolean;
+}): string[] {
+  const { mountPath, repoRw, repoClone, narrowWritable, writableRels, common, external } = opts;
+  // Map the host user → the in-box `claude` uid so host-owned files line up
+  // (writable + no git "dubious ownership") WITHOUT chowning the repo. RO base
+  // when narrowing; subtree mounts follow.
+  const argv: string[] = [
+    "-v",
+    narrowWritable ? `${mountPath}:/work:ro` : `${mountPath}:/work`,
+    "-w",
+    "/work",
+    "--userns=keep-id:uid=1000,gid=1000",
+  ];
+  if (narrowWritable) {
+    // Bind each validated subtree writable over the read-only /work base.
+    for (const rel of writableRels) {
+      argv.push("-v", `${mountPath}/${rel}:/work/${rel}`);
+    }
+  }
+  if (repoClone) {
+    // The clone IS /work, self-contained with its OWN writable .git. A throwaway
+    // (real repo never mounted), so a planted hook only runs inside the disposable
+    // clone — no host-RCE. No .git overlay.
+    return argv;
+  }
+  if (repoRw) {
+    // UNSAFE escape: .git stays WRITABLE. A box that writes .git/hooks or
+    // .git/config gets host code execution when you next run git. For a worktree
+    // the common dir lives outside /work — mount it (writable) at its host path;
+    // for a normal repo it's already inside the writable /work.
+    if (external && common) argv.push("-v", `${common}:${common}`);
+    return argv;
+  }
+  // SAFE default (--repo): worktree files stay writable (the agent edits code),
+  // but .git is READ-ONLY so the box can't plant a hook/config that executes on
+  // the host. History writes go through the keeper door, not the mount.
+  if (external && common) {
+    // worktree: the bare/common dir (config + hooks + this worktree's gitdir) is
+    // outside /work — mount it read-only at its host path.
+    argv.push("-v", `${common}:${common}:ro`);
+  } else {
+    // normal repo: .git is inside the worktree — overlay it :ro over /work.
+    argv.push("-v", `${mountPath}/.git:/work/.git:ro`);
+  }
+  return argv;
+}
+
 // ── Launch planning + the capability manifest ────────────────────────────────
 
 type Launch = {
@@ -1218,16 +1280,9 @@ async function run(
     // modes, so the two don't combine. Ignored without --repo.
     const narrowWritable = writable.length > 0 && !repoRw && !repoClone;
 
-    // Mount the worktree at /work; map the host user → the in-box `claude` uid so
-    // host-owned files line up (writable + no git "dubious ownership") WITHOUT
-    // chowning the repo. RO base when narrowing; subtree mounts follow.
-    argv.push(
-      "-v",
-      narrowWritable ? `${mountPath}:/work:ro` : `${mountPath}:/work`,
-      "-w",
-      "/work",
-      "--userns=keep-id:uid=1000,gid=1000",
-    );
+    // Validate any --writable subtrees first (escape + existence), exiting on bad
+    // input; planRepoMount() below is pure and assumes already-validated rels.
+    const writableRels: string[] = [];
     if (narrowWritable) {
       for (const sub of writable) {
         let rel: string;
@@ -1237,57 +1292,35 @@ async function run(
           console.error(`claude-box: ${(e as Error).message}`);
           process.exit(2);
         }
-        const hostSub = `${mountPath}/${rel}`;
-        if (!existsSync(hostSub)) {
+        if (!existsSync(`${mountPath}/${rel}`)) {
           console.error(`claude-box: --writable path does not exist in the repo: ${sub}`);
           process.exit(2);
         }
-        // Bind the subtree writable over the read-only /work (later mount wins).
-        argv.push("-v", `${hostSub}:/work/${rel}`);
+        writableRels.push(rel);
       }
       console.error(
         `claude-box: --writable — /work is READ-ONLY except: ${writable.join(", ")}`,
       );
     }
+    // A worktree's git dir lives in a bare repo OUTSIDE the worktree; resolve it
+    // so the mount plan can bind it at its host path. Skipped for --repo-clone
+    // (the clone is self-contained).
+    const common = repoClone ? undefined : await gitCommonDir(mountPath);
+    const external = !!(common && !common.startsWith(`${mountPath}/`));
+    if (repoRw) {
+      console.error(
+        "claude-box: --repo-rw — host .git is WRITABLE in the box; a planted hook/config runs on YOUR host. Prefer --repo (read-only .git) + --keeper.",
+      );
+    }
+    argv.push(
+      ...planRepoMount({ mountPath, repoRw, repoClone, narrowWritable, writableRels, common, external }),
+    );
     // Tell the box what the host path is, so keeperd requests can translate
     // /work → the actual host path (keeperd runs on the host, not in the box).
     // For ephemeral worktrees, use the original repo path so commits apply there.
     // For an isolated clone, point at the clone — that's what /work IS, and
     // reconciliation reads the clone's commits.
     argv.push("--env", `CLAUDE_BOX_HOST_REPO=${repoClone ? mountPath : abs}`);
-    if (repoClone) {
-      // The clone IS /work, self-contained with its own WRITABLE .git. It's a
-      // throwaway (real repo never mounted), so writable .git is SAFE here — no
-      // host-RCE, since a planted hook only runs inside this disposable clone.
-      // Nothing more to mount; skip the .git :ro overlay below.
-    } else {
-    // A worktree's git dir lives in a bare repo OUTSIDE the worktree; mount that
-    // common dir at its host path so `git` resolves inside the box.
-    const common = await gitCommonDir(mountPath);
-    const external = common && !common.startsWith(`${mountPath}/`);
-    if (repoRw) {
-      // UNSAFE escape: leave .git WRITABLE (today's behaviour). A box that writes
-      // .git/hooks or .git/config gets host code execution when you next run git.
-      console.error(
-        "claude-box: --repo-rw — host .git is WRITABLE in the box; a planted hook/config runs on YOUR host. Prefer --repo (read-only .git) + --keeper.",
-      );
-      if (external) argv.push("-v", `${common}:${common}`);
-    } else {
-      // SAFE default: worktree files stay writable (the agent edits code), but
-      // .git is READ-ONLY — the box can't plant a hook or rewrite config that
-      // executes on the host. History writes go through the keeper door, not the
-      // mount. (Closes the host-RCE escape; see REPOD.md for the overlay that
-      // restores in-box git ergonomics.)
-      if (external) {
-        // worktree: the bare/common dir (config + hooks + this worktree's gitdir)
-        // is outside /work — mount it read-only at its host path.
-        argv.push("-v", `${common}:${common}:ro`);
-      } else {
-        // normal repo: .git is inside the worktree — overlay it :ro over /work.
-        argv.push("-v", `${mountPath}/.git:/work/.git:ro`);
-      }
-    }
-    }
   }
   // --repo-origin: no host mount. /work is a writable container-internal tmpfs;
   // override the entrypoint to clone the origin into it, then exec the guest in
@@ -2223,6 +2256,7 @@ export {
   knownGuests,
   resolveDoor,
   planLaunch,
+  planRepoMount,
   buildManifest,
   capabilityJson,
   capabilityPrompt,

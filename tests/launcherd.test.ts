@@ -168,7 +168,7 @@ describe("launcherd", () => {
       );
       expect(resp.ok).toBe(false);
       // Either DOORS_UNREACHABLE (socket exists but unreachable) or ENOENT (socket doesn't exist)
-      expect(["DOORS_UNREACHABLE", "ENOENT"]).toContain(resp.error?.code);
+      expect(["DOORS_UNREACHABLE", "ENOENT"]).toContain(resp.error?.code ?? "");
     });
   });
 

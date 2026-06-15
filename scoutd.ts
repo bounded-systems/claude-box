@@ -174,7 +174,7 @@ async function handleRepo(params: Record<string, unknown>): Promise<unknown> {
   if (!repoResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${repoResp.status}` };
   }
-  const repoData = await repoResp.json();
+  const repoData = await repoResp.json() as any;
 
   // Get the tarball URL for the ref
   const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball/${ref}`;
@@ -222,7 +222,7 @@ async function handlePr(params: Record<string, unknown>): Promise<unknown> {
   if (!prResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${prResp.status}` };
   }
-  const pr = await prResp.json();
+  const pr = await prResp.json() as any;
 
   const result: Record<string, unknown> = {
     number: pr.number,
@@ -251,7 +251,7 @@ async function handlePr(params: Record<string, unknown>): Promise<unknown> {
   if (includeComments) {
     const commentsResp = await githubFetch(`/repos/${owner}/${repo}/pulls/${number}/comments`);
     if (commentsResp.ok) {
-      const comments = await commentsResp.json();
+      const comments = await commentsResp.json() as any;
       result.comments = comments.map((c: Record<string, unknown>) => ({
         user: (c.user as Record<string, unknown>)?.login,
         body: c.body,
@@ -293,7 +293,7 @@ async function handleIssue(params: Record<string, unknown>): Promise<unknown> {
   if (!issueResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${issueResp.status}` };
   }
-  const issue = await issueResp.json();
+  const issue = await issueResp.json() as any;
 
   const result: Record<string, unknown> = {
     number: issue.number,
@@ -309,7 +309,7 @@ async function handleIssue(params: Record<string, unknown>): Promise<unknown> {
   if (includeComments) {
     const commentsResp = await githubFetch(`/repos/${owner}/${repo}/issues/${number}/comments`);
     if (commentsResp.ok) {
-      const comments = await commentsResp.json();
+      const comments = await commentsResp.json() as any;
       result.comments = comments.map((c: Record<string, unknown>) => ({
         user: (c.user as Record<string, unknown>)?.login,
         body: c.body,

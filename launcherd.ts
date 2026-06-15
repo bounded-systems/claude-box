@@ -612,7 +612,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const repoRw = (params.repoRw as boolean) ?? false;
   const roomName = params.room as string | undefined;
   const netOpen = (params.netOpen as boolean) ?? false;
-  const claudeArgs = (params.claudeArgs as string[]) ?? [];
+  const guestArgs = (params.guestArgs as string[]) ?? [];
   const depth = (params.depth as number) ?? 0;  // Spawn depth (0 = root, 1 = first child, etc.)
   let doorSpecs = (params.doors as string[]) ?? [];
 
@@ -698,7 +698,19 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   }
 
   // Build the launch (reuse planLaunch logic structure)
-  const launch: Launch = { repo, repoRw, doors, netOpen: (params.netOpen as boolean) ?? netOpen, claudeArgs };
+  const launch: Launch = {
+    guest: (params.guest as string) ?? "claude",
+    repo,
+    repoRw,
+    repoEphemeral: false,
+    repoClone: false,
+    pod: false,
+    writable: [],
+    doors,
+    netOpen: (params.netOpen as boolean) ?? netOpen,
+    remoteControl: false,
+    guestArgs,
+  };
   const manifest = buildManifest(account, launch);
   const manifestJson = capabilityJson(manifest);
   const launchId = generateLaunchId();
@@ -766,7 +778,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
 }
 
 async function buildPodmanArgv(account: string, launch: Launch, manifest: Manifest, launchId: string): Promise<string[]> {
-  const { repo, repoRw, doors, netOpen, claudeArgs } = launch;
+  const { repo, repoRw, doors, netOpen, guestArgs } = launch;
 
   const argv = [
     "podman", "run", "-it", "--rm",
@@ -822,8 +834,8 @@ async function buildPodmanArgv(account: string, launch: Launch, manifest: Manife
     }
   }
 
-  // Image + claude args
-  argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...claudeArgs);
+  // Image + guest args
+  argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...guestArgs);
 
   return argv;
 }

@@ -107,13 +107,6 @@ export type DoorGrant = {
 // job. This separation keeps the engine guest-agnostic (no door-specific
 // vocabulary) while enabling real capability attenuation.
 
-/** Attenuate a door by appending caveats. Returns a new grant with the
- *  combined caveats; the original is unchanged. Append-only by construction. */
-export function attenuate(grant: DoorGrant, more: string[]): DoorGrant {
-  if (!more.length) return grant; // no-op optimization
-  return { ...grant, caveats: [...(grant.caveats ?? []), ...more] };
-}
-
 /** Parse a caveat string (k=v or k:v format) into key and value. */
 export function parseCaveat(s: string): { key: string; value: string } | null {
   const eq = s.indexOf("=");

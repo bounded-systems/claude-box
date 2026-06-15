@@ -345,7 +345,7 @@ netTest("--net: netd socket is accessible", () => {
 });
 
 // --beads: beadsd door (not yet implemented)
-test.todo("--beads: beads ops via the beadsd door");
+test.todo("--beads: beads ops via the beadsd door", () => {});
 
 // ── red-team regression probes (deterministic) ───────────────────────────────
 // Each maps to a tests/redteam mission. The LLM red-team DISCOVERS escapes;

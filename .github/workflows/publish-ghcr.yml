@@ -93,15 +93,26 @@ jobs:
       - name: Create + push manifest lists
         run: |
           set -euo pipefail
+          # GHCR's token endpoint occasionally times out mid-run; retry transient
+          # failures with backoff so an unattended release doesn't fail on a blip.
+          retry() {
+            local n=1
+            until "$@"; do
+              if [ "$n" -ge 4 ]; then echo "failed after $n attempts: $*" >&2; return 1; fi
+              echo "attempt $n failed, retrying: $*" >&2; sleep "$((2 ** n))"; n="$((n + 1))"
+            done
+          }
+          push_list() {  # $1 = manifest list tag to assemble from the two arch tags
+            local tag="$1" ref="$2"
+            docker manifest rm "$tag" >/dev/null 2>&1 || true  # clear partial local state on retry
+            retry docker manifest create "$tag" "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
+            retry docker manifest push "$tag"
+          }
           for name in claude-personal keeperd netd scoutd; do
             ref="${REGISTRY}/${name}"
-            docker manifest create "${ref}:${VERSION}" \
-              "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
-            docker manifest push "${ref}:${VERSION}"
+            push_list "${ref}:${VERSION}" "${ref}"
             # A real release (not a throwaway `dev` build) also moves `latest`.
             if [ "${VERSION}" != "dev" ]; then
-              docker manifest create "${ref}:latest" \
-                "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
-              docker manifest push "${ref}:latest"
+              push_list "${ref}:latest" "${ref}"
             fi
           done

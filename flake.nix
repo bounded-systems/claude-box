@@ -19,7 +19,7 @@
   # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
   # pin, kept honest by the `guest-room-mirror` check below. Bump with
   # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
-  inputs.guest-room.url = "github:bounded-systems/guest-room/409ad132ef899c93e893ca0a0e4895a87f581bfe";
+  inputs.guest-room.url = "github:bounded-systems/guest-room/5d820d7f833c620896bada14e471c4d4c20be0d2";
   inputs.guest-room.flake = false;
 
   outputs = { self, nixpkgs, guest-room }:

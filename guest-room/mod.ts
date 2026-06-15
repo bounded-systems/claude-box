@@ -237,6 +237,46 @@ export function checkCaveats<Ctx>(
   return { ok: true };
 }
 
+// ── Room attenuation ─────────────────────────────────────────────────────────
+// attenuate() narrows ONE door handed onward; this is the same rule lifted to
+// the SET of doors a parent hands to a sub-room. A child set attenuates from its
+// parent iff every child door (a) exists in the parent and (b) is equally or
+// more restricted — its caveats a SUPERSET of the parent door's. Dropping a
+// parent caveat WIDENS authority and is refused. A name-only ⊆ check misses
+// that case, so the engine owns this comparison to keep the invariant in one
+// place. Append-only at the set level: a sub-room can only ever be narrower.
+
+/** A door in the child set that breaks attenuation: either it has no counterpart
+ *  in the parent, or it dropped one or more of the parent door's caveats. */
+export type AttenuationViolation =
+  | { door: string; reason: "absent-in-parent" }
+  | { door: string; reason: "widened-caveats"; dropped: string[] };
+
+export type AttenuationVerdict =
+  | { ok: true }
+  | { ok: false; violations: AttenuationViolation[] };
+
+/** Does `child` attenuate from `parent`? True iff no child door widens authority
+ *  — each exists in the parent and keeps all of the parent door's caveats (it
+ *  may add more). Reports EVERY violation so the caller can explain the full
+ *  refusal. Doors are matched by name; the parent is indexed by name (a parent
+ *  listing a name twice keeps the last). */
+export function attenuatesDoors(child: DoorGrant[], parent: DoorGrant[]): AttenuationVerdict {
+  const parentByName = new Map(parent.map((d) => [d.name, d]));
+  const violations: AttenuationViolation[] = [];
+  for (const c of child) {
+    const p = parentByName.get(c.name);
+    if (!p) {
+      violations.push({ door: c.name, reason: "absent-in-parent" });
+      continue;
+    }
+    const childCaveats = new Set(c.caveats ?? []);
+    const dropped = (p.caveats ?? []).filter((cav) => !childCaveats.has(cav));
+    if (dropped.length) violations.push({ door: c.name, reason: "widened-caveats", dropped });
+  }
+  return violations.length ? { ok: false, violations } : { ok: true };
+}
+
 /** Expand a named room to its door grants. Throws (fail closed, not a silent
  *  empty launch) if the room is unknown — a typo must never widen authority. */
 export function expandRoom(

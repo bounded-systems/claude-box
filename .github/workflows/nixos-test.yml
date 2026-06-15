@@ -7,7 +7,9 @@ name: nixos-test
 on:
   push:
     branches: [main]
-    paths: &doorsPaths
+    # Duplicated (not a YAML anchor): GitHub Actions doesn't reliably honor
+    # anchors in `paths`, which let this heavy VM test run on every PR.
+    paths:
       - flake.nix
       - flake.lock
       - nixos/**
@@ -18,7 +20,16 @@ on:
       - lib/**
       - .github/workflows/nixos-test.yml
   pull_request:
-    paths: *doorsPaths
+    paths:
+      - flake.nix
+      - flake.lock
+      - nixos/**
+      - netd/**
+      - scoutd.ts
+      - keeperd.ts
+      - contract/**
+      - lib/**
+      - .github/workflows/nixos-test.yml
   workflow_dispatch:
 
 permissions:

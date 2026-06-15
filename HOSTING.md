@@ -96,9 +96,12 @@ Tagged releases publish the four images to GHCR for `linux/amd64` and
 `linux/arm64` (see [RELEASING.md](./RELEASING.md)), so you can skip the nix build
 and pull a pinned image straight onto the host:
 
+The box image is `claude-room`; the three door daemons are `door-keeper`,
+`door-net`, `door-scout`:
+
 ```sh
-podman pull ghcr.io/bounded-systems/claude-box/claude-personal:<version>
-for d in keeperd netd scoutd; do
+podman pull ghcr.io/bounded-systems/claude-box/claude-room:<version>
+for d in door-keeper door-net door-scout; do
   podman pull ghcr.io/bounded-systems/claude-box/$d:<version>
 done
 ```

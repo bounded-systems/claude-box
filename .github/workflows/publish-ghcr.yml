@@ -61,12 +61,12 @@ jobs:
       - name: Build + push images (${{ matrix.arch }})
         run: |
           set -euo pipefail
-          # nix attr  ->  GHCR image name
+          # nix attr  ->  GHCR image name (box = room, daemons = doors)
           declare -A images=(
-            [claude-image]=claude-personal
-            [keeperd-image]=keeperd
-            [netd-image]=netd
-            [scoutd-image]=scoutd
+            [claude-image]=claude-room
+            [keeperd-image]=door-keeper
+            [netd-image]=door-net
+            [scoutd-image]=door-scout
           )
           for attr in "${!images[@]}"; do
             name="${images[$attr]}"
@@ -108,7 +108,7 @@ jobs:
             retry docker manifest create "$tag" "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
             retry docker manifest push "$tag"
           }
-          for name in claude-personal keeperd netd scoutd; do
+          for name in claude-room door-keeper door-net door-scout; do
             ref="${REGISTRY}/${name}"
             push_list "${ref}:${VERSION}" "${ref}"
             # A real release (not a throwaway `dev` build) also moves `latest`.

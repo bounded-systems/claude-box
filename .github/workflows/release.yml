@@ -22,10 +22,12 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      # Manifest mode: the gate is the top-level `releases_created` (plural);
-      # the version is path-prefixed by the package root (".").
+      # `releases_created` (plural, top-level) is the gate. For the version we
+      # read version.txt rather than release-please's per-package output: the
+      # manifest-mode output key (`.--version`) came back empty and pushed a
+      # bogus `:-amd64` tag, whereas version.txt is what the release just set.
       releases_created: ${{ steps.rp.outputs.releases_created }}
-      version: ${{ steps.rp.outputs['.--version'] }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: rp
@@ -33,6 +35,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - uses: actions/checkout@v4
+        if: ${{ steps.rp.outputs.releases_created == 'true' }}
+      - id: ver
+        if: ${{ steps.rp.outputs.releases_created == 'true' }}
+        run: echo "version=$(cat version.txt)" >> "$GITHUB_OUTPUT"
 
   # Build + push the images only when a release was just cut.
   publish:

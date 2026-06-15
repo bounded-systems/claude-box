@@ -126,12 +126,24 @@ narrowed; enforcement is the target's `checkCaveats` (already shipped, #99).
   is guest-agnostic — does it graduate into the public `guest-room` engine
   (like `protocol.ts`/`daemon.ts`), with claude-box running a concierged
   instance? Leaning yes; it's a generic capability-introduction service.
-- **Reference strength.** §3 introduces by **socket path + caveats** (addressing,
-  etcd-style). A stronger ocap variant passes the **connected fd itself**
-  (`SCM_RIGHTS` over the unix socket), so the consumer gets a capability it
-  could not have named or reached on its own — true unforgeable transfer. Path
-  vs fd-passing is the core security fork; recommend starting with path and
-  leaving an fd-passing upgrade path.
+- **Reference strength — DECIDED: signed grants, verified by the serving room
+  (not fd-passing).** Split the responsibilities: a **door only determines
+  availability** (am I live/reachable); **authority rides in a signed grant the
+  serving room validates** on every call. The question becomes *"do you hold a
+  valid signed grant?"*, not *"can you reach the socket?"* — socket
+  *reachability stops being authority*, so the §3 path reference is safe and we
+  don't need `SCM_RIGHTS`. Chosen over fd-passing because it is
+  **transport-agnostic**: a signed grant works over the `vsock`/`tcp` transports
+  `DoorTransport` already models, whereas `SCM_RIGHTS` is unix-local only.
+  - **Signer.** Signing currently lives in **prx** (not yet extracted — likely
+    its own repo). The issuer signs the grant; the serving room verifies against
+    the issuer's public key. (Not keeperd.) Until extraction, the verify path is
+    stubbed/deferred behind that boundary.
+  - **Bind it.** A signed grant is a bearer token — bind an `audience` (which
+    room may present it) and `exp`/`nonce`, or a leaked/shared grant is
+    replayable. Same macaroon shape `checkCaveats` already enforces; this also
+    subsumes the revocation item below (a short-lived, nonce-bound grant *is*
+    the revocation story for an already-issued ref).
 - **Revocation.** Lease expiry revokes *discovery*. Revoking an *already-issued*
   door ref needs more (broker-side caveat with a nonce/expiry, or the provider
   rotating its socket). Macaroon-style time/nonce caveats fit `checkCaveats`.

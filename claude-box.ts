@@ -19,7 +19,8 @@
  */
 
 import { existsSync, mkdirSync, statSync, rmSync } from "node:fs";
-import { dirname, resolve, relative, isAbsolute } from "node:path";
+import { dirname, resolve, relative, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
 // supplies the door catalog (knownDoors) and room bundles (knownRooms); the
 // engine resolves grants, derives the honest granted/denied surface, and renders
@@ -102,6 +103,11 @@ function knownGuests(): Record<string, GuestPreset> {
   };
 }
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
+// The in-box config dir = the account volume's mount point, where claude keeps
+// auth/settings/history (incl. `claude auth login`). It MUST equal the image's
+// CLAUDE_CONFIG_DIR / $XDG_CONFIG_HOME/claude (flake.nix). One path, both sides;
+// tests/xdg.test.ts pins this against flake.nix so they can't drift.
+const BOX_CONFIG_DIR = "/home/claude/.config/claude";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -923,12 +929,25 @@ function capabilityPrompt(m: Manifest): string {
   return lines.join("\n");
 }
 
+/** The single source of truth for box-mounted temp dirs. Rooted under $HOME
+ *  (XDG_CACHE_HOME, else ~/.cache) — NEVER /tmp. On macOS the podman VM only
+ *  shares $HOME, so a /tmp-rooted bind mount fails the box launch with exit 125.
+ *  Centralizing temp creation here makes that mistake structurally impossible for
+ *  any current or future mount path, rather than a rule humans/agents must recall.
+ *  The directory is created (recursive) before returning. */
+function boxTempBase(): string {
+  const xdg = process.env.XDG_CACHE_HOME;
+  const cache = xdg?.startsWith("/") ? xdg : join(homedir(), ".cache");
+  const base = join(cache, "claude-box");
+  mkdirSync(base, { recursive: true });
+  return base;
+}
+
 /** Create an ephemeral git worktree at a temp path. Returns the path to the
  *  worktree. The caller is responsible for removing it with `git worktree remove`. */
 async function createEphemeralWorktree(repo: string): Promise<string> {
   const id = crypto.randomUUID().slice(0, 8);
-  const tmpDir = process.env.TMPDIR ?? "/tmp";
-  const worktreePath = `${tmpDir}/claude-box-${id}`;
+  const worktreePath = join(boxTempBase(), `worktree-${id}`);
 
   // Get the current HEAD commit to check out
   const headProc = Bun.spawn(["git", "-C", repo, "rev-parse", "HEAD"], {
@@ -964,8 +983,7 @@ async function createEphemeralWorktree(repo: string): Promise<string> {
  *  keeper door (increment 2). Caller removes the dir when done. */
 async function createIsolatedClone(repo: string): Promise<string> {
   const id = crypto.randomUUID().slice(0, 8);
-  const tmpDir = process.env.TMPDIR ?? "/tmp";
-  const clonePath = `${tmpDir}/claude-box-clone-${id}`;
+  const clonePath = join(boxTempBase(), `clone-${id}`);
   const proc = Bun.spawn(
     ["git", "clone", "--local", "--no-hardlinks", repo, clonePath],
     { stdout: "pipe", stderr: "pipe" },
@@ -1097,7 +1115,7 @@ async function runPod(account: string, launch: Launch): Promise<number> {
       "--security-opt", "no-new-privileges", "--cap-drop", "all", "--pids-limit", "2048",
     ];
     if (guestPreset.needsConfig) {
-      argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+      argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
     }
     // Auth: inference-only setup-token by default; --remote-control omits it for
     // a full-scope in-box login (see authEnvArgs).
@@ -1168,7 +1186,7 @@ async function run(
   // Only mount the account's config volume for guests that need it (claude).
   // Tool guests don't need or want claude's auth/history.
   if (guestPreset.needsConfig) {
-    argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+    argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
   }
   // Auth: by default forward a pre-minted, inference-only `claude setup-token`
   // (no in-box browser flow). --remote-control instead omits the token so a
@@ -1446,10 +1464,9 @@ async function run(
 // ── Launcherd client ─────────────────────────────────────────────────────────
 
 function launcherdSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/launcherd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/launcherd.sock`;
+  // One run dir: getRunDir is the single XDG_RUNTIME_DIR-first resolver (with the
+  // world-writable refusal + 0700 mkdir hardening), shared with the door sockets.
+  return `${getRunDir(process.env)}/launcherd.sock`;
 }
 
 async function launcherdRequest(
@@ -1501,10 +1518,8 @@ async function launcherdRequest(
 // ── Keeperd client ────────────────────────────────────────────────────────────
 
 function keeperdSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/keeperd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/keeperd.sock`;
+  // Shares the one run dir with launcherd + the door sockets (see getRunDir).
+  return `${getRunDir(process.env)}/keeperd.sock`;
 }
 
 async function keeperdRequest(
@@ -2297,7 +2312,9 @@ export {
   resolveDoor,
   planLaunch,
   authEnvArgs,
+  BOX_CONFIG_DIR,
   planRepoMount,
+  boxTempBase,
   buildManifest,
   capabilityJson,
   capabilityPrompt,

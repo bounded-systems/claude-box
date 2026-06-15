@@ -67,11 +67,13 @@ async function materials(root: string): Promise<Material[]> {
     });
   }
 
-  // prx is a fetchurl pin in flake.nix (not a flake input): url + nix-SRI sha256.
+  // prx is a per-arch fetchurl pin in flake.nix (not a flake input): the
+  // `prxAssets` map carries one { url; sha256; loader } entry per Linux arch.
+  // Each pinned release is a material — capture them all (both arches).
   const flake = await Bun.file(`${root}/flake.nix`).text();
-  const prx = flake.match(/fetchurl\s*{[^}]*?url\s*=\s*"([^"]+)"[^}]*?sha256\s*=\s*"([^"]+)"/s);
-  if (prx) {
-    out.push({ uri: prx[1]!, digest: { nixHash: `sha256:${prx[2]!}` } });
+  const prxRe = /url\s*=\s*"([^"]*prx[^"]*)"\s*;\s*sha256\s*=\s*"([^"]+)"/g;
+  for (const m of flake.matchAll(prxRe)) {
+    out.push({ uri: m[1]!, digest: { nixHash: `sha256:${m[2]!}` } });
   }
 
   return out;

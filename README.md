@@ -38,6 +38,10 @@ claude-box --room dev --repo .
 claude-box --net-open --repo .
 ```
 
+**Self-hosting at home?** A native Linux host is the easy path (no
+podman-machine VM, no door wall). See **[HOSTING.md](./HOSTING.md)** for hardware
+suggestions (ARM64 *and* x86_64 are both first-class) and a headless bring-up.
+
 ## Use
 
 ```sh
@@ -84,10 +88,12 @@ home.packages = [ inputs.claude-box.packages.${system}.claude-box ];
 
 ## The image
 
-`packages.aarch64-linux.claude-image` — `dockerTools.buildLayeredImage` from a
-pinned nixpkgs (`claude-code` + git, gh, ripgrep, fd, bun, openssh…), non-root
-`claude` user, config-volume mount point. The resulting OCI image is addressed
-by its own **sha256 digest** — the pin.
+`packages.{aarch64,x86_64}-linux.claude-image` — `dockerTools.buildLayeredImage`
+from a pinned nixpkgs (`claude-code` + git, gh, ripgrep, fd, bun, openssh…),
+non-root `claude` user, config-volume mount point. The resulting OCI image is
+addressed by its own **sha256 digest** — the pin. Both Linux arches build out of
+the box (each pins its own `prx` release + glibc loader); see
+[HOSTING.md](./HOSTING.md).
 
 Building needs an `aarch64-linux` builder. On Apple Silicon use a **vz**
 (Apple Virtualization.framework) builder — the QEMU `nix run .#linux-builder`

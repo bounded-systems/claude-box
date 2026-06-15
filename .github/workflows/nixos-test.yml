@@ -1,0 +1,55 @@
+name: nixos-test
+
+# Boots the doors NixOS VM test (checks.x86_64-linux.doors) on a KVM-enabled
+# runner — the always-on gate for the doors module that a macOS host can only run
+# locally via Lima nested virt (see BUILD.md). Scoped to the paths that affect the
+# doors so it doesn't run on every change.
+on:
+  push:
+    branches: [main]
+    paths: &doorsPaths
+      - flake.nix
+      - flake.lock
+      - nixos/**
+      - netd/**
+      - scoutd.ts
+      - keeperd.ts
+      - contract/**
+      - lib/**
+      - .github/workflows/nixos-test.yml
+  pull_request:
+    paths: *doorsPaths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nixos-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doors:
+    name: doors VM test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub's Linux runners ship /dev/kvm but not group-accessible by default;
+      # this udev rule opens it so the nested QEMU VM can use hardware accel.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-experimental-features = nix-command flakes
+
+      # Native x86_64 runner → builds the x86_64-linux doors check directly. nix
+      # auto-detects the `kvm` system feature once /dev/kvm is accessible.
+      - name: Boot the doors VM test
+        run: nix build .#checks.x86_64-linux.doors -L

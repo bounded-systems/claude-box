@@ -146,6 +146,46 @@ tarball is just data and loads anywhere.
 The other images build the same way:
 `.#keeperd-image`, `.#netd-image`, `.#scoutd-image`.
 
+## Running the doors VM test (needs nested virtualization)
+
+`nix build .#checks.aarch64-linux.doors` boots a **NixOS VM** that brings up the
+doors module and asserts `podman-{keeper,claude-netd,scout-netd,scout}` start and
+write their sockets. A VM test needs `/dev/kvm` **inside** the builder — i.e.
+**nested virtualization** — which on Apple Silicon requires an **M3/M4 host +
+macOS 15+** (Virtualization.framework gained nested virt on M3). On M1/M2 it can't
+run locally; use CI (the `nixos-test` workflow, KVM-enabled runner) or a native
+Linux+KVM box (e.g. the Pi/mini-PC you'd self-host on).
+
+Symptom of a builder VM without nested virt:
+
+```
+Required features: {kvm, nixos-test}
+Available features: {benchmark, big-parallel, nixos-test, uid-range}   # no kvm
+```
+
+Fix — turn on nested virt in the Lima builder (vz only) and recreate it:
+
+```yaml
+# the VM's lima.yaml
+vmType: vz
+nestedVirtualization: true
+```
+
+```sh
+# nestedVirtualization is a creation-time setting — recreate, don't just edit:
+limactl stop <vm> && limactl delete <vm>
+limactl start ./<vm>.yaml
+limactl shell <vm> -- ls -l /dev/kvm        # must now exist
+```
+
+Your `/etc/nix/machines` line already advertises `kvm,nixos-test` (step 3), so
+nothing else changes once `/dev/kvm` is real. Reload the daemon and run it:
+
+```sh
+sudo launchctl kickstart -k system/systems.determinate.nix-daemon
+nix build .#checks.aarch64-linux.doors -L   # boots the VM; watch the units come up
+```
+
 ## One-off alternative: `--builders` on the command line
 
 To build without touching `/etc/nix/machines`:
@@ -178,3 +218,4 @@ git-ignored; never commit `keys/` or `*.qcow2`.
 | `Permission denied (publickey)` under `sudo nix build` | daemon (root) can't read the key | give root a readable `IdentityFile` |
 | `cannot add path '…' because it lacks a signature by a trusted key` | your user isn't trusted, so unsigned builder output is rejected | add `trusted-users = root <you>` (step 4) |
 | `HV_SYS_REG_SMCR_EL1` assertion | QEMU/HVF + SME on M3/M4 | use a **vz** builder (this doc), not `.#linux-builder` |
+| `Required features: {kvm, nixos-test}` / `Available: {… no kvm}` (doors VM test) | builder VM has no `/dev/kvm` (nested virt off) | enable `nestedVirtualization: true` on the Lima vz VM + recreate (M3/M4 + macOS 15 only); else CI/native Linux |

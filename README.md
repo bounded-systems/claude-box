@@ -119,6 +119,10 @@ bun test
 bun x tsc --noEmit   # `bunx` is a separate binary not all bun installs ship; `bun x` always works
 ```
 
+Commits/PR titles follow [Conventional Commits](https://www.conventionalcommits.org/)
+(releases are cut from them) — see [CONTRIBUTING.md](./CONTRIBUTING.md) and
+[RELEASING.md](./RELEASING.md).
+
 ### Starting the doors (daemons)
 
 The `--room dev` preset requires three daemons: keeperd (git signing), scoutd

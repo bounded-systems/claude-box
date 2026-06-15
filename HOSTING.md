@@ -110,6 +110,15 @@ Pin to a specific `:<version>` (or a `@sha256:` digest) rather than `:latest` �
 the digest *is* the pin the whole design rests on. You still need the
 `claude-box` CLI (`nix profile install .#claude-box`) to launch them.
 
+**Smoke-test the published images** with [`scripts/smoke-doors.sh`](./scripts/smoke-doors.sh):
+it boots each door image (any OS) and — on Linux — brings up `scout-netd` +
+`scoutd --network=none` and does a real GitHub read *through* the scout door,
+proving scoutd reaches GitHub with no NIC of its own:
+
+```sh
+./scripts/smoke-doors.sh 0.3.0
+```
+
 ### home-manager install (declarative)
 
 The README snippet now resolves on Linux because `claude-box` is exported for

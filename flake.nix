@@ -18,14 +18,38 @@
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
-      # Add "x86_64-linux" here if/when CI builds a multi-arch image.
-      systems = [ "aarch64-linux" ];
+      # Both Linux arches are first-class: aarch64-linux for ARM hosts (Pi 5,
+      # RK3588, Apple Silicon under Asahi) and x86_64-linux for Intel/AMD mini
+      # PCs. Each pulls its own pinned `prx` release (see prxAssets) and the
+      # matching glibc loader. Adding a system here is all it takes — the image
+      # expression is otherwise arch-agnostic. See HOSTING.md for self-hosting.
+      systems = [ "aarch64-linux" "x86_64-linux" ];
       forEach = nixpkgs.lib.genAttrs systems;
 
       # claude-code is unfree → instantiate nixpkgs with allowUnfree.
       pkgsFor = system: import nixpkgs {
         inherit system;
         config.allowUnfree = true;
+      };
+
+      # prx — the box's SANCTIONED tool (prx-0wc), a pinned per-arch release
+      # binary. It's a `bun --compile` binary (app blob appended after the ELF),
+      # so it must be left BYTE-for-BYTE intact — patchelf/autoPatchelf would
+      # rewrite the ELF and corrupt the blob → it degrades to bare bun. Instead
+      # the matching nix glibc loader is invoked directly on the untouched
+      # binary (the upstream ELF's hardcoded /lib interpreter is absent in a nix
+      # image). Each arch pins its own release asset + native loader.
+      prxAssets = {
+        "aarch64-linux" = {
+          url = "https://github.com/bounded-systems/prx/releases/download/v0.10.0/prx-aarch64-linux";
+          sha256 = "1b8ba6xgi6hdaknlhigcxai1xxlvz8j1sdm570y7jssckgiqy89l";
+          loader = "ld-linux-aarch64.so.1";
+        };
+        "x86_64-linux" = {
+          url = "https://github.com/bounded-systems/prx/releases/download/v0.10.0/prx-x86_64-linux";
+          sha256 = "sha256-8dPDwrQi4CbhiGbx97hkyYxh//BPaDdw+7UEZn460wU=";
+          loader = "ld-linux-x86-64.so.2";
+        };
       };
 
       user = "claude";
@@ -38,21 +62,19 @@
         let
           pkgs = pkgsFor system;
 
-          # prx — the box's SANCTIONED tool (prx-0wc). Pinned release binary
-          # (aarch64-linux, v0.10.0 — includes prx-ag7: runtime repo-root from
-          # cwd not the binary dir). It's a `bun --compile` binary: bun appends
-          # the app blob AFTER the ELF, so patchelf/autoPatchelf rewrites the ELF
-          # and CORRUPTS the blob → the binary degrades to bare bun. So leave the
-          # binary untouched and invoke the nix glibc loader directly on it (the
-          # ubuntu-built ELF's hardcoded /lib interpreter is absent in a nix image).
+          # prx — the box's SANCTIONED tool (prx-0wc). Pinned release binary for
+          # this arch (v0.10.0 — includes prx-ag7: runtime repo-root from cwd not
+          # the binary dir). See prxAssets (top of flake) for why the binary is
+          # left untouched and run via the nix glibc loader directly.
+          prxAsset = prxAssets.${system};
           prxBin = pkgs.fetchurl {
-            url = "https://github.com/bounded-systems/prx/releases/download/v0.10.0/prx-aarch64-linux";
-            sha256 = "1b8ba6xgi6hdaknlhigcxai1xxlvz8j1sdm570y7jssckgiqy89l";
+            url = prxAsset.url;
+            sha256 = prxAsset.sha256;
           };
           prxLibs = pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.stdenv.cc.cc.lib ];
           prx = pkgs.runCommand "prx-0.10.0" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
             install -Dm755 ${prxBin} $out/libexec/prx
-            makeWrapper ${pkgs.glibc}/lib/ld-linux-aarch64.so.1 $out/bin/prx \
+            makeWrapper ${pkgs.glibc}/lib/${prxAsset.loader} $out/bin/prx \
               --add-flags "--library-path ${prxLibs}" \
               --add-flags "$out/libexec/prx" \
               --set LD_LIBRARY_PATH "${prxLibs}"
@@ -424,6 +446,17 @@
             src = ./peercred;
             cargoLock.lockFile = ./peercred/Cargo.lock;
           };
+
+          # claude-box — the host launcher CLI, available natively on Linux.
+          # A typed Bun CLI run via pinned bun (`bun --compile` fetches its
+          # runtime from the network → blocked in the nix sandbox; a pinned-bun
+          # wrapper is the pure equivalent). podman is resolved from the caller's
+          # PATH at runtime. This makes the home-manager install in the README
+          # (`packages.${system}.claude-box`) resolve on Linux hosts — see
+          # HOSTING.md. The darwin set defines its own copy below.
+          claude-box = pkgs.writeShellScriptBin "claude-box" ''
+            exec ${pkgs.bun}/bin/bun ${./.}/claude-box.ts "$@"
+          '';
         }) // {
           # Expose the (linux) image under the darwin host too, so a plain
           # `nix build .#claude-image` on this Mac resolves and offloads to the

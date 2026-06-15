@@ -44,6 +44,15 @@ jobs:
           extra-conf: |
             extra-experimental-features = nix-command flakes
 
+      # The runner ships a v1 /etc/containers/registries.conf, which the
+      # nix-built skopeo (v2-only) refuses to load ("must be in v2 format").
+      # Point skopeo at our own empty file — empty parses as valid v2 — so it
+      # uses registry defaults instead of the stock v1 config.
+      - name: Use a v2 containers registries.conf
+        run: |
+          : > "${RUNNER_TEMP}/registries.conf"
+          echo "CONTAINERS_REGISTRIES_CONF=${RUNNER_TEMP}/registries.conf" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \

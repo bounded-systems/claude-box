@@ -898,6 +898,9 @@ type Manifest = {
   doors: DoorGrant[];
   netOpen: boolean;
   denied: { name: string; flag: string; deny: string }[];
+  /** Spawn depth of THIS box (0 = root). Threaded so the in-box runtime can
+   *  increment it on nested spawns and launcherd's maxDepth ceiling holds. */
+  depth: number;
 };
 
 /** The honest surface for THIS launch: what's granted AND what's denied. Built
@@ -908,13 +911,14 @@ function buildManifest(
   account: string,
   launch: Launch,
   env: Env = process.env,
+  depth = 0,
 ): Manifest {
   const granted = new Set(launch.doors.map((d) => d.name));
   // --net-open opens ambient egress WITHOUT the net door, so suppress the "net"
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied };
+  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied, depth };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -925,6 +929,9 @@ function capabilityJson(m: Manifest): string {
     workcell: "claude-box",
     account: m.account,
     guest: m.guest,
+    // Spawn depth of this box (0 = root). lib/spawn.ts reads this to increment
+    // the child's depth so launcherd's maxDepth ceiling holds across nesting.
+    depth: m.depth,
     // Network posture is explicit: policed (netd door), open (unsafe escape), or
     // none (--network=none, the default). Egress is a capability, not ambient.
     network: m.netOpen ? "open" : netDoor ? "policed" : "none",

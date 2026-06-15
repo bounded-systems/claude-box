@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.2.0...claude-box-v0.3.0) (2026-06-15)
+
+
+### Features
+
+* **guest-room:** bump pin to checkCaveats engine + sync mirror ([#96](https://github.com/bounded-systems/claude-box/issues/96)) ([2ac316e](https://github.com/bounded-systems/claude-box/commit/2ac316e6498daf0d28dae87c06235f6374c53220))
+* **guest-room:** consume the published engine as a pinned flake input ([#93](https://github.com/bounded-systems/claude-box/issues/93)) ([fb0d7ca](https://github.com/bounded-systems/claude-box/commit/fb0d7cabc71cf677adb09149095645e9eb7bced3))
+* **nix:** self-verifying doors module + app meta (nix flake check clean) ([#85](https://github.com/bounded-systems/claude-box/issues/85)) ([a1e65b7](https://github.com/bounded-systems/claude-box/commit/a1e65b7a89c5d61c0422df04b6a53e6da483f533))
+* **remote-control:** --remote-serve — boot the box into RC server mode (prx-v9wn) ([#94](https://github.com/bounded-systems/claude-box/issues/94)) ([024d4c4](https://github.com/bounded-systems/claude-box/commit/024d4c490d1ab706f1ab819c4dace933df9cddeb))
+* **scoutd:** enforce egress allowlist through guest-room checkCaveats ([#99](https://github.com/bounded-systems/claude-box/issues/99)) ([e786445](https://github.com/bounded-systems/claude-box/commit/e786445b120713ad558adb941689752539cbd6e1))
+* **scoutd:** force scout egress through a dedicated scout-netd (no NIC) ([#92](https://github.com/bounded-systems/claude-box/issues/92)) ([489118a](https://github.com/bounded-systems/claude-box/commit/489118a4c5cd7aed29bca0fb98cae40c7acf055c))
+* **scoutd:** make egress proxy-capable (plumbing, not a boundary change) ([#90](https://github.com/bounded-systems/claude-box/issues/90)) ([1adecc3](https://github.com/bounded-systems/claude-box/commit/1adecc384c34476b142572d60fc1ffdf9c4f07fd))
+
+
+### Bug Fixes
+
+* **guest-room:** remove duplicate stale attenuate() export ([#91](https://github.com/bounded-systems/claude-box/issues/91)) ([9a3a4f4](https://github.com/bounded-systems/claude-box/commit/9a3a4f4d854357e2034301e1b34edabcc20e8a3d))
+* **remote-control:** keep nonessential traffic blocked at source under RC ([#98](https://github.com/bounded-systems/claude-box/issues/98)) ([81b31da](https://github.com/bounded-systems/claude-box/commit/81b31da3bb37fedab38627053ec32b7c10c9e254))
+* resolve all tsc --noEmit type errors and gate tsc in CI ([#87](https://github.com/bounded-systems/claude-box/issues/87)) ([5834353](https://github.com/bounded-systems/claude-box/commit/58343538ab66906a215c86ea689d08ee295acdb0))
+
 ## [0.2.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.1.1...claude-box-v0.2.0) (2026-06-15)
 
 

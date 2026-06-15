@@ -225,8 +225,16 @@ function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: s
 
 /**
  * Check attenuation: child doors must be a subset of parent doors.
- * This is a core OCAP security invariant — a box cannot grant itself
- * capabilities it doesn't have. Returns true if allowed.
+ * A name-only spawn-time guard — a box cannot grant itself capabilities it
+ * doesn't have. Returns true if allowed.
+ *
+ * NOTE (delegation model): this is the SPAWN-time check. The preferred model is
+ * now service-oriented — a box is INTRODUCED to a capability by the concierge
+ * (see CONCIERGE.md and concierged.ts) rather than spawning a child that
+ * inherits a door subset; attenuation happens per-capability at introduction
+ * time (`resolveProvider` + `checkCaveats`), not as a door-set comparison here.
+ * This check remains as a defense-in-depth guard for the launch path, which is
+ * now lifecycle (boot a room) rather than the delegation mechanism.
  */
 function checkAttenuation(
   requestedDoors: string[],

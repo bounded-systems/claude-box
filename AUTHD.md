@@ -18,6 +18,15 @@ The merged `--remote-control` profile works today, but it relies on a full-scope
 volume**. That makes the box the home-of-record for a powerful credential — the
 opposite of the credential-isolation the box exists for. authd fixes that.
 
+> **Today's front door: `claude-box login <account> --scope full`.** This launches
+> a minimal, repo-less box bound only to the account's config volume so you can
+> `claude auth login` once and persist it (the prerequisite for
+> `--remote-control`). It is **box-local** — the credential still lands in the
+> account volume, i.e. exactly the home-of-record problem above. authd is the
+> planned move: the same login flow, but the refresh token lives host-side and
+> the box is lent an access-token only. `claude-box login` is the seam that
+> migration slots into (the CLI surface stays; the custody moves).
+
 ## Why not the keeperd pattern (broker performs the effect)
 
 keeperd works because a git write is a **discrete effect**: the box asks, keeperd

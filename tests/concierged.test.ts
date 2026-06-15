@@ -50,7 +50,7 @@ describe("concierged register/resolve", () => {
     await rpc("register", { capability: "scout", door: "/run/scoutd.sock", lease: 60 });
     await rpc("register", { capability: "scout", door: "/run/scoutd.sock", lease: 60 });
     const resp = await rpc("list");
-    const caps = (resp.result as { capabilities: { capability: string; providers: number }[] }).capabilities;
+    const caps = (resp.result as { capabilities: { capability: string; grants: string; providers: number }[] }).capabilities;
     expect(caps).toEqual([{ capability: "scout", grants: 'service "scout"', providers: 1 }]);
   });
 

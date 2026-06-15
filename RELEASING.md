@@ -2,36 +2,42 @@
 
 claude-box images ship on a **deliberate version bump**, not on every push — the
 same pin-and-review stance the flake takes toward nixpkgs (see [ADR.md](./ADR.md)).
-The mechanism is [changesets](https://github.com/changesets/changesets) +
-two GitHub Actions workflows.
+The mechanism is [release-please](https://github.com/googleapis/release-please)
+(language-agnostic — no `package.json`, no deps, in keeping with the repo) plus
+one GitHub Actions workflow.
 
 ## The flow
 
 ```
-PR with a changeset ──merge──▶ "Version Packages" PR ──merge──▶ v<version> tag ──▶ images on GHCR
-        (you)                      (release.yml)               (release-tag.sh)     (publish-ghcr.yml)
+conventional commits ─push→ "release-please" PR ─merge→ v<version> release ─→ images on GHCR
+       (you)                   (release.yml)            (release.yml)         (publish-ghcr.yml)
 ```
 
-1. **Author a changeset** alongside your change:
+1. **Use [Conventional Commits](https://www.conventionalcommits.org/)** on `main`
+   (`feat:`, `fix:`, `feat!:`/`BREAKING CHANGE:` for major). release-please reads
+   them to decide the next version.
 
-   ```sh
-   bun install            # one-time, pulls @changesets/cli
-   bun run changeset      # pick patch/minor/major + write a summary
-   git add .changeset && git commit
-   ```
+2. release-please opens or updates a **release PR** that bumps `version.txt` +
+   `.release-please-manifest.json` and writes `CHANGELOG.md` from those commits.
 
-2. **Merge to `main`.** [`release.yml`](./.github/workflows/release.yml) opens or
-   updates a **Version Packages** PR that bumps `package.json` and `CHANGELOG.md`
-   from the pending changesets.
+3. **Merge the release PR.** [`release.yml`](./.github/workflows/release.yml)
+   creates the `v<version>` tag + GitHub Release, then — gated on
+   `releases_created` in the *same* run — calls
+   [`publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml).
 
-3. **Merge the Version Packages PR.** With no changesets left, the changeset
-   action runs the publish step ([`scripts/release-tag.sh`](./scripts/release-tag.sh)),
-   which pushes a `v<version>` tag (idempotent).
+   > We trigger the build by job dependency, **not** by the tag: a tag pushed by
+   > the default `GITHUB_TOKEN` does not start a separate `on: push: tags`
+   > workflow (GitHub's anti-recursion rule).
 
-4. [`publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml) fires on the tag and:
-   - builds each image natively per arch (`x86_64-linux` on `ubuntu-latest`,
-     `aarch64-linux` on `ubuntu-24.04-arm`) and pushes an arch-suffixed tag, then
-   - assembles a multi-arch manifest per image and moves `latest`.
+4. `publish-ghcr.yml` builds each image natively per arch (`x86_64-linux` on
+   `ubuntu-latest`, `aarch64-linux` on `ubuntu-24.04-arm`), pushes arch-suffixed
+   tags, assembles a multi-arch manifest per image, and moves `latest`.
+
+### Manual / throwaway build
+
+`publish-ghcr.yml` also accepts `workflow_dispatch` (defaults to the `dev` tag,
+which is *not* promoted to `latest`) — handy for testing the pipeline without a
+release.
 
 ## Published images
 
@@ -44,14 +50,17 @@ PR with a changeset ──merge──▶ "Version Packages" PR ──merge──
 | `netd-image` | `netd` |
 | `scoutd-image` | `scoutd` |
 
-A manual build (no version bump) is available via the workflow's
-`workflow_dispatch` (defaults to the `dev` tag).
-
 ## Pre-merge checklist for maintainers
 
-This setup was authored without a local nix/Actions runner, so confirm once on
-the first real run:
+Authored without a local nix/Actions runner, so confirm once on the first run:
 
+- [ ] **Conventional commits** — the repo's history isn't conventional-commit
+      formatted today; release-please won't cut a release until it sees
+      qualifying commits (`feat:`/`fix:`). Adopt the convention, or seed the
+      first release with a `Release-As: 0.1.0` commit footer.
+- [ ] **release-please outputs** — verify the manifest-mode output names
+      (`releases_created`, `.--version`) match the action version; adjust
+      `release.yml` if release-please changes them.
 - [ ] **Repo visibility / billing** — `ubuntu-24.04-arm` runners are free only on
       public repos; private repos need a paid ARM runner or a `qemu` cross-build.
 - [ ] **Unfree licensing** — the `claude-personal` image bundles `claude-code`

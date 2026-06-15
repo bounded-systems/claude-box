@@ -1,16 +1,20 @@
 name: publish-ghcr
 
-# Build the pinned OCI images with nix and push them to GHCR. Fires on the
-# `v*` tags created by the release workflow; `workflow_dispatch` allows a manual
-# build (defaults to the `dev` tag) for testing.
+# Build the pinned OCI images with nix and push them to GHCR. Called by the
+# release workflow when release-please cuts a release (`workflow_call`), or run
+# manually for a throwaway build (`workflow_dispatch`, defaults to the `dev` tag).
 on:
-  push:
-    tags: ["v*.*.*"]
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Image tag to publish (manual runs)"
+      version:
+        description: "Image tag to publish"
         default: "dev"
+        type: string
 
 permissions:
   contents: read
@@ -19,6 +23,7 @@ permissions:
 env:
   # ghcr.io/<owner>/claude-box/<image>
   REGISTRY: ghcr.io/${{ github.repository_owner }}/claude-box
+  VERSION: ${{ inputs.version }}
 
 jobs:
   # Build each image natively on its own arch, push an arch-suffixed tag.
@@ -39,23 +44,12 @@ jobs:
           extra-conf: |
             extra-experimental-features = nix-command flakes
 
-      - name: Resolve version
-        id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | nix run nixpkgs#skopeo -- login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build + push images (${{ matrix.arch }})
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           # nix attr  ->  GHCR image name
@@ -82,23 +76,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve version
-        id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Create + push manifest lists
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           for name in claude-personal keeperd netd scoutd; do
@@ -106,8 +89,8 @@ jobs:
             docker manifest create "${ref}:${VERSION}" \
               "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
             docker manifest push "${ref}:${VERSION}"
-            # Tagged releases also move `latest`.
-            if [ "${{ github.event_name }}" = "push" ]; then
+            # A real release (not a throwaway `dev` build) also moves `latest`.
+            if [ "${VERSION}" != "dev" ]; then
               docker manifest create "${ref}:latest" \
                 "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
               docker manifest push "${ref}:latest"

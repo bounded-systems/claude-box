@@ -14,7 +14,15 @@
   # the version decision — re-pin here, then `nix flake update` to re-lock.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9f11f828c213641c2369a9f1fa31fe31557e3156";
 
-  outputs = { self, nixpkgs }:
+  # The room+door capability engine, extracted to its own public repo and
+  # consumed here as a PINNED input (flake.lock). It is the single source of
+  # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
+  # pin, kept honest by the `guest-room-mirror` check below. Bump with
+  # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
+  inputs.guest-room.url = "github:bounded-systems/guest-room/8366e6a4ec38e06c1bc375751dd32cfe0557acee";
+  inputs.guest-room.flake = false;
+
+  outputs = { self, nixpkgs, guest-room }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -551,6 +559,24 @@
                 exec ${self.packages.aarch64-darwin.claude-box}/bin/claude-box doors serve "$@"
               '';
 
+            # sync-guest-room — regenerate ./guest-room/ from the PINNED input.
+            # The directory is a generated mirror (see guest-room/README.md); this
+            # is the only sanctioned way to change it. Run from the repo root after
+            # `nix flake update guest-room`, then commit flake.lock + guest-room/.
+            sync-guest-room =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-guest-room" ''
+                set -euo pipefail
+                if [ ! -d "$PWD/guest-room" ]; then
+                  echo "run from the claude-box repo root (no ./guest-room here)" >&2
+                  exit 1
+                fi
+                for f in mod.ts protocol.ts daemon.ts; do
+                  install -m 644 ${guest-room}/$f "$PWD/guest-room/$f"
+                  echo "synced guest-room/$f"
+                done
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -651,6 +677,12 @@
         program = "${self.packages.aarch64-darwin.doors-serve}/bin/doors-serve";
       };
 
+      # `nix run .#sync-guest-room` → regenerate ./guest-room/ from the pinned input.
+      apps.aarch64-darwin.sync-guest-room = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-guest-room}/bin/sync-guest-room";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -699,6 +731,20 @@
       checks.aarch64-darwin =
         let pkgs = pkgsFor "aarch64-darwin";
         in {
+          # The ./guest-room/ mirror must equal the PINNED input — no hand-edits,
+          # no silent drift. Fails the flake if they differ; fix with
+          # `nix run .#sync-guest-room`. This is what makes the public repo the
+          # single source of truth rather than just a copy we hope stays in sync.
+          guest-room-mirror = pkgs.runCommand "guest-room-mirror" { } ''
+            for f in mod.ts protocol.ts daemon.ts; do
+              if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
+                echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
+
           # TypeScript type checking (bunx tsc --noEmit)
           typecheck = pkgs.runCommand "typecheck" {
             nativeBuildInputs = [ pkgs.bun ];

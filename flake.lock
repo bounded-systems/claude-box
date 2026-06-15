@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "guest-room": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781550405,
+        "narHash": "sha256-wah7NXt8XKGy4N67vgCDrkpgDJba12LX8NuvhPChxqo=",
+        "owner": "bounded-systems",
+        "repo": "guest-room",
+        "rev": "8366e6a4ec38e06c1bc375751dd32cfe0557acee",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "guest-room",
+        "rev": "8366e6a4ec38e06c1bc375751dd32cfe0557acee",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1781359544,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "guest-room": "guest-room",
         "nixpkgs": "nixpkgs"
       }
     }

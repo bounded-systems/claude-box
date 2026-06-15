@@ -277,6 +277,45 @@ export function attenuatesDoors(child: DoorGrant[], parent: DoorGrant[]): Attenu
   return violations.length ? { ok: false, violations } : { ok: true };
 }
 
+// ── Introduction (the concierge core) ────────────────────────────────────────
+// Delegation by message, not by spawn: a consumer is INTRODUCED to a capability
+// rather than inheriting it. A registry maps a capability to the providers that
+// serve it (a door the provider listens on) under a liveness lease. `resolve`
+// hands back the first live provider's door, attenuated by the caller's
+// requested narrowing — never wider than the provider's ceiling — or null when
+// nothing live serves it (fail closed). The engine owns this pure resolution;
+// the broker (concierge daemon) owns the mutable registry, the clock, and the
+// policy that pre-orders providers. See CONCIERGE.md.
+
+/** A capability provider in the concierge registry: the door it serves (its
+ *  ceiling authority) and its lease expiry (epoch ms). */
+export type ProviderEntry = { capability: string; door: DoorGrant; expiresAt: number };
+
+/** Live providers for a capability — those whose lease has not expired
+ *  (expiresAt > now). Order is preserved so the daemon can pre-rank by policy. */
+export function liveProviders(
+  entries: ProviderEntry[],
+  capability: string,
+  now: number,
+): ProviderEntry[] {
+  return entries.filter((e) => e.capability === capability && e.expiresAt > now);
+}
+
+/** Introduce a consumer to a capability: the first live provider's door,
+ *  attenuated by the caller's requested narrowing `want`. Append-only, so the
+ *  result is never wider than the provider's ceiling. Returns null when no live
+ *  provider serves it — a dead or absent capability is never silently granted. */
+export function resolveProvider(
+  entries: ProviderEntry[],
+  capability: string,
+  want: string[],
+  now: number,
+): DoorGrant | null {
+  const live = liveProviders(entries, capability, now);
+  if (!live.length) return null;
+  return attenuate(live[0]!.door, want);
+}
+
 /** Expand a named room to its door grants. Throws (fail closed, not a silent
  *  empty launch) if the room is unknown — a typo must never widen authority. */
 export function expandRoom(

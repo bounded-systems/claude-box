@@ -92,6 +92,19 @@ test("flags compose over a room (add a door, dedup the overlap)", () => {
   expect(l.guestArgs).toEqual(["--resume"]);
 });
 
+// ── spawn depth: threaded through the manifest so the maxDepth ceiling holds ──
+test("capabilityJson defaults depth to 0 for a root launch", () => {
+  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY);
+  expect(m.depth).toBe(0);
+  expect(JSON.parse(capabilityJson(m)).depth).toBe(0);
+});
+
+test("capabilityJson emits the launch depth (so getCurrentDepth reads the real value)", () => {
+  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY, 2);
+  expect(m.depth).toBe(2);
+  expect(JSON.parse(capabilityJson(m)).depth).toBe(2);
+});
+
 test("every room references only known doors (no drift from the registry)", () => {
   const doorNames = new Set(["keeper", "beads", "scout", "net"]);
   for (const room of Object.values(knownRooms())) {

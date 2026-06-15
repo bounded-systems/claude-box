@@ -435,6 +435,11 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --remote-control    opt-in: drive this boxed session from the Claude app/mobile
                       (implies --net; uses a full-scope in-box 'claude auth login'
                       instead of the inference-only token; first run: log in once)
+  --remote-serve      boot straight into RC SERVER mode: entrypoint becomes
+                      'claude remote-control --name <account>', so the box is a
+                      headless RC server (no manual /remote-control). Same posture
+                      as --remote-control. Run one per ACCOUNT for concurrent
+                      named sessions (cbox personal --remote-serve; cbox work …)
   --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
@@ -615,6 +620,20 @@ type Launch = {
    *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate can
    *  evaluate. Implies the net door (RC needs egress). See prx-9s14. */
   remoteControl: boolean;
+  /** --remote-serve: like --remote-control (same auth/egress posture), but the
+   *  box boots STRAIGHT INTO Remote Control SERVER mode — the claude entrypoint
+   *  becomes `claude remote-control --name <account>` instead of an interactive
+   *  session, so the box IS a persistent, headless RC server you attach to from
+   *  the app (no manual `/remote-control` step). The `--name` is the account, so
+   *  several `cbox <acct> --remote-serve` show up as distinct named sessions.
+   *
+   *  Multiplicity is PER-ACCOUNT, not per-box-on-one-login: each account volume
+   *  has its own full-scope login, and two servers sharing ONE login fight over
+   *  the single-use refresh-token rotation (prx-qba1 spike). Because the server
+   *  is long-lived, the AUTHD.md "continuity across expiry" risk applies — does
+   *  claude re-read an authd-refreshed credential mid-session — resolve with
+   *  prx-6194 (authd). claude guest only. See prx-v9wn. */
+  remoteServe: boolean;
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
 
@@ -635,6 +654,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let pod = false;
   let netOpen = false;
   let remoteControl = false;
+  let remoteServe = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
   const guestArgs: string[] = [];
@@ -718,6 +738,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(resolveDoor("net", undefined, env));
       continue;
     }
+    if (t === "--remote-serve") {
+      // Boot straight into RC server mode (see Launch.remoteServe). Same egress
+      // need as --remote-control, so imply the net door (Map dedupes).
+      remoteServe = true;
+      add(resolveDoor("net", undefined, env));
+      continue;
+    }
     if (t === "--keeper") {
       add(resolveDoor("keeper", undefined, env));
       continue;
@@ -770,6 +797,21 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(d);
     }
   }
+  // --remote-serve rewrites the claude entrypoint into server mode, so it is
+  // meaningless for tool guests and not wired into the pod / clone-from-origin
+  // launch paths (each builds its own entrypoint). Fail closed on those combos
+  // rather than silently dropping the server mode.
+  if (remoteServe) {
+    if (guest !== "claude") {
+      throw new Error(`--remote-serve is only valid for the claude guest (got "${guest}")`);
+    }
+    if (pod) {
+      throw new Error("--remote-serve is not supported with --pod yet (separate launch path)");
+    }
+    if (repoOrigin) {
+      throw new Error("--remote-serve is not supported with --repo-origin yet (separate launch path)");
+    }
+  }
   return {
     guest,
     repo,
@@ -782,6 +824,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     doors: [...doors.values()],
     netOpen,
     remoteControl,
+    remoteServe,
     guestArgs,
   };
 }
@@ -797,15 +840,30 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
  *  persists in the account volume). Also unset the image-baked
  *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate
  *  (tengu_ccr_bridge, delivered via GrowthBook) can evaluate. Both relaxations
- *  are scoped to this one launch — the default box is unchanged. */
+ *  are scoped to this one launch — the default box is unchanged.
+ *
+ *  --remote-serve shares this exact posture: it is --remote-control in server
+ *  mode, so it needs the same full-scope login (not the inference-only token)
+ *  and the same feature-flag gate, differing ONLY in the entrypoint (run()). */
 function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
-  if (launch.remoteControl) {
+  if (launch.remoteControl || launch.remoteServe) {
     return ["--unsetenv", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
   }
   if (env.CLAUDE_CODE_OAUTH_TOKEN) {
     return ["--env", `CLAUDE_CODE_OAUTH_TOKEN=${env.CLAUDE_CODE_OAUTH_TOKEN}`];
   }
   return [];
+}
+
+/** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
+ *  entrypoint is `claude`, so prepending these args boots it as
+ *  `claude remote-control --name <account>` — a headless RC server the app
+ *  attaches to, instead of an interactive session. `--name` is the account, so
+ *  concurrent servers (`cbox personal --remote-serve`, `cbox work --remote-serve`)
+ *  appear as distinct named sessions. Empty for any non-serve launch, so the
+ *  interactive entrypoint is byte-for-byte unchanged. */
+function remoteServeArgs(launch: Launch, account: string): string[] {
+  return launch.remoteServe ? ["remote-control", "--name", account] : [];
 }
 
 type Manifest = {
@@ -1416,8 +1474,16 @@ async function run(
     // For claude guest, inject the honest surface into the agent's context
     // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
     // don't need or parse system prompts — they just run their command.
+    // --remote-serve prepends the RC server-mode subcommand so the box boots as
+    // `claude remote-control --name <account>` (see remoteServeArgs); empty
+    // otherwise, leaving the interactive entrypoint untouched.
     if (guest === "claude") {
-      argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      if (launch.remoteServe) {
+        console.error(
+          `claude-box: --remote-serve — booting account '${account}' as a headless Remote Control server (attach from the Claude app/mobile as session '${account}')`,
+        );
+      }
+      argv.push(...remoteServeArgs(launch, account), "--append-system-prompt", capabilityPrompt(manifest));
     }
     // Add entrypoint override if the guest specifies one, then the args.
     if (guestPreset.entrypoint) {
@@ -2312,6 +2378,7 @@ export {
   resolveDoor,
   planLaunch,
   authEnvArgs,
+  remoteServeArgs,
   BOX_CONFIG_DIR,
   planRepoMount,
   boxTempBase,

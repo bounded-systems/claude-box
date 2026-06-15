@@ -753,7 +753,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     remoteServe: false,
     guestArgs,
   };
-  const manifest = buildManifest(account, launch);
+  const manifest = buildManifest(account, launch, process.env, depth);
   const manifestJson = capabilityJson(manifest);
   const launchId = generateLaunchId();
 

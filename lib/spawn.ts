@@ -108,7 +108,7 @@ function getSocketPath(): string {
 }
 
 /** Get current spawn depth from environment (set by launcherd in the manifest). */
-function getCurrentDepth(): number {
+export function getCurrentDepth(): number {
   const caps = process.env.CLAUDE_BOX_CAPABILITIES;
   if (!caps) return 0;
   try {

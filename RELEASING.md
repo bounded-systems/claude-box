@@ -43,12 +43,14 @@ release.
 
 `ghcr.io/bounded-systems/claude-box/<image>:<version>` for:
 
-| nix attr | GHCR image |
-|---|---|
-| `claude-image` | `claude-personal` |
-| `keeperd-image` | `keeperd` |
-| `netd-image` | `netd` |
-| `scoutd-image` | `scoutd` |
+The box is the **room**; the three daemons are its **doors**.
+
+| nix attr | GHCR image | what it is |
+|---|---|---|
+| `claude-image` | `claude-room` | the box — where Claude runs |
+| `keeperd-image` | `door-keeper` | git-signing door |
+| `netd-image` | `door-net` | egress-allowlist door |
+| `scoutd-image` | `door-scout` | external-reads door |
 
 ## Pre-merge checklist for maintainers
 

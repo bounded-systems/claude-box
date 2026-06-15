@@ -30,6 +30,10 @@ export type SpawnOptions = {
   repoRw?: boolean;
   /** Doors to grant (by name) */
   doors?: string[];
+  /** Per-door caveats to request (name → caveat strings, e.g. {scout:["host=github.com"]}).
+   *  A child must keep every caveat its parent's matching door carries, so to
+   *  inherit a restricted door it must request the same (or narrower) caveats. */
+  caveats?: Record<string, string[]>;
   /** Ambient egress (unsafe, no allowlist) */
   netOpen?: boolean;
   /** Args to pass through to claude */
@@ -107,16 +111,34 @@ function getSocketPath(): string {
   return `${home}/.claude-box/launcherd.sock`;
 }
 
+/** A parent door as forwarded to launcherd for the child ⊆ parent check: its
+ *  name plus any caveats it carries (so the child cannot silently drop them). */
+export type ParentDoor = { name: string; caveats: string[] };
+
+/** Parse this box's capability surface ($CLAUDE_BOX_CAPABILITIES), or null. */
+function getCaps(): { depth?: number; granted?: { doors?: { name: string; caveats?: string[] }[] } } | null {
+  const caps = process.env.CLAUDE_BOX_CAPABILITIES;
+  if (!caps) return null;
+  try {
+    return JSON.parse(caps);
+  } catch {
+    return null;
+  }
+}
+
 /** Get current spawn depth from environment (set by launcherd in the manifest). */
 function getCurrentDepth(): number {
-  const caps = process.env.CLAUDE_BOX_CAPABILITIES;
-  if (!caps) return 0;
-  try {
-    const parsed = JSON.parse(caps);
-    return parsed.depth ?? 0;
-  } catch {
-    return 0;
-  }
+  return getCaps()?.depth ?? 0;
+}
+
+/** This box's own doors WITH caveats, to pass as the parent set on spawn so
+ *  launcherd enforces the child is no wider. Returns undefined when the box has
+ *  no capability surface (host/dev/root-equivalent) — launcherd then treats the
+ *  launch as parentless (lenient), rather than as a parent with zero doors. */
+export function getCurrentDoors(): ParentDoor[] | undefined {
+  const granted = getCaps()?.granted?.doors;
+  if (!granted) return undefined;
+  return granted.map((d) => ({ name: d.name, caveats: d.caveats ?? [] }));
 }
 
 type RequestEnvelope = {
@@ -215,6 +237,13 @@ export async function spawn(options: SpawnOptions = {}): Promise<SpawnResult> {
     claudeArgs: options.claudeArgs ?? [],
     depth: (options.depth ?? currentDepth) + 1,  // Increment depth
   };
+
+  // Forward this box's own doors (with caveats) as the parent set so launcherd
+  // enforces child ⊆ parent — names AND caveats. Omitted when we have no
+  // capability surface, so a host/dev launch stays parentless (lenient).
+  const parentDoors = getCurrentDoors();
+  if (parentDoors !== undefined) params._parentDoors = parentDoors;
+  if (options.caveats) params.caveats = options.caveats;
 
   return request<SpawnResult>("launch", params);
 }

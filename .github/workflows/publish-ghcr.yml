@@ -44,6 +44,15 @@ jobs:
           extra-conf: |
             extra-experimental-features = nix-command flakes
 
+      # The runner ships a v1 /etc/containers/registries.conf, which the
+      # nix-built skopeo (v2-only) refuses to load ("must be in v2 format").
+      # Point skopeo at our own empty file — empty parses as valid v2 — so it
+      # uses registry defaults instead of the stock v1 config.
+      - name: Use a v2 containers registries.conf
+        run: |
+          : > "${RUNNER_TEMP}/registries.conf"
+          echo "CONTAINERS_REGISTRIES_CONF=${RUNNER_TEMP}/registries.conf" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -84,15 +93,26 @@ jobs:
       - name: Create + push manifest lists
         run: |
           set -euo pipefail
+          # GHCR's token endpoint occasionally times out mid-run; retry transient
+          # failures with backoff so an unattended release doesn't fail on a blip.
+          retry() {
+            local n=1
+            until "$@"; do
+              if [ "$n" -ge 4 ]; then echo "failed after $n attempts: $*" >&2; return 1; fi
+              echo "attempt $n failed, retrying: $*" >&2; sleep "$((2 ** n))"; n="$((n + 1))"
+            done
+          }
+          push_list() {  # $1 = manifest list tag to assemble from the two arch tags
+            local tag="$1" ref="$2"
+            docker manifest rm "$tag" >/dev/null 2>&1 || true  # clear partial local state on retry
+            retry docker manifest create "$tag" "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
+            retry docker manifest push "$tag"
+          }
           for name in claude-personal keeperd netd scoutd; do
             ref="${REGISTRY}/${name}"
-            docker manifest create "${ref}:${VERSION}" \
-              "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
-            docker manifest push "${ref}:${VERSION}"
+            push_list "${ref}:${VERSION}" "${ref}"
             # A real release (not a throwaway `dev` build) also moves `latest`.
             if [ "${VERSION}" != "dev" ]; then
-              docker manifest create "${ref}:latest" \
-                "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
-              docker manifest push "${ref}:latest"
+              push_list "${ref}:latest" "${ref}"
             fi
           done

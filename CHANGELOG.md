@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.5.0...claude-box-v0.6.0) (2026-06-15)
+
+
+### Features
+
+* **concierged:** Phase-1 binding stub + plumbing-not-a-boundary banners ([#120](https://github.com/bounded-systems/claude-box/issues/120)) ([688a5d9](https://github.com/bounded-systems/claude-box/commit/688a5d9a66342b63bd795db5fa16c1b6f43454f0))
+
+
+### Bug Fixes
+
+* **ci:** publish the door-concierge image + smoke it ([#122](https://github.com/bounded-systems/claude-box/issues/122)) ([683f279](https://github.com/bounded-systems/claude-box/commit/683f27976a3545cdb52f1c3ee52b3e67dcba3f9c))
+
 ## [0.5.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.4.0...claude-box-v0.5.0) (2026-06-15)
 
 

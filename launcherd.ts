@@ -709,6 +709,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     doors,
     netOpen: (params.netOpen as boolean) ?? netOpen,
     remoteControl: false,
+    remoteServe: false,
     guestArgs,
   };
   const manifest = buildManifest(account, launch);

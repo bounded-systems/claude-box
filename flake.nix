@@ -87,17 +87,18 @@
             machine.wait_for_unit("multi-user.target")
             # oci-containers names units podman-<container>; containers are the
             # reason-named doors (claude-netd serves the box's netd.sock).
-            for svc in ["podman-keeper", "podman-claude-netd", "podman-scout-netd", "podman-scout"]:
+            for svc in ["podman-keeper", "podman-claude-netd", "podman-scout-netd", "podman-scout", "podman-concierge"]:
                 machine.wait_for_unit(svc + ".service")
             # Each door writes its socket into the shared socketDir.
-            for sock in ["keeperd", "netd", "scout-netd", "scoutd"]:
+            for sock in ["keeperd", "netd", "scout-netd", "scoutd", "concierged"]:
                 machine.wait_until_succeeds(
                     f"test -S /run/claude-box/doors/{sock}.sock", timeout=120
                 )
-            # The boundary, not just liveness: keeper and scout hold NO NIC of
-            # their own (--network=none → only the loopback interface). scoutd's
-            # GitHub egress therefore can only flow through the scout-netd door.
-            for box in ["keeper", "scout"]:
+            # The boundary, not just liveness: keeper, scout and concierge hold NO
+            # NIC (--network=none → only loopback). scoutd's GitHub egress can only
+            # flow through the scout-netd door; the concierge is pure routing (it
+            # hands back references, never connecting out), so it needs no NIC.
+            for box in ["keeper", "scout", "concierge"]:
                 nics = machine.succeed(f"podman exec {box} ls /sys/class/net").split()
                 assert nics == ["lo"], f"{box} must have only loopback (no NIC), got {nics}"
           '';
@@ -505,6 +506,75 @@
               };
             };
 
+          # concierged-image — the capability concierge as a container.
+          # An INTRODUCER (CONCIERGE.md): holds a leased registry and hands back
+          # attenuated door references on `resolve`. Pure routing — it never
+          # connects to a provider, so it holds NO NIC (--network=none) and needs
+          # no egress toolchain (no socat/cacert), only the /run/doors volume.
+          #   nix build .#concierged-image && podman load -i result
+          concierged-image =
+            let
+              conciergedTools = with pkgs; [ bun coreutils bashInteractive ];
+
+              conciergedEnv = pkgs.buildEnv {
+                name = "concierged-image-root";
+                paths = conciergedTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # Bundle concierged + lib/ + guest-room engine (resolveProvider is in
+              # mod.ts; lib/runtime re-exports daemon.ts/protocol.ts).
+              conciergedSrc = pkgs.runCommand "concierged-src" {} ''
+                mkdir -p $out/app/lib $out/app/guest-room
+                cp ${./concierged.ts} $out/app/concierged.ts
+                cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
+                cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
+                cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
+              '';
+
+              conciergedEntrypoint = pkgs.writeShellScript "concierged-entrypoint" ''
+                exec bun /app/concierged.ts serve --socket /run/doors/concierged.sock "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "concierged";
+              tag = "dev";
+
+              contents = [ conciergedEnv conciergedSrc ];
+
+              extraCommands = ''
+                mkdir -p etc tmp run/doors
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                concierge:x:${toString uid}:${toString uid}:concierge:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                concierge:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                chown -R ${toString uid}:${toString uid} run/doors
+              '';
+
+              config = {
+                Entrypoint = [ "${conciergedEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "concierge";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "LANG=C.UTF-8"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                };
+              };
+            };
+
           # peercred — SO_PEERCRED injector for launcherd (Rust)
           # Wraps a unix socket to inject caller UID/GID/PID into requests.
           peercred = pkgs.rustPlatform.buildRustPackage {
@@ -533,6 +603,7 @@
             keeperd-image = self.packages.aarch64-linux.keeperd-image;
             netd-image = self.packages.aarch64-linux.netd-image;
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
+            concierged-image = self.packages.aarch64-linux.concierged-image;
             # The default is the CLI, not the image. Installing/running a
             # `.tar.gz` (the old default) put junk entries in `nix profile` and
             # spewed "not including …claude-personal.tar.gz" on every op — an

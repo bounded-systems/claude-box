@@ -463,6 +463,45 @@ describe("attenuation (child ⊆ parent)", () => {
   });
 });
 
+describe("attenuation is caveat-aware (child cannot drop a parent caveat)", () => {
+  const { checkAttenuation } = require("../launcherd");
+
+  test("child KEEPS the parent's caveat → attenuates (allowed)", () => {
+    const r = checkAttenuation(
+      [{ name: "scout", caveats: ["host=github.com"] }],
+      [{ name: "scout", caveats: ["host=github.com"] }],
+      1,
+    );
+    expect(r.allowed).toBe(true);
+  });
+
+  test("child ADDS a caveat (keeps parent's) → still attenuates", () => {
+    const r = checkAttenuation(
+      [{ name: "scout", caveats: ["host=github.com", "mode=readonly"] }],
+      [{ name: "scout", caveats: ["host=github.com"] }],
+      1,
+    );
+    expect(r.allowed).toBe(true);
+  });
+
+  test("KEYSTONE: child DROPS the parent's caveat → widens → violation", () => {
+    const r = checkAttenuation(
+      [{ name: "scout" }], // no caveat = wider than parent's restricted scout
+      [{ name: "scout", caveats: ["host=github.com"] }],
+      1,
+    );
+    expect(r.allowed).toBe(false);
+    expect(r.violations).toEqual(["scout"]);
+    expect(r.reason).toContain("drops caveats");
+    expect(r.reason).toContain("host=github.com");
+  });
+
+  test("name-only specs still behave as a subset check (back-compat)", () => {
+    expect(checkAttenuation(["scout"], ["scout", "net"], 1).allowed).toBe(true);
+    expect(checkAttenuation(["keeper"], ["net"], 1).allowed).toBe(false);
+  });
+});
+
 describe("attenuation via handleRequest", () => {
   const { handleRequest, setPolicy } = require("../launcherd");
 
@@ -531,6 +570,48 @@ describe("attenuation via handleRequest", () => {
     // Dev room expands to keeper, net, scout - keeper and scout should be violations
     expect(resp.error?.message).toContain("keeper");
     expect(resp.error?.message).toContain("scout");
+  });
+
+  test("child dropping a parent's door caveat is refused over the wire", async () => {
+    // Parent's scout is restricted to host=github.com; child requests scout with
+    // no caveat → it would WIDEN authority → ATTENUATION_VIOLATION.
+    const resp = await handleRequest(
+      JSON.stringify({
+        id: "att-cav-1",
+        method: "launch",
+        params: {
+          account: "test",
+          doors: ["scout"],
+          depth: 1,
+          _parentDoors: [{ name: "scout", caveats: ["host=github.com"] }],
+        },
+      }),
+    );
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("ATTENUATION_VIOLATION");
+    expect(resp.error?.message).toContain("scout");
+    expect(resp.error?.message).toContain("host=github.com");
+  });
+
+  test("child keeping the parent's caveat passes attenuation (then door check)", async () => {
+    // Child requests scout WITH the parent's caveat → attenuation OK; proceeds to
+    // the door-reachability stage (which fails in the test env, not ATTENUATION).
+    const resp = await handleRequest(
+      JSON.stringify({
+        id: "att-cav-2",
+        method: "launch",
+        params: {
+          account: "test",
+          doors: ["scout"],
+          caveats: { scout: ["host=github.com"] },
+          depth: 1,
+          _parentDoors: [{ name: "scout", caveats: ["host=github.com"] }],
+        },
+      }),
+    );
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).not.toBe("ATTENUATION_VIOLATION");
+    expect(["DOORS_UNREACHABLE", "ENOENT"]).toContain(resp.error?.code);
   });
 });
 

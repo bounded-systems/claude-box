@@ -426,6 +426,9 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
                       (repeatable; .git stays read-only; writes via --keeper)
   --net               forward the netd door — policed egress
   --net-open          UNSAFE: full ambient egress, no allowlist
+  --remote-control    opt-in: drive this boxed session from the Claude app/mobile
+                      (implies --net; uses a full-scope in-box 'claude auth login'
+                      instead of the inference-only token; first run: log in once)
   --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
@@ -598,6 +601,14 @@ type Launch = {
   writable: string[];
   doors: DoorGrant[];
   netOpen: boolean;
+  /** --remote-control: opt-in profile to drive THIS boxed session from the Claude
+   *  app / mobile (`claude remote-control`). Relaxes two box defaults, scoped to
+   *  this launch only: (1) does NOT forward the inference-only setup-token (so a
+   *  full-scope in-box `claude auth login`, persisted in the account volume, wins
+   *  — RC rejects inference-only tokens), and (2) unsets the image's
+   *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate can
+   *  evaluate. Implies the net door (RC needs egress). See prx-9s14. */
+  remoteControl: boolean;
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
 
@@ -617,6 +628,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoOrigin: string | undefined;
   let pod = false;
   let netOpen = false;
+  let remoteControl = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
   const guestArgs: string[] = [];
@@ -693,6 +705,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(resolveDoor("net", host, env));
       continue;
     }
+    if (t === "--remote-control") {
+      // Opt-in: drive this boxed session from the Claude app (see Launch.remoteControl).
+      // RC needs egress, so imply the net door (the Map dedupes if --net is also given).
+      remoteControl = true;
+      add(resolveDoor("net", undefined, env));
+      continue;
+    }
     if (t === "--keeper") {
       add(resolveDoor("keeper", undefined, env));
       continue;
@@ -756,8 +775,31 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     writable,
     doors: [...doors.values()],
     netOpen,
+    remoteControl,
     guestArgs,
   };
+}
+
+/** Pure: the auth-related --env / --unsetenv podman fragment for a launch.
+ *
+ *  Default posture (headless): forward a pre-minted `claude setup-token` from
+ *  CLAUDE_CODE_OAUTH_TOKEN — inference-only, no in-box browser flow needed.
+ *
+ *  --remote-control posture: do NOT forward the token (it is inference-only and
+ *  CANNOT establish Remote Control; and as env it would override, per the auth
+ *  precedence table, the full-scope `claude auth login` credential the user
+ *  persists in the account volume). Also unset the image-baked
+ *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate
+ *  (tengu_ccr_bridge, delivered via GrowthBook) can evaluate. Both relaxations
+ *  are scoped to this one launch — the default box is unchanged. */
+function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
+  if (launch.remoteControl) {
+    return ["--unsetenv", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+  }
+  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return ["--env", `CLAUDE_CODE_OAUTH_TOKEN=${env.CLAUDE_CODE_OAUTH_TOKEN}`];
+  }
+  return [];
 }
 
 type Manifest = {
@@ -1057,10 +1099,9 @@ async function runPod(account: string, launch: Launch): Promise<number> {
     if (guestPreset.needsConfig) {
       argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
     }
-    // Headless auth: forward a pre-minted `claude setup-token` (no in-box /login).
-    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-      argv.push("--env", `CLAUDE_CODE_OAUTH_TOKEN=${process.env.CLAUDE_CODE_OAUTH_TOKEN}`);
-    }
+    // Auth: inference-only setup-token by default; --remote-control omits it for
+    // a full-scope in-box login (see authEnvArgs).
+    argv.push(...authEnvArgs(launch, process.env));
     argv.push(
       "--env", `HTTPS_PROXY=${proxy}`, "--env", `HTTP_PROXY=${proxy}`,
       "--env", `ALL_PROXY=${proxy}`, "--env", `https_proxy=${proxy}`,
@@ -1129,13 +1170,12 @@ async function run(
   if (guestPreset.needsConfig) {
     argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
   }
-  // Headless auth: in-box `/login` can't complete (no browser; the OAuth
-  // callback can't bind in the sandbox). Forward a pre-minted token from
-  // `claude setup-token` instead — keeps the box on the Max subscription and
-  // needs no in-box browser flow.
-  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
-    argv.push("--env", `CLAUDE_CODE_OAUTH_TOKEN=${env.CLAUDE_CODE_OAUTH_TOKEN}`);
-  }
+  // Auth: by default forward a pre-minted, inference-only `claude setup-token`
+  // (no in-box browser flow). --remote-control instead omits the token so a
+  // full-scope in-box `claude auth login` (paste-code flow — works in
+  // containers per the auth docs, persisted in the account volume) can drive
+  // Remote Control. See authEnvArgs.
+  argv.push(...authEnvArgs(launch, env));
   // Network posture: TCP mode vs Unix socket mode
   //
   // TCP mode (DOORS_TCP=1): Daemons run on TCP ports on the macOS host. The
@@ -2256,6 +2296,7 @@ export {
   knownGuests,
   resolveDoor,
   planLaunch,
+  authEnvArgs,
   planRepoMount,
   buildManifest,
   capabilityJson,

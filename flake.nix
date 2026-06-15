@@ -68,6 +68,34 @@
       # launcher's BOX_CONFIG_DIR must equal configDir — tests/xdg.test.ts pins it.
       xdgConfigHome = "${home}/.config";
       configDir = "${xdgConfigHome}/claude"; # = $XDG_CONFIG_HOME/claude; volume mount point
+
+      # NixOS VM test for the doors module: boot a VM with the doors enabled and
+      # assert every door daemon starts and writes its socket. This is the
+      # `checks.<linux>.doors` boot test (the durable form of HOSTING.md's manual
+      # nixos-rebuild snippet). Linux-only — needs KVM/qemu to run. Names track
+      # the reason-named instances (keeper, claude-netd, scout-netd, scout).
+      doorsTest = system:
+        let pkgs = pkgsFor system;
+        in pkgs.testers.runNixOSTest {
+          name = "claude-box-doors";
+          nodes.machine = { ... }: {
+            imports = [ self.nixosModules.default ];
+            services.claude-box.doors.enable = true;
+            virtualisation.diskSize = 4096; # room for the loaded door images
+          };
+          testScript = ''
+            machine.wait_for_unit("multi-user.target")
+            # oci-containers names units podman-<container>; containers are the
+            # reason-named doors (claude-netd serves the box's netd.sock).
+            for svc in ["podman-keeper", "podman-claude-netd", "podman-scout-netd", "podman-scout"]:
+                machine.wait_for_unit(svc + ".service")
+            # Each door writes its socket into the shared socketDir.
+            for sock in ["keeperd", "netd", "scout-netd", "scoutd"]:
+                machine.wait_until_succeeds(
+                    f"test -S /run/claude-box/doors/{sock}.sock", timeout=120
+                )
+          '';
+        };
     in
     {
       packages = forEach (system:
@@ -675,48 +703,66 @@
       apps.aarch64-darwin.setup = {
         type = "app";
         program = "${self.packages.aarch64-darwin.setup}/bin/claude-box-setup";
+        meta.description = "One-call local bringup: prereqs → podman machine → image → doors";
       };
 
       # `nix run .` / `.#claude-box` → the CLI (matches the package default).
       apps.aarch64-darwin.default = {
         type = "app";
         program = "${self.packages.aarch64-darwin.claude-box}/bin/claude-box";
+        meta.description = "Run the claude-box launcher CLI";
       };
       apps.aarch64-darwin.claude-box = {
         type = "app";
         program = "${self.packages.aarch64-darwin.claude-box}/bin/claude-box";
+        meta.description = "Run the claude-box launcher CLI";
       };
 
       # `nix run .#doors-serve` → all door daemons on TCP (foreground).
       apps.aarch64-darwin.doors-serve = {
         type = "app";
         program = "${self.packages.aarch64-darwin.doors-serve}/bin/doors-serve";
+        meta.description = "Run keeperd/netd/scoutd on TCP (foreground; macOS dev mode)";
       };
 
       # `nix run .#sync-guest-room` → regenerate ./guest-room/ from the pinned input.
       apps.aarch64-darwin.sync-guest-room = {
         type = "app";
         program = "${self.packages.aarch64-darwin.sync-guest-room}/bin/sync-guest-room";
+        meta.description = "Sync ./guest-room/ from the pinned guest-room input";
       };
 
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
+        meta.description = "Emit the image's provenance statement (SLSA / OCAP)";
       };
 
       apps.aarch64-darwin.keeperd = {
         type = "app";
         program = "${self.packages.aarch64-darwin.keeperd}/bin/keeperd";
+        meta.description = "Run the keeperd git-signing daemon";
       };
 
       apps.aarch64-darwin.netd = {
         type = "app";
         program = "${self.packages.aarch64-darwin.netd}/bin/netd";
+        meta.description = "Run the netd egress-allowlist daemon";
       };
 
       apps.aarch64-darwin.scoutd = {
         type = "app";
         program = "${self.packages.aarch64-darwin.scoutd}/bin/scoutd";
+        meta.description = "Run the scoutd external-read daemon";
+      };
+
+      # Verify the flake + the NixOS doors module end to end (flake check, module
+      # eval, door image builds, and — on Linux — the VM boot test). Also runnable
+      # directly as ./scripts/verify.sh.
+      apps.aarch64-darwin.verify = {
+        type = "app";
+        program = "${(pkgsFor "aarch64-darwin").writeShellScriptBin "verify" (builtins.readFile ./scripts/verify.sh)}/bin/verify";
+        meta.description = "Verify the flake + the NixOS doors module";
       };
 
       # Option A builder (prx-9yp), prepared so we can build LATER.
@@ -739,51 +785,27 @@
           type = "app";
           # mainProgram is `create-builder` (not `linux-builder`); getExe tracks it.
           program = nixpkgs.lib.getExe pkgs.darwin.linux-builder;
+          meta.description = "Boot the pinned aarch64-linux builder VM (see BUILD.md)";
         };
 
       # ── Checks (nix flake check) ────────────────────────────────────────────────
-      # Validates the flake: type checking + tests. Run with:
-      #   nix flake check
-      checks.aarch64-darwin =
+      # darwin: the guest-room mirror must match the pinned input (hermetic, no
+      # network). The doors module boots in a NixOS VM (Linux only — evaluates on
+      # darwin, builds on a Linux+KVM host / CI). bun test + tsc run in CI
+      # (.github/workflows/ci.yml), not as hermetic nix checks — they need npm,
+      # which the nix sandbox blocks.
+      checks.aarch64-darwin.guest-room-mirror =
         let pkgs = pkgsFor "aarch64-darwin";
-        in {
-          # The ./guest-room/ mirror must equal the PINNED input — no hand-edits,
-          # no silent drift. Fails the flake if they differ; fix with
-          # `nix run .#sync-guest-room`. This is what makes the public repo the
-          # single source of truth rather than just a copy we hope stays in sync.
-          guest-room-mirror = pkgs.runCommand "guest-room-mirror" { } ''
-            for f in mod.ts protocol.ts daemon.ts; do
-              if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
-                echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
-                exit 1
-              fi
-            done
-            touch $out
-          '';
-
-          # TypeScript type checking (bunx tsc --noEmit)
-          typecheck = pkgs.runCommand "typecheck" {
-            nativeBuildInputs = [ pkgs.bun ];
-            src = ./.;
-          } ''
-            cd $src
-            bun x tsc --noEmit
-            touch $out
-          '';
-
-          # Unit tests (bun test)
-          test = pkgs.runCommand "test" {
-            nativeBuildInputs = [ pkgs.bun pkgs.git ];
-            src = ./.;
-          } ''
-            cd $src
-            # Git needs a minimal config for tests that use git
-            export HOME=$(mktemp -d)
-            git config --global user.email "test@test.com"
-            git config --global user.name "Test"
-            bun test
-            touch $out
-          '';
-        };
+        in pkgs.runCommand "guest-room-mirror" { } ''
+          for f in mod.ts protocol.ts daemon.ts; do
+            if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
+              echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
+              exit 1
+            fi
+          done
+          touch $out
+        '';
+      checks.x86_64-linux.doors = doorsTest "x86_64-linux";
+      checks.aarch64-linux.doors = doorsTest "aarch64-linux";
     };
 }

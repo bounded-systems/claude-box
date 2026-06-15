@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.1.0...claude-box-v0.1.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* **ci:** pass release version from version.txt and rename GHCR images to room/doors ([#81](https://github.com/bounded-systems/claude-box/issues/81)) ([968d957](https://github.com/bounded-systems/claude-box/commit/968d957d1773ee4a5f2b892131697081d13c1073))
+
 ## [0.1.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.1.0...claude-box-v0.1.0) (2026-06-15)
 
 

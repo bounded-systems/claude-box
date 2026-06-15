@@ -95,3 +95,28 @@ Place a GitHub token at `~/.claude-box/scout_github_token` for private repo acce
 
 Its ocap acceptance test (`tests/ocap.test.ts`) stays `test.todo` until the pod lands.
 Pairs with NETD.md (egress) and REPOD.md (local repo).
+
+## scoutd's own egress — also a door (in progress)
+
+The box reads via scout without a NIC — but **scoutd itself** still holds a raw
+NIC to reach GitHub. The end state is **only netd (or netd instances) hold a
+NIC**: scoutd runs `--network=none` and egress is *forced* through netd, so the
+read door is brokered end to end.
+
+**Step 1 (plumbing only — NOT a boundary change):** scoutd is egress-proxy
+*capable* — set `SCOUTD_PROXY` to an HTTP proxy (a netd door) and every outbound
+fetch routes through it; unset = direct. But scoutd **still has its NIC**, so the
+proxy is opt-in *cooperation*, not interposition — it moves no security boundary.
+The in-process allowlist is **unchanged: still scoutd's sole network control**
+(not yet defense-in-depth). This step only makes scoutd *ready* to be wired.
+
+**Step 2 (the actual boundary move, TODO):** run scoutd `--network=none` (no NIC,
+so egress is *forced* through netd — interposition, not cooperation), point
+`SCOUTD_PROXY` at a netd allowing the GitHub read hosts (`api.github.com`,
+`codeload.github.com`, `objects.githubusercontent.com`, …), and give scoutd's
+container the loopback→netd.sock relay the box uses. **Once netd is the boundary,
+make it the source of truth**: the in-process allowlist becomes the *same policy
+in two places* (drift risk, not depth) and should be removed or demoted to a
+coarse guard. Open: a **dedicated netd instance** for scout's read allowlist vs.
+widening the box's netd (the dedicated instance keeps box egress = Anthropic and
+scout egress = GitHub separate). See NETD.md.

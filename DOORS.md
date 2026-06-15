@@ -5,8 +5,9 @@
 > Lifetime = demand, bounded by the grant. Revoke = delete the grant. The egress
 > proxy **injects credentials** so the box holds **no secrets** and makes **naked
 > requests**. This doc is the unifying model; [NETD.md](NETD.md),
-> [KEEPERD.md](KEEPERD.md), [SCOUT.md](SCOUT.md) are instances of it, and
-> [POD.md](POD.md) is where doors live (one box = one pod of doors).
+> [KEEPERD.md](KEEPERD.md), [SCOUT.md](SCOUT.md), [AUTHD.md](AUTHD.md) are
+> instances of it, and [POD.md](POD.md) is where doors live (one box = one pod of
+> doors).
 
 ## What a door is
 

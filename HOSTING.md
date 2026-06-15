@@ -147,13 +147,20 @@ by digest — no GHCR pull), and applies the same hardening as the quadlet units
 `/run/claude-box/doors`, mounted into each door) and `keysDir` (keeperd's
 signing key).
 
-> **Verify on first `nixos-rebuild`** (this module was written without a NixOS
-> host to test on): the load-bearing detail is **socket ownership** — the doors
-> run as uid 1000 in rootful podman and write sockets into `socketDir`, and the
-> user who launches the box must be able to read them. If the box can't reach a
-> door, check `socketDir` ownership/perms (it is created `0750` owned by uid
-> 1000) and the container's userns mapping. Treat it as a strong starting point,
-> not a turnkey deployment.
+**Verify it** with the in-repo runner (no hand-written `nixos-rebuild` snippet):
+
+```sh
+nix run .#verify        # flake check → module eval → build door images → VM boot test
+# or just the boot test (Linux + KVM host):
+nix build .#checks.x86_64-linux.doors
+```
+
+The boot test is a `nixosTest` ([`flake.nix`](./flake.nix) `doorsTest`) that
+enables the doors in a VM and asserts keeperd/netd/scoutd start and their sockets
+appear. The one thing to watch on a real host is **socket ownership** — the doors
+run as uid 1000 in rootful podman and write into `socketDir`, and the user that
+launches the box must be able to read them. If a door is unreachable, check
+`socketDir` perms (created `0750`, uid 1000) and the container userns mapping.
 
 ## Run it headless
 

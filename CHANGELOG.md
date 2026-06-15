@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.1.1...claude-box-v0.2.0) (2026-06-15)
+
+
+### Features
+
+* **nixos:** run the door daemons via a NixOS module ([#83](https://github.com/bounded-systems/claude-box/issues/83)) ([811414b](https://github.com/bounded-systems/claude-box/commit/811414b0c913986d15c2715eae6f6521d9c73e83))
+
 ## [0.1.1](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.1.0...claude-box-v0.1.1) (2026-06-15)
 
 

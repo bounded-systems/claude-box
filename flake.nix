@@ -729,6 +729,7 @@
       apps.aarch64-darwin.sync-guest-room = {
         type = "app";
         program = "${self.packages.aarch64-darwin.sync-guest-room}/bin/sync-guest-room";
+        meta.description = "Sync ./guest-room/ from the pinned guest-room input";
       };
 
       apps.aarch64-darwin.provenance = {

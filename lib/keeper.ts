@@ -198,7 +198,7 @@ async function request<T>(method: string, params: Record<string, unknown> = {}):
 
 // ── Path translation ──────────────────────────────────────────────────────────
 // The box sees the repo at /work, but keeperd runs on the host where the repo
-// is at a different path (e.g., /Users/bobby/claude-box). CLAUDE_BOX_HOST_REPO
+// is at a different path (e.g., the host worktree root). CLAUDE_BOX_HOST_REPO
 // tells us the host path so we can translate /work → the actual host path.
 
 /**

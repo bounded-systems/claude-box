@@ -34,6 +34,16 @@ describe("concierged register/resolve", () => {
     expect(resp.error?.code).toBe("CAPABILITY_UNAVAILABLE");
   });
 
+  test("PHASE 1: resolve carries an unsigned binding (sig null) — not a boundary yet", async () => {
+    await rpc("register", { capability: "scout", door: "/run/scoutd.sock" });
+    const resp = await rpc("resolve", { capability: "scout", audience: "box-42" });
+    const binding = (resp.result as { binding: { audience: string; exp: number; nonce: string; sig: null } }).binding;
+    expect(binding.sig).toBeNull(); // prx signs in Phase 2; until then nothing verifies
+    expect(binding.audience).toBe("box-42");
+    expect(typeof binding.exp).toBe("number");
+    expect(typeof binding.nonce).toBe("string");
+  });
+
   test("resolve attenuates by the caller's want, never wider than the ceiling", async () => {
     await rpc("register", { capability: "scout", door: "/run/scoutd.sock", caveats: ["host=github.com"] });
     const resp = await rpc("resolve", { capability: "scout", want: ["mode=readonly"] });

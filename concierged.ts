@@ -13,6 +13,14 @@
  * the guest-room engine (resolveProvider); this daemon owns the mutable
  * registry, the clock, and policy ordering. See CONCIERGE.md.
  *
+ * ⚠️ PHASE 1 — PLUMBING, NOT A BOUNDARY (CONCIERGE.md §9).
+ * A door determines AVAILABILITY, not authority. The boundary is the serving
+ * room verifying a SIGNED grant (audience/exp/nonce-bound) before honoring it —
+ * and signing lives in prx, which is not wired yet. So in Phase 1: `resolve`
+ * returns the binding fields but the signature is STUBBED and nothing verifies
+ * it. Treat introduction here as routing/plumbing — do NOT claim non-bypassable
+ * introduction until Phase 2 wires prx's signer + the verify step.
+ *
  * Usage:
  *   concierged serve                     # foreground, default socket
  *   concierged serve --socket /path.sock # custom socket path
@@ -52,6 +60,10 @@ const VERSION = "0.1.0";
  *  capability becomes unresolvable — fail closed, a dead room is undiscoverable. */
 const DEFAULT_LEASE_SEC = 30;
 const MAX_LEASE_SEC = 300;
+
+/** How long an issued grant's binding is valid (the `exp` a Phase-2 signature
+ *  covers). Short: a grant is introduced just-in-time, not hoarded. */
+const GRANT_TTL_SEC = 60;
 
 // ── Registry (the mutable state the engine's pure resolve runs over) ──────────
 
@@ -129,10 +141,16 @@ function handleRegister(params: Record<string, unknown>): unknown {
  * A consumer asks to be introduced to a capability. Returns the first LIVE
  * provider's door, attenuated by the caller's requested narrowing (`want`),
  * never wider than the provider's ceiling. Fail closed: unknown/dead → error.
+ *
+ * The response carries a `binding` (audience/exp/nonce) — the envelope a Phase-2
+ * signature will cover. PHASE 1: `sig` is null and NOTHING verifies it, so the
+ * grant is unauthenticated routing data, not a capability the serving room can
+ * trust yet (CONCIERGE.md §9). prx wires the signer + verify in Phase 2.
  */
 function handleResolve(params: Record<string, unknown>): unknown {
   const capability = params.capability as string;
   const want = (params.want as string[]) ?? [];
+  const audience = (params.audience as string) ?? null; // who the grant is for (caller); bound + signed in Phase 2
   if (!capability) {
     throw { code: "INVALID_PARAMS", message: "capability required" };
   }
@@ -145,7 +163,12 @@ function handleResolve(params: Record<string, unknown>): unknown {
   }
 
   log("ALLOW", `resolve ${capability}${want.length ? ` want[${want.join("; ")}]` : ""} → ${(grant.guest as { path: string }).path}`);
-  return { door: grant };
+  return {
+    door: grant,
+    // The to-be-signed envelope. Phase 1: sig === null (prx signs in Phase 2),
+    // and no party verifies — so this is NOT a non-bypassable boundary yet.
+    binding: { audience, exp: now() + GRANT_TTL_SEC * 1000, nonce: crypto.randomUUID(), sig: null },
+  };
 }
 
 /** Discovery: the capabilities currently served (one row per live capability). */

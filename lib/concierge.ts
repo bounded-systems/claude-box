@@ -6,6 +6,11 @@
  * Providers `register` what they serve; consumers `resolve` a capability and get
  * back an attenuated DoorGrant they then `call()` peer-to-peer.
  *
+ * ⚠️ PHASE 1 — PLUMBING, NOT A BOUNDARY (CONCIERGE.md §9). The resolved grant is
+ * routing data: a door means it's reachable, not that you're authorized. The
+ * boundary is the serving room verifying a SIGNED grant (prx, Phase 2) — not yet
+ * wired. Don't treat a Phase-1 resolve as a non-bypassable capability.
+ *
  *   import { resolve } from "./lib/concierge";
  *   import { call } from "./guest-room/protocol.ts";
  *   const scout = await resolve("scout", ["host=github.com"]);

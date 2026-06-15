@@ -1,0 +1,12 @@
+{
+  "name": "doors-capnp-spike",
+  "private": true,
+  "type": "module",
+  "description": "Isolated spike: can capnp-es generate + carry capabilities (level-3 RPC) in Bun? NOT part of root bun test.",
+  "dependencies": {
+    "capnp-es": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

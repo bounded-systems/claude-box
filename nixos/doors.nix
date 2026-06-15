@@ -92,17 +92,28 @@ let
       extraOptions = hardening ++ [ "--network=none" "--pids-limit=128" "--memory=512m" ];
       volumes = [ "${cfg.socketDir}:/run/doors" ];
     };
+    concierge = {
+      imageFile = flakePkgs.concierged-image;
+      image = "concierged:dev";
+      environment = { };
+      # The capability concierge (CONCIERGE.md): an INTRODUCER that hands back
+      # attenuated door references. Pure routing — it never connects to a
+      # provider, so it holds NO NIC (--network=none) and just writes its socket.
+      dependsOn = [ ];
+      extraOptions = hardening ++ [ "--network=none" "--pids-limit=128" "--memory=256m" ];
+      volumes = [ "${cfg.socketDir}:/run/doors" ];
+    };
   };
 
   enabledDoors = lib.filterAttrs (name: _: lib.elem name cfg.doors) doorDefs;
 in
 {
   options.services.claude-box.doors = {
-    enable = lib.mkEnableOption "the claude-box door daemons (keeperd / netd instances / scoutd)";
+    enable = lib.mkEnableOption "the claude-box door daemons (keeperd / netd instances / scoutd / concierged)";
 
     doors = lib.mkOption {
-      type = lib.types.listOf (lib.types.enum [ "keeper" "claude-netd" "scout" "scout-netd" ]);
-      default = [ "keeper" "claude-netd" "scout" "scout-netd" ];
+      type = lib.types.listOf (lib.types.enum [ "keeper" "claude-netd" "scout" "scout-netd" "concierge" ]);
+      default = [ "keeper" "claude-netd" "scout" "scout-netd" "concierge" ];
       description = ''
         Which doors to run. `scout` requires `scout-netd` (its egress door).
         Defaults to the full set.

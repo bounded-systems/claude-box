@@ -185,6 +185,58 @@ export function attenuate(grant: DoorGrant, caveats: string[]): DoorGrant {
   return { ...grant, caveats: [...(grant.caveats ?? []), ...add] };
 }
 
+// ── Enforcement ──────────────────────────────────────────────────────────────
+// Attenuation is only real if the caveats a door carries are actually checked
+// against each request — otherwise the rulebook says "RESTRICTED to: …" while
+// nothing stops a wider call (granted ≠ enforced). This is the enforcement side
+// of `attenuate`, and it keeps the same separation of concerns: the engine owns
+// the COMBINATOR (conjunction across caveats + fail-closed on any caveat it
+// cannot get a verdict for), and the broker behind the door owns the GRAMMAR
+// (one verifier per caveat key it understands). The engine never reads a
+// caveat's value, so it stays guest-agnostic; the verifiers carry no engine
+// state, so policy stays with the broker that holds the authority.
+
+/** Interprets ONE caveat's value against a request context, returning true iff
+ *  the caveat is satisfied. Supplied by the broker (the catalog owner): it owns
+ *  its value grammar (e.g. a comma-separated OR-set). The engine never inspects
+ *  `value`. */
+export type CaveatVerifier<Ctx> = (value: string, ctx: Ctx) => boolean;
+
+/** The verifier set a broker registers — one per caveat key it understands. */
+export type CaveatVerifiers<Ctx> = Record<string, CaveatVerifier<Ctx>>;
+
+/** The verdict: allowed, or denied with the offending caveat and why. */
+export type CaveatVerdict =
+  | { ok: true }
+  | { ok: false; caveat: string; reason: "unsatisfied" | "uninterpretable" };
+
+/** Enforce a door's caveats against a request context. Fail-closed by
+ *  construction — the OCAP guarantee that makes the rendered rulebook honest:
+ *    - no caveats              → allowed (the door is unattenuated; the door's
+ *                                mere reachability is the coarse capability)
+ *    - a caveat won't parse    → DENIED ("uninterpretable")
+ *    - no verifier for its key → DENIED ("uninterpretable") — you must not allow
+ *                                what you cannot interpret
+ *    - a verifier returns false → DENIED ("unsatisfied")
+ *    - every caveat holds       → allowed
+ *  Conjunction across caveats mirrors `attenuate`'s append-only rule: each added
+ *  caveat can only narrow, so authority is monotonically non-increasing. The
+ *  first failing caveat short-circuits and is the one reported. */
+export function checkCaveats<Ctx>(
+  grant: DoorGrant,
+  ctx: Ctx,
+  verifiers: CaveatVerifiers<Ctx>,
+): CaveatVerdict {
+  for (const raw of grant.caveats ?? []) {
+    const parsed = parseCaveat(raw);
+    if (!parsed) return { ok: false, caveat: raw, reason: "uninterpretable" };
+    const verify = verifiers[parsed.key];
+    if (!verify) return { ok: false, caveat: raw, reason: "uninterpretable" };
+    if (!verify(parsed.value, ctx)) return { ok: false, caveat: raw, reason: "unsatisfied" };
+  }
+  return { ok: true };
+}
+
 /** Expand a named room to its door grants. Throws (fail closed, not a silent
  *  empty launch) if the room is unknown — a typo must never widen authority. */
 export function expandRoom(

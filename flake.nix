@@ -14,7 +14,15 @@
   # the version decision — re-pin here, then `nix flake update` to re-lock.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9f11f828c213641c2369a9f1fa31fe31557e3156";
 
-  outputs = { self, nixpkgs }:
+  # The room+door capability engine, extracted to its own public repo and
+  # consumed here as a PINNED input (flake.lock). It is the single source of
+  # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
+  # pin, kept honest by the `guest-room-mirror` check below. Bump with
+  # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
+  inputs.guest-room.url = "github:bounded-systems/guest-room/8366e6a4ec38e06c1bc375751dd32cfe0557acee";
+  inputs.guest-room.flake = false;
+
+  outputs = { self, nixpkgs, guest-room }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -62,9 +70,10 @@
       configDir = "${xdgConfigHome}/claude"; # = $XDG_CONFIG_HOME/claude; volume mount point
 
       # NixOS VM test for the doors module: boot a VM with the doors enabled and
-      # assert the three daemons start and write their sockets. This is the
+      # assert every door daemon starts and writes its socket. This is the
       # `checks.<linux>.doors` boot test (the durable form of HOSTING.md's manual
-      # nixos-rebuild snippet). Linux-only — needs KVM/qemu to run.
+      # nixos-rebuild snippet). Linux-only — needs KVM/qemu to run. Names track
+      # the reason-named instances (keeper, claude-netd, scout-netd, scout).
       doorsTest = system:
         let pkgs = pkgsFor system;
         in pkgs.testers.runNixOSTest {
@@ -76,10 +85,12 @@
           };
           testScript = ''
             machine.wait_for_unit("multi-user.target")
-            for svc in ["podman-keeperd", "podman-netd", "podman-scoutd"]:
+            # oci-containers names units podman-<container>; containers are the
+            # reason-named doors (claude-netd serves the box's netd.sock).
+            for svc in ["podman-keeper", "podman-claude-netd", "podman-scout-netd", "podman-scout"]:
                 machine.wait_for_unit(svc + ".service")
             # Each door writes its socket into the shared socketDir.
-            for sock in ["keeperd", "netd", "scoutd"]:
+            for sock in ["keeperd", "netd", "scout-netd", "scoutd"]:
                 machine.wait_until_succeeds(
                     f"test -S /run/claude-box/doors/{sock}.sock", timeout=120
                 )
@@ -352,7 +363,11 @@
               '';
 
               netdEntrypoint = pkgs.writeShellScript "netd-entrypoint" ''
-                exec bun /app/netd/netd.ts serve --socket /run/doors/netd.sock "$@"
+                # NETD_SOCK lets several reason-named instances coexist on one
+                # doors volume (e.g. claude-netd.sock, scout-netd.sock); default
+                # keeps the single-instance path. NETD_ALLOW sets the reason's
+                # allowlist. netd is the MECHANISM; the instance carries the reason.
+                exec bun /app/netd/netd.ts serve --socket "''${NETD_SOCK:-/run/doors/netd.sock}" "$@"
               '';
             in
             pkgs.dockerTools.buildLayeredImage {
@@ -404,11 +419,14 @@
           #   podman run -v doors:/run/doors scoutd
           scoutd-image =
             let
-              # Minimal toolchain for scoutd: bun + coreutils + cacert
+              # Minimal toolchain for scoutd: bun + coreutils + cacert + socat
+              # (socat bridges loopback-TCP → the scout-netd door socket so
+              # scoutd can egress through netd while holding no NIC of its own).
               scoutdTools = with pkgs; [
                 bun
                 cacert
                 coreutils
+                socat
                 bashInteractive
               ];
 
@@ -428,6 +446,15 @@
               '';
 
               scoutdEntrypoint = pkgs.writeShellScript "scoutd-entrypoint" ''
+                # If a scout-netd door is mounted, bridge loopback → its socket and
+                # force scoutd's egress through it (SCOUTD_PROXY). With scoutd run
+                # --network=none, this is the ONLY egress path: interposition, not
+                # cooperation. No door ⇒ no relay ⇒ direct egress (dev/TCP mode).
+                if [ -S /run/doors/scout-netd.sock ]; then
+                  ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 \
+                    UNIX-CONNECT:/run/doors/scout-netd.sock &
+                  export SCOUTD_PROXY="http://127.0.0.1:3128"
+                fi
                 exec bun /app/scoutd.ts serve --socket /run/doors/scoutd.sock "$@"
               '';
             in
@@ -576,6 +603,24 @@
                 exec ${self.packages.aarch64-darwin.claude-box}/bin/claude-box doors serve "$@"
               '';
 
+            # sync-guest-room — regenerate ./guest-room/ from the PINNED input.
+            # The directory is a generated mirror (see guest-room/README.md); this
+            # is the only sanctioned way to change it. Run from the repo root after
+            # `nix flake update guest-room`, then commit flake.lock + guest-room/.
+            sync-guest-room =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-guest-room" ''
+                set -euo pipefail
+                if [ ! -d "$PWD/guest-room" ]; then
+                  echo "run from the claude-box repo root (no ./guest-room here)" >&2
+                  exit 1
+                fi
+                for f in mod.ts protocol.ts daemon.ts; do
+                  install -m 644 ${guest-room}/$f "$PWD/guest-room/$f"
+                  echo "synced guest-room/$f"
+                done
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -680,6 +725,12 @@
         meta.description = "Run keeperd/netd/scoutd on TCP (foreground; macOS dev mode)";
       };
 
+      # `nix run .#sync-guest-room` → regenerate ./guest-room/ from the pinned input.
+      apps.aarch64-darwin.sync-guest-room = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-guest-room}/bin/sync-guest-room";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -737,10 +788,22 @@
         };
 
       # ── Checks (nix flake check) ────────────────────────────────────────────────
-      # The doors module boots in a NixOS VM and asserts the daemons + sockets
-      # come up (Linux only — it evaluates on darwin, builds on a Linux+KVM host
-      # or in CI). `bun test` is the gate, run in CI (.github/workflows/ci.yml),
-      # not as a hermetic nix check: bun/tsc want npm, which the sandbox blocks.
+      # darwin: the guest-room mirror must match the pinned input (hermetic, no
+      # network). The doors module boots in a NixOS VM (Linux only — evaluates on
+      # darwin, builds on a Linux+KVM host / CI). bun test + tsc run in CI
+      # (.github/workflows/ci.yml), not as hermetic nix checks — they need npm,
+      # which the nix sandbox blocks.
+      checks.aarch64-darwin.guest-room-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "guest-room-mirror" { } ''
+          for f in mod.ts protocol.ts daemon.ts; do
+            if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
+              echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
+              exit 1
+            fi
+          done
+          touch $out
+        '';
       checks.x86_64-linux.doors = doorsTest "x86_64-linux";
       checks.aarch64-linux.doors = doorsTest "aarch64-linux";
     };

@@ -1,0 +1,47 @@
+# scout-netd.container — scoutd's egress door (a netd instance, by reason)
+#
+# netd is the MECHANISM (allowlist proxy); this instance's REASON is "scoutd
+# reads GitHub", so it carries the GitHub (+ npm/pypi) read allowlist and writes
+# its own socket. scoutd (--network=none) egresses only through this door; the
+# box's own egress is the separate `netd`/claude-netd instance (Anthropic).
+#
+# Install:
+#   systemctl --user enable --now scout-netd
+#
+# Logs:
+#   journalctl --user -u scout-netd -f
+
+[Unit]
+Description=scout-netd — GitHub-read egress door for scoutd
+After=claude-doors-volume.service
+
+[Container]
+Image=localhost/netd:dev
+ContainerName=scout-netd
+
+# Own socket (NETD_SOCK) so it coexists with the box's netd on one doors volume.
+Environment=NETD_SOCK=/run/doors/scout-netd.sock
+# The reason's allowlist: GitHub API + tarballs + raw/objects, plus npm/pypi.
+Environment=NETD_ALLOW=api.github.com,codeload.github.com,objects.githubusercontent.com,github.com,.github.com,registry.npmjs.org,pypi.org,files.pythonhosted.org
+
+Volume=%h/.claude-box/run:/run/doors
+
+# scout-netd IS an egress door — it needs network (the only NIC scout reaches).
+
+# Security hardening
+NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=128
+Memory=256m
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

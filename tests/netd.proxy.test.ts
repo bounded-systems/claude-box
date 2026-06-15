@@ -28,7 +28,10 @@ let listener: { port: number; stop: (closeActive?: boolean) => void } | undefine
 
 beforeAll(() => {
   // Ephemeral port; handlers enforce the module's effective allowlist.
-  listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: handlers as never }) as never;
+  listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: handlers as never }) as {
+    port: number;
+    stop: (closeActive?: boolean) => void;
+  };
   proxyPort = listener!.port;
 });
 

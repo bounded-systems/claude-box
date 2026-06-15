@@ -95,3 +95,35 @@ Place a GitHub token at `~/.claude-box/scout_github_token` for private repo acce
 
 Its ocap acceptance test (`tests/ocap.test.ts`) stays `test.todo` until the pod lands.
 Pairs with NETD.md (egress) and REPOD.md (local repo).
+
+## scoutd's own egress — also a door (in progress)
+
+The box reads via scout without a NIC — but **scoutd itself** still holds a raw
+NIC to reach GitHub. The end state is **only netd (or netd instances) hold a
+NIC**: scoutd runs `--network=none` and egress is *forced* through netd, so the
+read door is brokered end to end.
+
+**Step 1 (plumbing only — NOT a boundary change):** scoutd is egress-proxy
+*capable* — set `SCOUTD_PROXY` to an HTTP proxy (a netd door) and every outbound
+fetch routes through it; unset = direct. But scoutd **still has its NIC**, so the
+proxy is opt-in *cooperation*, not interposition — it moves no security boundary.
+The in-process allowlist is **unchanged: still scoutd's sole network control**
+(not yet defense-in-depth). This step only makes scoutd *ready* to be wired.
+
+**Step 2 (the boundary move — implemented in the images + NixOS module):**
+egress is reasoned, never generic. `netd` is the *mechanism*; each instance is
+named for its reason and carries that reason's allowlist:
+- **`claude-netd`** — the box reaches Anthropic (serves the box's `netd.sock`
+  door, Anthropic allowlist).
+- **`scout-netd`** — scoutd reads GitHub (its own `scout-netd.sock`, GitHub +
+  npm/pypi allowlist).
+
+scoutd runs **`--network=none`** (no NIC); its entrypoint bridges loopback →
+`scout-netd.sock` and sets `SCOUTD_PROXY`, so egress is *forced* through
+scout-netd — interposition, not cooperation. **netd is now the source of truth**
+for the allowlist: scoutd's in-process list short-circuits to allow-all when
+`SCOUTD_PROXY` is set (no duplicated policy at the boundary) and guards only the
+direct/dev path. Mechanism: `NETD_SOCK` lets netd instances coexist on one doors
+volume (`flake.nix`); the dedicated instances + `--network=none` are wired in
+[`nixos/doors.nix`](./nixos/doors.nix). Quadlet parity is a follow-up; verify on
+a real host that scoutd reaches GitHub through scout-netd. See NETD.md.

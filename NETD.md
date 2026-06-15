@@ -121,6 +121,21 @@ that makes claude-box safe on the *write* side (keeperd: keys never in the box)
 it mirrors on the *reach* side — the box can only ask, and a daemon that holds
 the policy answers.
 
+## netd is a mechanism; instances carry the reason
+
+Egress is never generic — it's egress *for a reason*. `netd` is the **mechanism**
+(an allowlist proxy); each deployed **instance** is named for its reason and
+carries that reason's allowlist, so there's no bare "net" grant:
+
+| Instance | Reason | Allowlist | Socket |
+|---|---|---|---|
+| **claude-netd** | the box reaches Anthropic (inference) | `*.anthropic.com` | `/run/doors/netd.sock` (the box's door) |
+| **scout-netd** | scoutd reads GitHub | GitHub + npm/pypi | `/run/doors/scout-netd.sock` |
+
+`NETD_SOCK` lets instances coexist on one doors volume; `NETD_ALLOW` sets each
+reason's allowlist. Neither the box nor scoutd holds a NIC — both reach the
+network only through their netd instance (`nixos/doors.nix`). See SCOUT.md.
+
 ## Status
 
 Contract only. The launcher already forwards the door and sets the proxy env;

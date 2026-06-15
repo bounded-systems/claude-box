@@ -11,23 +11,27 @@
 
 [Unit]
 Description=scoutd — external read daemon for claude-box
-After=claude-doors-volume.service
+# scoutd egresses through scout-netd (its entrypoint relays loopback→
+# scout-netd.sock), so that door must be up first.
+After=claude-doors-volume.service scout-netd.service
+Requires=scout-netd.service
 
 [Container]
 Image=localhost/scoutd:dev
 ContainerName=scoutd
 
-# Socket directory — mount host's ~/.claude-box/run so sockets are accessible
-# from both the host CLI and containers. Adjust path for your home directory.
-Volume=/Users/bobby/.claude-box/run:/run/doors
+# Socket directory — mount the host's ~/.claude-box/run so sockets are accessible
+# from both the host CLI and containers. %h expands to the running user's home
+# (systemd specifier), so this stays host-agnostic — no per-machine editing.
+Volume=%h/.claude-box/run:/run/doors
 
 # Token/credential volume (scoutd-only)
 # Volume=claude-scout-creds.volume:/creds:ro
 
-# scoutd needs network (it fetches external content)
-# Default: uses podman's default network
-# Uncomment for explicit control:
-# Network=slirp4netns
+# scoutd holds NO NIC. Its egress is forced through the scout-netd door: the
+# image entrypoint bridges loopback→/run/doors/scout-netd.sock and sets
+# SCOUTD_PROXY. netd is the egress chokepoint — interposition, not cooperation.
+Network=none
 
 # Security hardening
 NoNewPrivileges=true

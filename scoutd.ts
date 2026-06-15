@@ -60,8 +60,12 @@ const ALLOW = (process.env.SCOUTD_ALLOW?.split(",").map((s) => s.trim()).filter(
   ? process.env.SCOUTD_ALLOW!.split(",").map((s) => s.trim()).filter(Boolean)
   : DEFAULT_ALLOW;
 
-/** Check if a host is allowed. Supports exact match and .suffix patterns. */
+/** Check if a host is allowed. Supports exact match and .suffix patterns.
+ *  When egress is forced through netd (SCOUTD_PROXY set), netd is the SOURCE OF
+ *  TRUTH for the allowlist — we don't enforce a second, drift-prone copy here.
+ *  This in-process list then guards only the direct/dev path (no proxy). */
 function allowed(host: string): boolean {
+  if (EGRESS_PROXY) return true; // netd is the boundary; it enforces the allowlist
   const h = host.toLowerCase();
   return ALLOW.some((a) => (a.startsWith(".") ? h === a.slice(1) || h.endsWith(a) : h === a));
 }
@@ -115,6 +119,22 @@ function parseGitHubRepo(input: string): { owner: string; repo: string } | null 
   return null;
 }
 
+// ── Egress ───────────────────────────────────────────────────────────────────
+// scoutd's only outward path. When SCOUTD_PROXY is set (an HTTP proxy URL — a
+// netd door), EVERY outbound fetch is routed through it, so scoutd can run with
+// NO network of its own (`--network=none`) and netd stays the single egress
+// chokepoint (CAPABILITIES.md "network is a door, not a NIC"). Unset ⇒ direct
+// egress (dev / TCP mode). The in-process allowlist below stays either way, as
+// defense in depth.
+const EGRESS_PROXY = process.env.SCOUTD_PROXY || undefined;
+
+/** fetch(), routed through netd (SCOUTD_PROXY) when configured. */
+function egressFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const opts: RequestInit & { proxy?: string } = { ...init };
+  if (EGRESS_PROXY) opts.proxy = EGRESS_PROXY;
+  return fetch(url, opts);
+}
+
 // ── GitHub API ───────────────────────────────────────────────────────────────
 
 async function githubFetch(path: string): Promise<Response> {
@@ -126,7 +146,7 @@ async function githubFetch(path: string): Promise<Response> {
   if (githubToken) {
     headers["Authorization"] = `Bearer ${githubToken}`;
   }
-  return fetch(`https://api.github.com${path}`, { headers });
+  return egressFetch(`https://api.github.com${path}`, { headers });
 }
 
 // ── Method handlers ──────────────────────────────────────────────────────────
@@ -174,7 +194,7 @@ async function handleRepo(params: Record<string, unknown>): Promise<unknown> {
   if (!repoResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${repoResp.status}` };
   }
-  const repoData = await repoResp.json();
+  const repoData = await repoResp.json() as any;
 
   // Get the tarball URL for the ref
   const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball/${ref}`;
@@ -222,7 +242,7 @@ async function handlePr(params: Record<string, unknown>): Promise<unknown> {
   if (!prResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${prResp.status}` };
   }
-  const pr = await prResp.json();
+  const pr = await prResp.json() as any;
 
   const result: Record<string, unknown> = {
     number: pr.number,
@@ -240,7 +260,7 @@ async function handlePr(params: Record<string, unknown>): Promise<unknown> {
   };
 
   if (includeDiff) {
-    const diffResp = await fetch(pr.diff_url, {
+    const diffResp = await egressFetch(pr.diff_url, {
       headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
     });
     if (diffResp.ok) {
@@ -251,7 +271,7 @@ async function handlePr(params: Record<string, unknown>): Promise<unknown> {
   if (includeComments) {
     const commentsResp = await githubFetch(`/repos/${owner}/${repo}/pulls/${number}/comments`);
     if (commentsResp.ok) {
-      const comments = await commentsResp.json();
+      const comments = await commentsResp.json() as any;
       result.comments = comments.map((c: Record<string, unknown>) => ({
         user: (c.user as Record<string, unknown>)?.login,
         body: c.body,
@@ -293,7 +313,7 @@ async function handleIssue(params: Record<string, unknown>): Promise<unknown> {
   if (!issueResp.ok) {
     throw { code: "GITHUB_ERROR", message: `GitHub API error: ${issueResp.status}` };
   }
-  const issue = await issueResp.json();
+  const issue = await issueResp.json() as any;
 
   const result: Record<string, unknown> = {
     number: issue.number,
@@ -309,7 +329,7 @@ async function handleIssue(params: Record<string, unknown>): Promise<unknown> {
   if (includeComments) {
     const commentsResp = await githubFetch(`/repos/${owner}/${repo}/issues/${number}/comments`);
     if (commentsResp.ok) {
-      const comments = await commentsResp.json();
+      const comments = await commentsResp.json() as any;
       result.comments = comments.map((c: Record<string, unknown>) => ({
         user: (c.user as Record<string, unknown>)?.login,
         body: c.body,
@@ -348,7 +368,7 @@ async function handleFetch(params: Record<string, unknown>): Promise<unknown> {
 
   log("ALLOW", `fetch ${url}`);
 
-  const resp = await fetch(url, {
+  const resp = await egressFetch(url, {
     headers: {
       "User-Agent": "scoutd/0.1.0",
     },
@@ -414,7 +434,7 @@ async function handleDownload(params: Record<string, unknown>): Promise<unknown>
     headers["Accept"] = "application/vnd.github+json";
   }
 
-  const resp = await fetch(url, { headers, redirect: "follow" });
+  const resp = await egressFetch(url, { headers, redirect: "follow" });
 
   if (!resp.ok) {
     throw { code: "FETCH_ERROR", message: `HTTP ${resp.status}` };

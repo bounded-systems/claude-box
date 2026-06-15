@@ -622,6 +622,13 @@
           };
         };
 
+      # NixOS module: run the door daemons declaratively on a NixOS host
+      # (`services.claude-box.doors.enable = true`). See nixos/doors.nix and the
+      # "NixOS" section of HOSTING.md. The module closes over `self` so it can
+      # source the door images from this flake (pinned, no GHCR pull).
+      nixosModules.claude-box-doors = import ./nixos/doors.nix self;
+      nixosModules.default = self.nixosModules.claude-box-doors;
+
       # One-call local bringup: prereqs → podman machine → image → doors.
       apps.aarch64-darwin.setup = {
         type = "app";

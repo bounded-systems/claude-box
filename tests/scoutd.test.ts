@@ -12,9 +12,12 @@ import {
   handleStatus,
   loadToken,
   allowed,
+  scoutDoor,
+  scoutVerifiers,
   parseGitHubRepo,
   VERSION,
 } from "../scoutd.ts";
+import { checkCaveats, grantedDoorLines } from "../guest-room/mod.ts";
 
 // ── Parsing tests ────────────────────────────────────────────────────────────
 
@@ -65,6 +68,33 @@ test("allowed: not in allowlist", () => {
 test("allowed: case insensitive", () => {
   expect(allowed("GITHUB.COM")).toBe(true);
   expect(allowed("GitHub.Com")).toBe(true);
+});
+
+// ── granted == enforced (the scout door's caveat drives both surfaces) ────────
+
+test("scoutDoor carries the allowlist as a host= caveat", () => {
+  expect(scoutDoor.caveats).toHaveLength(1);
+  expect(scoutDoor.caveats![0]).toMatch(/^host=/);
+  // the same patterns allowed() checks are inside the caveat the rulebook renders
+  expect(scoutDoor.caveats![0]).toContain("github.com");
+});
+
+test("the rulebook line and enforcement are driven by the SAME caveat", () => {
+  // what the agent is TOLD (rendered rulebook):
+  const [line] = grantedDoorLines([scoutDoor]);
+  expect(line).toContain("RESTRICTED to: host=");
+  // what scoutd ENFORCES (same door, same caveat) — one source of truth:
+  expect(checkCaveats(scoutDoor, { hostname: "api.github.com" }, scoutVerifiers).ok).toBe(true);
+  const denied = checkCaveats(scoutDoor, { hostname: "evil.com" }, scoutVerifiers);
+  expect(denied.ok).toBe(false);
+  if (!denied.ok) expect(denied.caveat).toBe(scoutDoor.caveats![0]); // cites the rendered caveat
+});
+
+test("KEYSTONE: a caveat scoutd has no verifier for fails closed (denies)", () => {
+  // attenuating the scout door with an unknown key must DENY, never silently allow
+  const stricter = { ...scoutDoor, caveats: [...(scoutDoor.caveats ?? []), "mode=readonly"] };
+  const v = checkCaveats(stricter, { hostname: "github.com" }, scoutVerifiers);
+  expect(v).toEqual({ ok: false, caveat: "mode=readonly", reason: "uninterpretable" });
 });
 
 // ── Protocol tests ───────────────────────────────────────────────────────────

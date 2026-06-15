@@ -30,6 +30,15 @@ import {
   err,
 } from "./lib/runtime";
 
+// The guest-room capability engine: attenuation + its enforcement combinator.
+import {
+  attenuate,
+  checkCaveats,
+  unix,
+  type DoorGrant,
+  type CaveatVerifiers,
+} from "./guest-room/mod.ts";
+
 const log = createLogger("scoutd");
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -53,21 +62,57 @@ function defaultTokenPath(): string {
   return `${home}/.claude-box/scout_github_token`;
 }
 
-// ── Allowlist ────────────────────────────────────────────────────────────────
+// ── Egress mode ────────────────────────────────────────────────────────────
+// When SCOUTD_PROXY is set (an HTTP proxy URL — a netd door), EVERY outbound
+// fetch is routed through it (see egressFetch below), so scoutd can run with NO
+// network of its own and netd stays the single egress chokepoint. In that mode
+// netd is the allowlist SOURCE OF TRUTH; scoutd does not enforce a second,
+// drift-prone copy. Unset ⇒ direct egress (dev / TCP mode), enforced here.
+const EGRESS_PROXY = process.env.SCOUTD_PROXY || undefined;
+
+// ── Allowlist (a door caveat, enforced by the engine) ────────────────────────
 
 const ALLOW = (process.env.SCOUTD_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? [])
   .length
   ? process.env.SCOUTD_ALLOW!.split(",").map((s) => s.trim()).filter(Boolean)
   : DEFAULT_ALLOW;
 
-/** Check if a host is allowed. Supports exact match and .suffix patterns.
- *  When egress is forced through netd (SCOUTD_PROXY set), netd is the SOURCE OF
- *  TRUTH for the allowlist — we don't enforce a second, drift-prone copy here.
- *  This in-process list then guards only the direct/dev path (no proxy). */
+// The scout door's grant, carrying the allowlist as a single `host=` caveat
+// (comma = OR). This is the SAME caveat shape the rulebook renders via
+// grantedDoorLines — so what the agent is TOLD it may reach is exactly what
+// scoutd ENFORCES (granted == enforced, one source of truth). In proxy mode the
+// door carries no host caveat (netd is the boundary), so checkCaveats allows.
+const scoutDoor: DoorGrant = attenuate(
+  {
+    name: "scout",
+    host: unix("(broker)"),
+    guest: unix("/run/scoutd.sock"),
+    env: "SCOUTD_SOCK",
+    grants: "external reads via scoutd",
+    use: "Read external content through the scout door.",
+  },
+  EGRESS_PROXY ? [] : [`host=${ALLOW.join(",")}`],
+);
+
+// The broker owns the `host` grammar (the engine never reads it): comma = OR,
+// exact or leading-dot suffix, case-insensitive.
+const scoutVerifiers: CaveatVerifiers<{ hostname: string }> = {
+  host: (value, ctx) => {
+    const h = ctx.hostname.toLowerCase();
+    return value
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .some((a) => (a.startsWith(".") ? h === a.slice(1) || h.endsWith(a) : h === a));
+  },
+};
+
+/** Is `host` reachable through the scout door? Enforcement flows through the
+ *  guest-room engine combinator (checkCaveats) over the door's caveats — not a
+ *  bespoke list — so it is fail-closed and identical to what the rulebook shows.
+ *  Proxy mode: the door has no host caveat ⇒ allows (netd is the boundary). */
 function allowed(host: string): boolean {
-  if (EGRESS_PROXY) return true; // netd is the boundary; it enforces the allowlist
-  const h = host.toLowerCase();
-  return ALLOW.some((a) => (a.startsWith(".") ? h === a.slice(1) || h.endsWith(a) : h === a));
+  return checkCaveats(scoutDoor, { hostname: host }, scoutVerifiers).ok;
 }
 
 // ── GitHub Token ─────────────────────────────────────────────────────────────
@@ -120,13 +165,11 @@ function parseGitHubRepo(input: string): { owner: string; repo: string } | null 
 }
 
 // ── Egress ───────────────────────────────────────────────────────────────────
-// scoutd's only outward path. When SCOUTD_PROXY is set (an HTTP proxy URL — a
-// netd door), EVERY outbound fetch is routed through it, so scoutd can run with
-// NO network of its own (`--network=none`) and netd stays the single egress
-// chokepoint (CAPABILITIES.md "network is a door, not a NIC"). Unset ⇒ direct
-// egress (dev / TCP mode). The in-process allowlist below stays either way, as
-// defense in depth.
-const EGRESS_PROXY = process.env.SCOUTD_PROXY || undefined;
+// scoutd's only outward path. When EGRESS_PROXY is set (defined above), EVERY
+// outbound fetch is routed through it, so scoutd can run with NO network of its
+// own (`--network=none`) and netd stays the single egress chokepoint
+// (CAPABILITIES.md "network is a door, not a NIC"). Unset ⇒ direct egress
+// (dev / TCP mode), where the scout door's host caveat is enforced here.
 
 /** fetch(), routed through netd (SCOUTD_PROXY) when configured. */
 function egressFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -617,6 +660,8 @@ export {
   handleDownload,
   loadToken,
   allowed,
+  scoutDoor,
+  scoutVerifiers,
   parseGitHubRepo,
   VERSION,
 };

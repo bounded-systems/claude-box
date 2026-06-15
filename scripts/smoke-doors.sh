@@ -1,28 +1,33 @@
 #!/usr/bin/env bash
 # Smoke-test the published claude-box door images locally.
 #
-#   ./scripts/smoke-doors.sh [version]      # default: 0.3.0
+#   ./scripts/smoke-doors.sh [version]      # default: latest
 #
 # Layer 1 (any OS): each published door image boots and serves its socket.
-# Layer 2 (Linux):  scout-netd + scoutd(--network=none) on a shared socket dir,
-#                   then a REAL GitHub read through the scout door — proving
-#                   scoutd reaches GitHub with NO NIC of its own (egress forced
-#                   through scout-netd). Skipped on macOS: the podman-machine
-#                   door-wall blocks a host->socket probe, so run layer 2 on a
-#                   Linux/Pi host (or rely on CI's nixos doors VM test).
+# Layer 2 (Linux):  two live checks on a shared socket dir —
+#                   (a) scout-netd + scoutd(--network=none): a REAL GitHub read
+#                       through the scout door, proving scoutd reaches GitHub
+#                       with NO NIC of its own (egress forced through scout-netd);
+#                   (b) the concierge introducer: register a capability over the
+#                       door, then resolve it back as an attenuated grant —
+#                       proving the register/resolve wire end-to-end.
+#                   Skipped on macOS: the podman-machine door-wall blocks a
+#                   host->socket probe, so run layer 2 on a Linux/Pi host (or
+#                   rely on CI's nixos doors VM test).
 #
 # Needs: podman (logged in to ghcr.io if the packages are private), and — for
 # layer 2 — socat on the host.
 set -euo pipefail
 
 REG="ghcr.io/bounded-systems/claude-box"
-VER="${1:-0.3.0}"
-DOORS=(door-keeper door-net door-scout)
+VER="${1:-latest}"
+DOORS=(door-keeper door-net door-scout door-concierge)
 DOORS_DIR=""
 
 cleanup() {
   podman rm -f smoke-door-keeper smoke-door-net smoke-door-scout \
-    smoke-scout-netd smoke-scout >/dev/null 2>&1 || true
+    smoke-door-concierge smoke-scout-netd smoke-scout smoke-concierge \
+    >/dev/null 2>&1 || true
   [ -n "$DOORS_DIR" ] && rm -rf "$DOORS_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -80,10 +85,36 @@ resp="$(printf '%s\n' "$req" | socat -t8 - "UNIX-CONNECT:$DOORS_DIR/scoutd.sock"
 echo "  scoutd response: ${resp:-<empty>}"
 if printf '%s' "$resp" | grep -q '"defaultBranch"'; then
   echo "  ok   GitHub read succeeded through scout-netd — scoutd reached GitHub with NO NIC"
-  echo "smoke OK (layers 1 + 2)"
 else
   echo "  FAIL scout read did not return repo metadata"
   echo "  --- scoutd logs ---";     podman logs smoke-scout      2>&1 | tail -10 | sed 's/^/    /'
   echo "  --- scout-netd logs ---"; podman logs smoke-scout-netd 2>&1 | tail -10 | sed 's/^/    /'
+  exit 1
+fi
+
+echo "== Layer 2b: concierge introduction (register → resolve over the door) =="
+# The concierge needs no network — it's pure routing. Boot it on the shared dir,
+# register a capability, then resolve it back as an attenuated grant.
+podman run -d --name smoke-concierge \
+  -v "$DOORS_DIR:/run/doors:U,Z" "$REG/door-concierge:$VER" >/dev/null
+for _ in $(seq 1 30); do [ -S "$DOORS_DIR/concierged.sock" ] && break; sleep 0.5; done
+[ -S "$DOORS_DIR/concierged.sock" ] || {
+  echo "  FAIL concierged.sock never appeared"; podman logs smoke-concierge 2>&1 | tail -10; exit 1; }
+
+# A provider announces "scout" with a ceiling caveat; then a consumer resolves it.
+reg='{"id":"reg","method":"register","params":{"capability":"scout","door":"/run/scoutd.sock","env":"SCOUTD_SOCK","caveats":["host=github.com,.github.com"]}}'
+res='{"id":"res","method":"resolve","params":{"capability":"scout"}}'
+regresp="$(printf '%s\n' "$reg" | socat -t8 - "UNIX-CONNECT:$DOORS_DIR/concierged.sock" || true)"
+resresp="$(printf '%s\n' "$res" | socat -t8 - "UNIX-CONNECT:$DOORS_DIR/concierged.sock" || true)"
+echo "  register response: ${regresp:-<empty>}"
+echo "  resolve  response: ${resresp:-<empty>}"
+# The resolved grant must carry the provider's socket path and its ceiling caveat.
+if printf '%s' "$resresp" | grep -q '/run/scoutd.sock' \
+   && printf '%s' "$resresp" | grep -q 'host=github.com'; then
+  echo "  ok   concierge introduced an attenuated scout grant over the door"
+  echo "smoke OK (layers 1 + 2 + 2b)"
+else
+  echo "  FAIL concierge did not return the introduced grant"
+  echo "  --- concierged logs ---"; podman logs smoke-concierge 2>&1 | tail -10 | sed 's/^/    /'
   exit 1
 fi

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.3.0...claude-box-v0.4.0) (2026-06-15)
+
+
+### Features
+
+* **guest-room:** bump pin to attenuatesDoors engine + sync mirror ([#103](https://github.com/bounded-systems/claude-box/issues/103)) ([2e7bf97](https://github.com/bounded-systems/claude-box/commit/2e7bf97f49e91275b3743a1fae373cd9281a7932))
+* **launcherd:** enforce caveat-aware room attenuation via attenuatesDoors ([#107](https://github.com/bounded-systems/claude-box/issues/107)) ([821e0d1](https://github.com/bounded-systems/claude-box/commit/821e0d195ebc5571baf060b0a8cc3444b66bb0c4))
+
+
+### Bug Fixes
+
+* **ci:** read release version from latest main, not the trigger commit ([#102](https://github.com/bounded-systems/claude-box/issues/102)) ([ce42e1e](https://github.com/bounded-systems/claude-box/commit/ce42e1e5fb617cf53229060ab9ae257c6342d6d5))
+
 ## [0.3.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.2.0...claude-box-v0.3.0) (2026-06-15)
 
 

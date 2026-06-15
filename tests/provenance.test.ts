@@ -57,7 +57,7 @@ describe("SLSA Provenance v1 format (default)", () => {
     const deps = s.predicate.buildDefinition.resolvedDependencies ?? [];
     const uris = deps.map((d: any) => d.uri);
     // the nixpkgs rev pinned in flake.lock
-    expect(uris.some((u: string) => u.includes("bb813de6d2241bcb1b5af2d3059f560c66329967"))).toBe(true);
+    expect(uris.some((u: string) => u.includes("9f11f828c213641c2369a9f1fa31fe31557e3156"))).toBe(true);
     // the prx release pinned in flake.nix
     expect(uris.some((u: string) => u.includes("prx/releases/download"))).toBe(true);
   });

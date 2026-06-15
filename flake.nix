@@ -8,9 +8,11 @@
   # a deliberate `nix flake update` + review, never a silent self-update.
   description = "Pinned OCI image for the personal Claude runtime (claude-code + agent toolchain)";
 
-  # Locked to the rev verified to carry claude-code 2.0.53 (aarch64-linux, unfree).
-  # `nix flake update` to move it — that bump IS the version decision.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/bb813de6d2241bcb1b5af2d3059f560c66329967";
+  # Locked to the rev verified to carry claude-code 2.1.175 (aarch64-linux, unfree).
+  # 2.1.x is the first line with `remote-control` (drive the in-box session from
+  # claude.ai/code or the Claude mobile app); 2.0.53 lacked it. Bumping the rev IS
+  # the version decision — re-pin here, then `nix flake update` to re-lock.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/9f11f828c213641c2369a9f1fa31fe31557e3156";
 
   outputs = { self, nixpkgs }:
     let

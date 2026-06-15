@@ -6,9 +6,10 @@ Systemd unit files for running door daemons as containers.
 quadlet/
 ├── claude-doors.volume   # shared socket volume
 ├── claude-keys.volume    # keeperd signing keys
-├── keeperd.container     # git-signing daemon
-├── netd.container        # allowlist egress proxy
-└── scoutd.container      # external reads (stub)
+├── keeperd.container     # git-signing daemon (no network)
+├── netd.container        # the box's egress door (claude-netd: Anthropic allowlist)
+├── scout-netd.container  # scoutd's egress door (a netd instance: GitHub allowlist)
+└── scoutd.container      # external reads — runs --network=none, egress via scout-netd
 ```
 
 ## Schema

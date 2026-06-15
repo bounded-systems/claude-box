@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.4.0...claude-box-v0.5.0) (2026-06-15)
+
+
+### Features
+
+* **concierged:** capability concierge — introducer daemon + in-box client ([#114](https://github.com/bounded-systems/claude-box/issues/114)) ([72ca1f0](https://github.com/bounded-systems/claude-box/commit/72ca1f029e9eb0d8e975bb9dfa77420e8f033744))
+* **guest-room:** bump pin to resolveProvider engine + sync mirror ([#112](https://github.com/bounded-systems/claude-box/issues/112)) ([be699d7](https://github.com/bounded-systems/claude-box/commit/be699d7b31bba01921d734aa5b436e052679c245))
+
+
+### Bug Fixes
+
+* **spawn:** thread launch depth into manifest so maxDepth ceiling holds ([#110](https://github.com/bounded-systems/claude-box/issues/110)) ([d9a5c1f](https://github.com/bounded-systems/claude-box/commit/d9a5c1f78f794252e7271c07a157c981baf94b06))
+
 ## [0.4.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.3.0...claude-box-v0.4.0) (2026-06-15)
 
 

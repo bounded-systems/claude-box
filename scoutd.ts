@@ -60,8 +60,12 @@ const ALLOW = (process.env.SCOUTD_ALLOW?.split(",").map((s) => s.trim()).filter(
   ? process.env.SCOUTD_ALLOW!.split(",").map((s) => s.trim()).filter(Boolean)
   : DEFAULT_ALLOW;
 
-/** Check if a host is allowed. Supports exact match and .suffix patterns. */
+/** Check if a host is allowed. Supports exact match and .suffix patterns.
+ *  When egress is forced through netd (SCOUTD_PROXY set), netd is the SOURCE OF
+ *  TRUTH for the allowlist — we don't enforce a second, drift-prone copy here.
+ *  This in-process list then guards only the direct/dev path (no proxy). */
 function allowed(host: string): boolean {
+  if (EGRESS_PROXY) return true; // netd is the boundary; it enforces the allowlist
   const h = host.toLowerCase();
   return ALLOW.some((a) => (a.startsWith(".") ? h === a.slice(1) || h.endsWith(a) : h === a));
 }

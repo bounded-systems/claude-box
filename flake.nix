@@ -335,7 +335,11 @@
               '';
 
               netdEntrypoint = pkgs.writeShellScript "netd-entrypoint" ''
-                exec bun /app/netd/netd.ts serve --socket /run/doors/netd.sock "$@"
+                # NETD_SOCK lets several reason-named instances coexist on one
+                # doors volume (e.g. claude-netd.sock, scout-netd.sock); default
+                # keeps the single-instance path. NETD_ALLOW sets the reason's
+                # allowlist. netd is the MECHANISM; the instance carries the reason.
+                exec bun /app/netd/netd.ts serve --socket "''${NETD_SOCK:-/run/doors/netd.sock}" "$@"
               '';
             in
             pkgs.dockerTools.buildLayeredImage {
@@ -387,11 +391,14 @@
           #   podman run -v doors:/run/doors scoutd
           scoutd-image =
             let
-              # Minimal toolchain for scoutd: bun + coreutils + cacert
+              # Minimal toolchain for scoutd: bun + coreutils + cacert + socat
+              # (socat bridges loopback-TCP → the scout-netd door socket so
+              # scoutd can egress through netd while holding no NIC of its own).
               scoutdTools = with pkgs; [
                 bun
                 cacert
                 coreutils
+                socat
                 bashInteractive
               ];
 
@@ -411,6 +418,15 @@
               '';
 
               scoutdEntrypoint = pkgs.writeShellScript "scoutd-entrypoint" ''
+                # If a scout-netd door is mounted, bridge loopback → its socket and
+                # force scoutd's egress through it (SCOUTD_PROXY). With scoutd run
+                # --network=none, this is the ONLY egress path: interposition, not
+                # cooperation. No door ⇒ no relay ⇒ direct egress (dev/TCP mode).
+                if [ -S /run/doors/scout-netd.sock ]; then
+                  ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 \
+                    UNIX-CONNECT:/run/doors/scout-netd.sock &
+                  export SCOUTD_PROXY="http://127.0.0.1:3128"
+                fi
                 exec bun /app/scoutd.ts serve --socket /run/doors/scoutd.sock "$@"
               '';
             in

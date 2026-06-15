@@ -1,9 +1,11 @@
 # CHECK-CAVEATS — making guest-room's attenuation *enforced*, not just *rendered*
 
-> Status: **spec / failing-test draft** (design record). Not yet implemented.
-> Canonical home: `bounded-systems/guest-room` — this lands **upstream first**,
-> then mirrors into `claude-box/guest-room/` via `nix run .#sync-guest-room`.
-> Do not implement by hand-editing the read-only mirror.
+> Status: **IMPLEMENTED.** `checkCaveats` shipped in guest-room#2 and mirrored
+> here (claude-box#96); scoutd enforces through it (claude-box#99); the live-DENY
+> OCAP proof is `tests/scoutd.ocap.test.ts`. Canonical home is
+> `bounded-systems/guest-room` — engine changes land upstream first, then mirror
+> via `nix run .#sync-guest-room`. Do not hand-edit the read-only mirror.
+> The sections below are the original design record, kept for the rationale.
 
 ## 1. The OCAP gap
 

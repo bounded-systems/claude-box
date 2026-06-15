@@ -110,13 +110,20 @@ proxy is opt-in *cooperation*, not interposition — it moves no security bounda
 The in-process allowlist is **unchanged: still scoutd's sole network control**
 (not yet defense-in-depth). This step only makes scoutd *ready* to be wired.
 
-**Step 2 (the actual boundary move, TODO):** run scoutd `--network=none` (no NIC,
-so egress is *forced* through netd — interposition, not cooperation), point
-`SCOUTD_PROXY` at a netd allowing the GitHub read hosts (`api.github.com`,
-`codeload.github.com`, `objects.githubusercontent.com`, …), and give scoutd's
-container the loopback→netd.sock relay the box uses. **Once netd is the boundary,
-make it the source of truth**: the in-process allowlist becomes the *same policy
-in two places* (drift risk, not depth) and should be removed or demoted to a
-coarse guard. Open: a **dedicated netd instance** for scout's read allowlist vs.
-widening the box's netd (the dedicated instance keeps box egress = Anthropic and
-scout egress = GitHub separate). See NETD.md.
+**Step 2 (the boundary move — implemented in the images + NixOS module):**
+egress is reasoned, never generic. `netd` is the *mechanism*; each instance is
+named for its reason and carries that reason's allowlist:
+- **`claude-netd`** — the box reaches Anthropic (serves the box's `netd.sock`
+  door, Anthropic allowlist).
+- **`scout-netd`** — scoutd reads GitHub (its own `scout-netd.sock`, GitHub +
+  npm/pypi allowlist).
+
+scoutd runs **`--network=none`** (no NIC); its entrypoint bridges loopback →
+`scout-netd.sock` and sets `SCOUTD_PROXY`, so egress is *forced* through
+scout-netd — interposition, not cooperation. **netd is now the source of truth**
+for the allowlist: scoutd's in-process list short-circuits to allow-all when
+`SCOUTD_PROXY` is set (no duplicated policy at the boundary) and guards only the
+direct/dev path. Mechanism: `NETD_SOCK` lets netd instances coexist on one doors
+volume (`flake.nix`); the dedicated instances + `--network=none` are wired in
+[`nixos/doors.nix`](./nixos/doors.nix). Quadlet parity is a follow-up; verify on
+a real host that scoutd reaches GitHub through scout-netd. See NETD.md.

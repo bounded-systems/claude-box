@@ -662,6 +662,7 @@ export {
   allowed,
   scoutDoor,
   scoutVerifiers,
+  socketHandler,
   parseGitHubRepo,
   VERSION,
 };

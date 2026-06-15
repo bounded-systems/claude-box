@@ -103,6 +103,11 @@ function knownGuests(): Record<string, GuestPreset> {
   };
 }
 const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
+// The in-box config dir = the account volume's mount point, where claude keeps
+// auth/settings/history (incl. `claude auth login`). It MUST equal the image's
+// CLAUDE_CONFIG_DIR / $XDG_CONFIG_HOME/claude (flake.nix). One path, both sides;
+// tests/xdg.test.ts pins this against flake.nix so they can't drift.
+const BOX_CONFIG_DIR = "/home/claude/.config/claude";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -1068,7 +1073,7 @@ async function runPod(account: string, launch: Launch): Promise<number> {
       "--security-opt", "no-new-privileges", "--cap-drop", "all", "--pids-limit", "2048",
     ];
     if (guestPreset.needsConfig) {
-      argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+      argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
     }
     // Headless auth: forward a pre-minted `claude setup-token` (no in-box /login).
     if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
@@ -1140,7 +1145,7 @@ async function run(
   // Only mount the account's config volume for guests that need it (claude).
   // Tool guests don't need or want claude's auth/history.
   if (guestPreset.needsConfig) {
-    argv.push("-v", `claude-${account}-config:/home/claude/.config/claude:U`);
+    argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
   }
   // Headless auth: in-box `/login` can't complete (no browser; the OAuth
   // callback can't bind in the sandbox). Forward a pre-minted token from
@@ -1419,10 +1424,9 @@ async function run(
 // ── Launcherd client ─────────────────────────────────────────────────────────
 
 function launcherdSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/launcherd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/launcherd.sock`;
+  // One run dir: getRunDir is the single XDG_RUNTIME_DIR-first resolver (with the
+  // world-writable refusal + 0700 mkdir hardening), shared with the door sockets.
+  return `${getRunDir(process.env)}/launcherd.sock`;
 }
 
 async function launcherdRequest(
@@ -1474,10 +1478,8 @@ async function launcherdRequest(
 // ── Keeperd client ────────────────────────────────────────────────────────────
 
 function keeperdSocketPath(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return `${runtime}/keeperd.sock`;
-  const home = process.env.HOME ?? "/tmp";
-  return `${home}/.claude-box/keeperd.sock`;
+  // Shares the one run dir with launcherd + the door sockets (see getRunDir).
+  return `${getRunDir(process.env)}/keeperd.sock`;
 }
 
 async function keeperdRequest(
@@ -2269,6 +2271,7 @@ export {
   knownGuests,
   resolveDoor,
   planLaunch,
+  BOX_CONFIG_DIR,
   planRepoMount,
   boxTempBase,
   buildManifest,

@@ -120,5 +120,32 @@ This is `prx-asr` (assemble the per-repo pod + wire the doors), `prx-anj` /
 (containerize the fleet). POD.md + [DOORS.md](DOORS.md) are the spec they execute
 against.
 
+### Blocking order (the dep edges beads can't yet hold)
+
+These items form a strict chain, but the in-box beadsd write-door is partial —
+`prx beads dep add` is rejected from inside the box (`failed the beadsd wire
+contract`, cf. `prx-716`), so the edges below are **not** reflected in the
+tracker's `dependency_count`. Until the host/sync path writes them, this is the
+authority:
+
+```
+prx-634  beadsd-box IMAGE  ┐
+prx-anj  keeperd-box image │  (none exist yet; prx-zj8 / nix-dockerTools work,
+dolt-box                   ┘   verified only on a podman host)
+        │ must exist before
+        ▼
+prx-asr  assemble the pod {dolt-box, beadsd-box, keeperd-box} + box joins
+        │ which lights up
+        ▼
+prx-438  prx verbs route bd-backed ops through the beadsd door (prx repo)
+```
+
+The **box (consumer) side is already done**: `claude-box.ts` `--beads` forwards
+`/run/doors/beadsd.sock` ($BEADSD_SOCK) into the box, and `keeperd`/`netd`/
+`scoutd` quadlets exist. What's missing is the **server** side — nothing in this
+repo *serves* the beadsd/dolt doors, and there is no `.pod` grouping. So `prx-asr`
+is blocked on the images, not on launcher work. (`tests/ocap.test.ts` keeps the
+`--beads` e2e as `test.todo` for the same reason.)
+
 See also: [NETD.md](NETD.md), [KEEPERD.md](KEEPERD.md), [OCAP.md](OCAP.md),
 [REPOD.md](REPOD.md).

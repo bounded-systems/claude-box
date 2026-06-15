@@ -35,7 +35,13 @@ import {
 
 const log = createLogger("netd");
 
-export const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com"];
+// First-party Anthropic/Claude control-plane only. `platform.claude.com` is
+// Claude's control plane (feature-flag / Remote Control gate eval — traced as the
+// one non-*.anthropic.com host RC needs; prx-9s14/prx-awws). It is a read-only
+// control-plane endpoint, NOT a writable exfil sink, so the default-deny-writable
+// -sinks invariant (issue #6) still holds. Non-RC boxes keep nonessential traffic
+// disabled and never dial it.
+export const DEFAULT_ALLOW = ["api.anthropic.com", ".anthropic.com", "platform.claude.com"];
 
 /** Allowlist entry: exact host, or ".suffix" (matches the apex + any subdomain). */
 function matchesPattern(host: string, pattern: string): boolean {

@@ -129,14 +129,26 @@ describe("default allowlist", () => {
   // refused. If someone widens DEFAULT_ALLOW to include a writable host, this
   // breaks.
 
-  test("DEFAULT_ALLOW is Anthropic-only", () => {
-    expect(DEFAULT_ALLOW).toEqual(["api.anthropic.com", ".anthropic.com"]);
+  test("DEFAULT_ALLOW is first-party Anthropic/Claude control-plane only", () => {
+    expect(DEFAULT_ALLOW).toEqual([
+      "api.anthropic.com",
+      ".anthropic.com",
+      // Claude control plane (feature-flag / Remote Control gate). Read-only
+      // control-plane, not a writable sink — preserves the issue #6 invariant.
+      "platform.claude.com",
+    ]);
   });
 
   test("ALLOWS Anthropic API and its subdomains", () => {
     expect(isAllowedByDefault("api.anthropic.com")).toBe(true);
     // .anthropic.com suffix covers subdomains like the console.
     expect(isAllowedByDefault("console.anthropic.com")).toBe(true);
+  });
+
+  test("ALLOWS the Claude control plane (Remote Control gate, prx-awws)", () => {
+    expect(isAllowedByDefault("platform.claude.com")).toBe(true);
+    // exact host only — NOT a wildcard, so other *.claude.com stays denied
+    expect(isAllowedByDefault("evil.claude.com")).toBe(false);
   });
 
   test("DENIES writable sinks", () => {

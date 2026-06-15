@@ -87,7 +87,7 @@ const connect = (host: string, port = 443) =>
 describe("netd proxy (integration, default allowlist)", () => {
   test("default allowlist is in force for these tests", () => {
     expect(DEFAULT_ALLOWLIST_IN_FORCE).toBe(true);
-    expect(DEFAULT_ALLOW).toEqual(["api.anthropic.com", ".anthropic.com"]);
+    expect(DEFAULT_ALLOW).toEqual(["api.anthropic.com", ".anthropic.com", "platform.claude.com"]);
   });
 
   // The issue #6 invariant, end-to-end: every writable sink is refused by the

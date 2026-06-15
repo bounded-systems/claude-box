@@ -1,0 +1,40 @@
+name: release
+
+# Changesets-driven release gate. On every push to main this either opens/updates
+# a "Version Packages" PR (when changesets are pending) or — once that PR is
+# merged — runs the publish step, which pushes a `v<version>` tag. The actual
+# image build lives in publish-ghcr.yml, triggered by that tag.
+on:
+  push:
+    branches: [main]
+
+# Needed so the action can open the Version Packages PR and push the release tag.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs history; tagging needs it too
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - name: Install changesets CLI
+        run: bun install
+      - name: Version or publish (tag)
+        uses: changesets/action@v1
+        with:
+          version: bun run version       # consume changesets → bump + CHANGELOG
+          publish: bun run release:tag    # no changesets left → push v<version> tag
+          title: "Version Packages"
+          commit: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

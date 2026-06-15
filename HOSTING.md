@@ -90,6 +90,23 @@ claude-box --room dev --repo .
 First run of an account → `/login` once; it persists in that account's volume
 (`claude-<account>-config`).
 
+### Or pull prebuilt images from GHCR
+
+Tagged releases publish the four images to GHCR for `linux/amd64` and
+`linux/arm64` (see [RELEASING.md](./RELEASING.md)), so you can skip the nix build
+and pull a pinned image straight onto the host:
+
+```sh
+podman pull ghcr.io/bounded-systems/claude-box/claude-personal:<version>
+for d in keeperd netd scoutd; do
+  podman pull ghcr.io/bounded-systems/claude-box/$d:<version>
+done
+```
+
+Pin to a specific `:<version>` (or a `@sha256:` digest) rather than `:latest` —
+the digest *is* the pin the whole design rests on. You still need the
+`claude-box` CLI (`nix profile install .#claude-box`) to launch them.
+
 ### home-manager install (declarative)
 
 The README snippet now resolves on Linux because `claude-box` is exported for

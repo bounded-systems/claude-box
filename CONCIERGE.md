@@ -52,6 +52,12 @@ Flow:
 The concierge never sees the `fetch` payload. It governs **who may be
 introduced to what, and how narrowed** — then gets out of the way.
 
+**Where enforcement lives (see §7):** a **door only determines availability**
+(live/reachable); the door ref is **signed** by the issuer, and the **serving
+room verifies that signature** before honoring the call. So *socket reachability
+is not authority* — a room that reaches a provider socket without a valid signed
+grant is refused. That is what makes the path-based reference safe.
+
 ## 3. The concierge door protocol
 
 The concierge is itself a daemon behind a door (`createDoorHandlers` from
@@ -73,17 +79,20 @@ register(params: {
 resolve(params: {
   capability: string;
   want?: string[];          // caveats the consumer requests (only ever NARROWER)
-}) -> { door: DoorGrant }    // an attenuated grant: socket + env + grants + caveats
+}) -> { door: DoorGrant }    // a SIGNED, attenuated grant: socket + env + grants
+                             // + caveats + signature (audience/exp/nonce-bound)
 
 // Discovery / introspection.
 list() -> { capabilities: { capability: string; grants: string; live: boolean }[] }
 ```
 
-`resolve` returns a `DoorGrant` (the engine type) — the consumer hands it to
-`call(grant.guest, …)`. The returned `caveats` are
-`attenuate(providerCeiling, callerPolicy ∪ want)` — i.e. the provider's ceiling,
-narrowed by policy and the caller's own request, **never widened**. The target
-broker enforces them with `checkCaveats`.
+`resolve` returns a **signed** `DoorGrant` (the engine type + a signature) — the
+consumer hands it to `call(grant.guest, …)`. The `caveats` are
+`attenuate(providerCeiling, callerPolicy ∪ want)` — the provider's ceiling,
+narrowed by policy and the caller's request, **never widened**. Enforcement is
+two steps at the serving room: (1) **verify the signature** (issued by prx's
+signer — see §7/§9; reachability alone is not authority), then (2) `checkCaveats`
+over the now-trusted caveats. The door itself only answers availability.
 
 ## 4. Registry + liveness (etcd-shaped)
 
@@ -162,3 +171,22 @@ narrowed; enforcement is the target's `checkCaveats` (already shipped, #99).
 - `attenuatesDoors` — still available in the mirror; useful if a consumer
   re-introduces a *bundle* of doors onward and we want to verify the bundle
   only narrows. Not on the critical path.
+
+## 9. Dependencies / phasing
+
+The enforcement model (§7) leans on **signed grants**, and signing currently
+lives in **prx** — not yet extracted (likely its own repo). So the security
+property is *gated on that extraction*, which gives a clean build order:
+
+- **Phase 1 (buildable now):** the introducer protocol (`register` / `resolve` /
+  `list` + leases), the registry, launcherd demoted to lifecycle-only, and the
+  path-addressed `DoorGrant` handoff. The signature field exists but verify is a
+  **stub** — so this phase is functional plumbing, *not* yet a security boundary
+  (call it out, the way #90 was "plumbing, not a boundary change").
+- **Phase 2 (gated on prx-signing extraction):** wire the issuer (prx's signer)
+  + the serving room's **verify** step, and bind grants (`audience`/`exp`/`nonce`).
+  This is when "authority = a valid signed grant" goes live and the boundary
+  actually holds.
+
+Until Phase 2, do not claim non-bypassable introduction — Phase 1 is addressing
++ liveness only.

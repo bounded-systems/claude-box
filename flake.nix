@@ -55,7 +55,11 @@
       user = "claude";
       uid = 1000;
       home = "/home/${user}";
-      configDir = "${home}/.config/claude"; # the persistent volume mount point
+      # One XDG path: XDG_CONFIG_HOME is the single source of truth; the claude
+      # config dir (and the persistent volume mount point) derives from it. The
+      # launcher's BOX_CONFIG_DIR must equal configDir — tests/xdg.test.ts pins it.
+      xdgConfigHome = "${home}/.config";
+      configDir = "${xdgConfigHome}/claude"; # = $XDG_CONFIG_HOME/claude; volume mount point
     in
     {
       packages = forEach (system:
@@ -181,8 +185,12 @@
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "GIT_SSL_CAINFO=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "LANG=C.UTF-8"
-                # Personal account's auth/settings/history live here, on the
-                # mounted volume — the isolation boundary, separate from work.
+                # One XDG path: XDG_CONFIG_HOME is explicit (not the implicit
+                # ~/.config default), and CLAUDE_CONFIG_DIR derives from it. The
+                # account's auth/settings/history live here, on the mounted volume
+                # — the isolation boundary, separate from work. `claude auth login`
+                # (incl. --remote-control's full-scope login) persists here too.
+                "XDG_CONFIG_HOME=${xdgConfigHome}"
                 "CLAUDE_CONFIG_DIR=${configDir}"
                 # Disable telemetry — the box has no route to statsig.anthropic.com
                 # and the failed connection attempts flood the netd log.

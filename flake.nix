@@ -739,8 +739,8 @@
       # ── Checks (nix flake check) ────────────────────────────────────────────────
       # The doors module boots in a NixOS VM and asserts the daemons + sockets
       # come up (Linux only — it evaluates on darwin, builds on a Linux+KVM host
-      # or in CI). `bun test` + `tsc --noEmit` run in CI (.github/workflows/ci.yml)
-      # rather than here: a hermetic nix check can't reach npm to fetch typescript.
+      # or in CI). `bun test` is the gate, run in CI (.github/workflows/ci.yml),
+      # not as a hermetic nix check: bun/tsc want npm, which the sandbox blocks.
       checks.x86_64-linux.doors = doorsTest "x86_64-linux";
       checks.aarch64-linux.doors = doorsTest "aarch64-linux";
     };

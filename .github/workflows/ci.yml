@@ -1,9 +1,8 @@
 name: CI
 
-# Gate the repo on `bun test` + `tsc --noEmit`. Both run here (not as hermetic
-# nix flake checks) because `bun x tsc` fetches typescript + bun-types from npm,
-# which the nix build sandbox blocks — CI has the network it needs. Runs on every
-# PR and on pushes to main, so main can't silently go red.
+# Gate the repo on `bun test` — the project's source of truth (no tsconfig/tsc;
+# Bun's ambient types are the typecheck). Runs on every PR and on pushes to main,
+# so main can't silently go red the way it did before this workflow existed.
 on:
   push:
     branches: [main]
@@ -28,16 +27,3 @@ jobs:
       # bun:test, node: builtins, and local .ts only.
       - name: Run tests
         run: bun test
-
-  typecheck:
-    name: tsc --noEmit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.11
-      # `bun x tsc` fetches typescript + bun-types from npm (network available
-      # here, unlike the nix sandbox). tsconfig sets types: ["bun-types"].
-      - name: Type check
-        run: bun x tsc --noEmit

@@ -50,12 +50,29 @@ describe("authEnvArgs: remote-control posture", () => {
     expect(args.join(" ")).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 
-  test("unsets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (feature-flag gate)", () => {
+  test("unsets the umbrella but re-asserts the RC-safe nonessential blocks", () => {
+    // The umbrella var = AUTOUPDATER + FEEDBACK + ERROR_REPORTING + TELEMETRY.
+    // Only TELEMETRY breaks RC (it also kills GrowthBook). So we unset the
+    // umbrella (to recover GrowthBook) and re-assert the other three granularly,
+    // so a pinned box never re-enables the auto-updater / Sentry / feedback.
     const l = planLaunch(["--remote-control"], WITH_TOKEN);
     expect(authEnvArgs(l, WITH_TOKEN)).toEqual([
       "--unsetenv",
       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "--env",
+      "DISABLE_UPDATES=1",
+      "--env",
+      "DISABLE_ERROR_REPORTING=1",
+      "--env",
+      "DISABLE_FEEDBACK_COMMAND=1",
     ]);
+  });
+
+  test("never sets a telemetry-class var (would re-break RC's GrowthBook gate)", () => {
+    const joined = authEnvArgs(planLaunch(["--remote-control"], WITH_TOKEN), WITH_TOKEN).join(" ");
+    expect(joined).not.toContain("DISABLE_TELEMETRY");
+    expect(joined).not.toContain("DO_NOT_TRACK");
+    expect(joined).not.toContain("DISABLE_GROWTHBOOK");
   });
 });
 
@@ -126,12 +143,21 @@ describe("--remote-serve: planLaunch", () => {
 });
 
 describe("--remote-serve: shares the remote-control auth posture", () => {
-  test("omits the inference-only token and unsets the feature-flag gate", () => {
+  test("same granular nonessential-traffic posture as --remote-control", () => {
+    // remote-serve is remote-control in server mode, so authEnvArgs treats them
+    // identically: unset the umbrella, re-assert the three RC-safe blocks.
     const l = planLaunch(["--remote-serve"], WITH_TOKEN);
     expect(authEnvArgs(l, WITH_TOKEN)).toEqual([
       "--unsetenv",
       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "--env",
+      "DISABLE_UPDATES=1",
+      "--env",
+      "DISABLE_ERROR_REPORTING=1",
+      "--env",
+      "DISABLE_FEEDBACK_COMMAND=1",
     ]);
+    expect(authEnvArgs(l, WITH_TOKEN).join(" ")).not.toContain("DISABLE_TELEMETRY");
   });
 });
 

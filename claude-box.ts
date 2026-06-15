@@ -839,15 +839,35 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
  *  precedence table, the full-scope `claude auth login` credential the user
  *  persists in the account volume). Also unset the image-baked
  *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate
- *  (tengu_ccr_bridge, delivered via GrowthBook) can evaluate. Both relaxations
- *  are scoped to this one launch — the default box is unchanged.
+ *  (tengu_ccr_bridge, delivered via GrowthBook) can evaluate.
+ *
+ *  But that umbrella var is the equivalent of FOUR switches — DISABLE_AUTOUPDATER
+ *  + DISABLE_FEEDBACK_COMMAND + DISABLE_ERROR_REPORTING + DISABLE_TELEMETRY — and
+ *  only the last one breaks RC (it also kills GrowthBook feature-flag fetching).
+ *  Unsetting the whole umbrella to recover GrowthBook collaterally re-enables the
+ *  AUTO-UPDATER on a PINNED image (and /feedback + Sentry). So we unset the
+ *  umbrella and immediately RE-ASSERT the three RC-compatible blocks granularly,
+ *  leaving only telemetry/GrowthBook reachable. DISABLE_UPDATES (stricter than
+ *  DISABLE_AUTOUPDATER) is right for a pinned box — it blocks manual updates too.
+ *  We deliberately do NOT set DISABLE_TELEMETRY / DO_NOT_TRACK / DISABLE_GROWTHBOOK
+ *  here — those would re-break RC; netd's allowlist drops the residual telemetry
+ *  egress instead (the fail-closed boundary, independent of these source switches).
+ *  Making the posture self-contained here means it no longer relies on the image
+ *  incidentally baking the granular vars. All relaxations are scoped to this one
+ *  launch — the default box is unchanged.
  *
  *  --remote-serve shares this exact posture: it is --remote-control in server
- *  mode, so it needs the same full-scope login (not the inference-only token)
- *  and the same feature-flag gate, differing ONLY in the entrypoint (run()). */
+ *  mode, so it needs the same full-scope login (not the inference-only token) and
+ *  the same nonessential-traffic handling, differing ONLY in the entrypoint
+ *  (run()). Hence the condition covers both flags. */
 function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
   if (launch.remoteControl || launch.remoteServe) {
-    return ["--unsetenv", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"];
+    return [
+      "--unsetenv", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "--env", "DISABLE_UPDATES=1",
+      "--env", "DISABLE_ERROR_REPORTING=1",
+      "--env", "DISABLE_FEEDBACK_COMMAND=1",
+    ];
   }
   if (env.CLAUDE_CODE_OAUTH_TOKEN) {
     return ["--env", `CLAUDE_CODE_OAUTH_TOKEN=${env.CLAUDE_CODE_OAUTH_TOKEN}`];

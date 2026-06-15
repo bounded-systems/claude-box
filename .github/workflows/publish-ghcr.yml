@@ -67,6 +67,7 @@ jobs:
             [keeperd-image]=door-keeper
             [netd-image]=door-net
             [scoutd-image]=door-scout
+            [concierged-image]=door-concierge
           )
           for attr in "${!images[@]}"; do
             name="${images[$attr]}"
@@ -108,7 +109,7 @@ jobs:
             retry docker manifest create "$tag" "${ref}:${VERSION}-amd64" "${ref}:${VERSION}-arm64"
             retry docker manifest push "$tag"
           }
-          for name in claude-room door-keeper door-net door-scout; do
+          for name in claude-room door-keeper door-net door-scout door-concierge; do
             ref="${REGISTRY}/${name}"
             push_list "${ref}:${VERSION}" "${ref}"
             # A real release (not a throwaway `dev` build) also moves `latest`.

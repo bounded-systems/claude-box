@@ -51,6 +51,7 @@ The box is the **room**; the three daemons are its **doors**.
 | `keeperd-image` | `door-keeper` | git-signing door |
 | `netd-image` | `door-net` | egress-allowlist door |
 | `scoutd-image` | `door-scout` | external-reads door |
+| `concierged-image` | `door-concierge` | capability-introducer door |
 
 ## Pre-merge checklist for maintainers
 

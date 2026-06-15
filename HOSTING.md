@@ -123,6 +123,38 @@ home.packages = [ inputs.claude-box.packages.${system}.claude-box ];
 
 (`packages.x86_64-linux.claude-box` / `packages.aarch64-linux.claude-box`.)
 
+### NixOS (declarative doors)
+
+On a NixOS host the door daemons can run as system services straight from the
+flake — no manual `quadlet` copy, no `systemctl --user enable`:
+
+```nix
+{
+  inputs.claude-box.url = "github:bdelanghe/claude-box";
+
+  # in your nixosConfigurations.<host>.modules:
+  imports = [ inputs.claude-box.nixosModules.default ];
+  services.claude-box.doors.enable = true;   # keeperd + netd + scoutd
+  # services.claude-box.doors.doors = [ "scout" ];   # or a subset
+}
+```
+
+The module ([`nixos/doors.nix`](./nixos/doors.nix)) runs each door via
+`virtualisation.oci-containers` using the image **built by this flake** (pinned
+by digest — no GHCR pull), and applies the same hardening as the quadlet units
+(no-new-privileges, read-only rootfs, drop-all-caps, pids/memory caps, and
+`--network=none` for keeperd). Options: `socketDir` (default
+`/run/claude-box/doors`, mounted into each door) and `keysDir` (keeperd's
+signing key).
+
+> **Verify on first `nixos-rebuild`** (this module was written without a NixOS
+> host to test on): the load-bearing detail is **socket ownership** — the doors
+> run as uid 1000 in rootful podman and write sockets into `socketDir`, and the
+> user who launches the box must be able to read them. If the box can't reach a
+> door, check `socketDir` ownership/perms (it is created `0750` owned by uid
+> 1000) and the container's userns mapping. Treat it as a strong starting point,
+> not a turnkey deployment.
+
 ## Run it headless
 
 The doors are `systemctl --user` services. For them to keep running when you're

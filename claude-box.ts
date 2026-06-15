@@ -19,7 +19,8 @@
  */
 
 import { existsSync, mkdirSync, statSync, rmSync } from "node:fs";
-import { dirname, resolve, relative, isAbsolute } from "node:path";
+import { dirname, resolve, relative, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
 // supplies the door catalog (knownDoors) and room bundles (knownRooms); the
 // engine resolves grants, derives the honest granted/denied surface, and renders
@@ -881,12 +882,25 @@ function capabilityPrompt(m: Manifest): string {
   return lines.join("\n");
 }
 
+/** The single source of truth for box-mounted temp dirs. Rooted under $HOME
+ *  (XDG_CACHE_HOME, else ~/.cache) — NEVER /tmp. On macOS the podman VM only
+ *  shares $HOME, so a /tmp-rooted bind mount fails the box launch with exit 125.
+ *  Centralizing temp creation here makes that mistake structurally impossible for
+ *  any current or future mount path, rather than a rule humans/agents must recall.
+ *  The directory is created (recursive) before returning. */
+function boxTempBase(): string {
+  const xdg = process.env.XDG_CACHE_HOME;
+  const cache = xdg?.startsWith("/") ? xdg : join(homedir(), ".cache");
+  const base = join(cache, "claude-box");
+  mkdirSync(base, { recursive: true });
+  return base;
+}
+
 /** Create an ephemeral git worktree at a temp path. Returns the path to the
  *  worktree. The caller is responsible for removing it with `git worktree remove`. */
 async function createEphemeralWorktree(repo: string): Promise<string> {
   const id = crypto.randomUUID().slice(0, 8);
-  const tmpDir = process.env.TMPDIR ?? "/tmp";
-  const worktreePath = `${tmpDir}/claude-box-${id}`;
+  const worktreePath = join(boxTempBase(), `worktree-${id}`);
 
   // Get the current HEAD commit to check out
   const headProc = Bun.spawn(["git", "-C", repo, "rev-parse", "HEAD"], {
@@ -922,8 +936,7 @@ async function createEphemeralWorktree(repo: string): Promise<string> {
  *  keeper door (increment 2). Caller removes the dir when done. */
 async function createIsolatedClone(repo: string): Promise<string> {
   const id = crypto.randomUUID().slice(0, 8);
-  const tmpDir = process.env.TMPDIR ?? "/tmp";
-  const clonePath = `${tmpDir}/claude-box-clone-${id}`;
+  const clonePath = join(boxTempBase(), `clone-${id}`);
   const proc = Bun.spawn(
     ["git", "clone", "--local", "--no-hardlinks", repo, clonePath],
     { stdout: "pipe", stderr: "pipe" },
@@ -2257,6 +2270,7 @@ export {
   resolveDoor,
   planLaunch,
   planRepoMount,
+  boxTempBase,
   buildManifest,
   capabilityJson,
   capabilityPrompt,

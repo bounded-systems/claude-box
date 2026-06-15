@@ -28,8 +28,6 @@ import {
   type Manifest,
   type Launch,
 } from "./claude-box";
-// Room-level attenuation: enforce a sub-room is never wider than its parent.
-import { attenuate, attenuatesDoors } from "./guest-room/mod.ts";
 import {
   defaultSocketPath as runtimeSocketPath,
   prepareSocket,
@@ -225,33 +223,14 @@ function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: s
   return { allowed: true };
 }
 
-/** A door as named on the wire: a bare name (back-compat) or a name carrying
- *  caveats. Either form may also embed a `=host` override (stripped here, as the
- *  attenuation comparison is by name + caveats, not transport). */
-type DoorSpec = string | { name: string; caveats?: string[] };
-
-/** Resolve a wire door spec to a concrete (possibly attenuated) grant, so the
- *  attenuation comparison runs over real DoorGrants the engine understands. */
-function specToGrant(spec: DoorSpec): DoorGrant {
-  const raw = typeof spec === "string" ? spec : spec.name;
-  const eq = raw.indexOf("=");
-  const name = eq < 0 ? raw : raw.slice(0, eq);
-  const caveats = typeof spec === "string" ? undefined : spec.caveats;
-  const grant = resolveDoor(name, undefined);
-  return caveats?.length ? attenuate(grant, caveats) : grant;
-}
-
 /**
- * Check attenuation: a child's door set must never be WIDER than its parent's.
- * Core OCAP invariant — a box cannot grant itself capabilities it lacks, and
- * (the case a name-only subset check misses) cannot drop a parent door's caveat
- * to widen it. Delegates to the guest-room engine primitive `attenuatesDoors`,
- * so the rule lives in one place. Returns the legacy shape (violations = the
- * offending door NAMES) for back-compat with callers.
+ * Check attenuation: child doors must be a subset of parent doors.
+ * This is a core OCAP security invariant — a box cannot grant itself
+ * capabilities it doesn't have. Returns true if allowed.
  */
 function checkAttenuation(
-  requestedDoors: DoorSpec[],
-  parentDoors: DoorSpec[] | undefined,
+  requestedDoors: string[],
+  parentDoors: string[] | undefined,
   depth: number,
 ): { allowed: boolean; reason?: string; violations?: string[] } {
   // Root launches (depth 0) have no parent — no attenuation check needed
@@ -259,23 +238,19 @@ function checkAttenuation(
     return { allowed: true };
   }
 
-  const verdict = attenuatesDoors(requestedDoors.map(specToGrant), parentDoors.map(specToGrant));
-  if (verdict.ok) {
-    return { allowed: true };
+  // Child launches must have doors ⊆ parent doors
+  const parentSet = new Set(parentDoors);
+  const violations = requestedDoors.filter((d) => !parentSet.has(d));
+
+  if (violations.length > 0) {
+    return {
+      allowed: false,
+      reason: `attenuation violation: child requested doors [${violations.join(", ")}] not in parent [${parentDoors.join(", ")}]`,
+      violations,
+    };
   }
 
-  const detail = verdict.violations
-    .map((v) =>
-      v.reason === "absent-in-parent"
-        ? `${v.door} (not in parent)`
-        : `${v.door} (drops caveats: ${v.dropped.join(", ")})`,
-    )
-    .join(", ");
-  return {
-    allowed: false,
-    reason: `attenuation violation: child doors widen parent — ${detail}`,
-    violations: verdict.violations.map((v) => v.door),
-  };
+  return { allowed: true };
 }
 
 // ── L2 Attestation + Key Management ──────────────────────────────────────────
@@ -640,10 +615,6 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const guestArgs = (params.guestArgs as string[]) ?? [];
   const depth = (params.depth as number) ?? 0;  // Spawn depth (0 = root, 1 = first child, etc.)
   let doorSpecs = (params.doors as string[]) ?? [];
-  // Per-door caveats the child requests (name → caveat strings). Applied to the
-  // resolved grant so the launch manifest carries them and the attenuation check
-  // sees the child's real (narrowed) authority.
-  const caveatsParam = (params.caveats as Record<string, string[]>) ?? {};
 
   // Extract caller info (injected by peercred proxy via SO_PEERCRED)
   const callerRaw = params._caller as { uid?: number; gid?: number; pid?: number } | undefined;
@@ -652,10 +623,9 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     : undefined;
   const token = params._token as string | undefined;
 
-  // Parent doors (for attenuation check on nested launches). In-box callers pass
-  // their manifest's doors so we can enforce child ⊆ parent. Accepts bare names
-  // (back-compat) or {name, caveats} so caveat-narrowing is enforced too.
-  const parentDoors = params._parentDoors as DoorSpec[] | undefined;
+  // Parent doors (for attenuation check on nested launches)
+  // In-box callers pass their manifest's doors so we can enforce child ⊆ parent
+  const parentDoors = params._parentDoors as string[] | undefined;
 
   // Validate account
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
@@ -697,16 +667,9 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     }
   }
 
-  // Check attenuation: child doors must not be wider than the parent's (names ⊆
-  // AND caveats ⊇). Checked AFTER room expansion so the full door set is
-  // validated. Enrich each requested door with any caveats the child asked for.
-  const requestedSpecs: DoorSpec[] = doorSpecs.map((s) => {
-    const eq = s.indexOf("=");
-    const name = eq < 0 ? s : s.slice(0, eq);
-    const cav = caveatsParam[name];
-    return cav?.length ? { name: s, caveats: cav } : s;
-  });
-  const attenuationCheck = checkAttenuation(requestedSpecs, parentDoors, depth);
+  // Check attenuation: child doors must be subset of parent doors
+  // This is checked AFTER room expansion so the full door set is validated
+  const attenuationCheck = checkAttenuation(doorSpecs, parentDoors, depth);
   if (!attenuationCheck.allowed) {
     throw {
       code: "ATTENUATION_VIOLATION",
@@ -715,17 +678,13 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     };
   }
 
-  // Resolve doors, applying any child-requested caveats so the launch manifest
-  // records the narrowed grant (a child can hand it onward only equally/narrower).
+  // Resolve doors
   const doors: DoorGrant[] = [];
   for (const spec of doorSpecs) {
     const eq = spec.indexOf("=");
     const name = eq < 0 ? spec : spec.slice(0, eq);
     const host = eq < 0 ? undefined : spec.slice(eq + 1);
-    let grant = resolveDoor(name, host);
-    const cav = caveatsParam[name];
-    if (cav?.length) grant = attenuate(grant, cav);
-    doors.push(grant);
+    doors.push(resolveDoor(name, host));
   }
 
   // Check door prerequisites

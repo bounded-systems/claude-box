@@ -1,12 +1,19 @@
 /**
- * concierged OCAP proof — introduction hands back an ENFORCEABLE, NARROWED door.
+ * concierged OCAP proof — introduction hands back a NARROWED door whose caveats
+ * are checkCaveats-shaped.
  *
  * Boots a real concierged listener, drives it with the in-box client
- * (lib/concierge), and asserts the end-to-end introducer property: a resolved
+ * (lib/concierge), and asserts the Phase-1 introducer property: a resolved
  * capability comes back as a DoorGrant attenuated to the provider's ceiling (and
- * any narrowing the caller asked for), and that grant is enforceable — an
- * out-of-caveat request is refused by checkCaveats at the target. The concierge
- * itself never sees the target's payload (introducer, not broker).
+ * any narrowing the caller asked for), and those caveats are the shape
+ * checkCaveats refuses out-of-ceiling requests over. The concierge itself never
+ * sees the target's payload (introducer, not broker).
+ *
+ * Phase 1 (see CONCIERGE.md §9): this proves caveat *carriage* + attenuation,
+ * NOT a verified, non-bypassable boundary. There is no serving room here (the
+ * test plays both consumer and enforcer), no signature verify (prx-gated), and
+ * the grant is a path reference — so reachability still bypasses the concierge.
+ * "Don't claim non-bypassable introduction until Phase 2."
  *
  *   nix run nixpkgs#bun -- test tests/concierged.ocap.test.ts
  */
@@ -56,10 +63,12 @@ describe("concierged OCAP proof (live introducer)", () => {
     expect(door.env).toBe("SCOUTD_SOCK");
   });
 
-  test("the introduced door is ENFORCEABLE — out-of-ceiling host is refused", async () => {
+  test("the introduced door's caveats are CHECKABLE — out-of-ceiling host is refused by checkCaveats", async () => {
     await register({ capability: "scout", door: "/run/scoutd.sock", caveats: ["host=github.com,.github.com"] });
     const door = await resolve("scout");
-    // the consumer would call() this door; the target broker enforces its caveats:
+    // Phase 1: no serving room and no signature verify here — this proves the grant
+    // CARRIES enforceable caveats, not non-bypassable introduction (CONCIERGE.md §9).
+    // At runtime the target broker (scoutd) is what would run this check on each call.
     expect(checkCaveats(door, { hostname: "api.github.com" }, verifiers).ok).toBe(true);
     expect(checkCaveats(door, { hostname: "evil.com" }, verifiers).ok).toBe(false);
   });

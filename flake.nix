@@ -94,6 +94,12 @@
                 machine.wait_until_succeeds(
                     f"test -S /run/claude-box/doors/{sock}.sock", timeout=120
                 )
+            # The boundary, not just liveness: keeper and scout hold NO NIC of
+            # their own (--network=none → only the loopback interface). scoutd's
+            # GitHub egress therefore can only flow through the scout-netd door.
+            for box in ["keeper", "scout"]:
+                nics = machine.succeed(f"podman exec {box} ls /sys/class/net").split()
+                assert nics == ["lo"], f"{box} must have only loopback (no NIC), got {nics}"
           '';
         };
     in

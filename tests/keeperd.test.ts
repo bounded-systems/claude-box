@@ -345,10 +345,10 @@ describe("path translation (lib/keeper.ts)", () => {
 
   test("translates /work to host path", () => {
     const original = process.env.CLAUDE_BOX_HOST_REPO;
-    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    process.env.CLAUDE_BOX_HOST_REPO = "/host/project";
     try {
-      expect(translateRepoPath("/work")).toBe("/Users/bobby/claude-box");
-      expect(translateRepoPath("/work/")).toBe("/Users/bobby/claude-box");
+      expect(translateRepoPath("/work")).toBe("/host/project");
+      expect(translateRepoPath("/work/")).toBe("/host/project");
     } finally {
       if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
       else delete process.env.CLAUDE_BOX_HOST_REPO;
@@ -357,10 +357,10 @@ describe("path translation (lib/keeper.ts)", () => {
 
   test("translates /work/subdir to host path/subdir", () => {
     const original = process.env.CLAUDE_BOX_HOST_REPO;
-    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    process.env.CLAUDE_BOX_HOST_REPO = "/host/project";
     try {
-      expect(translateRepoPath("/work/src")).toBe("/Users/bobby/claude-box/src");
-      expect(translateRepoPath("/work/deep/nested/path")).toBe("/Users/bobby/claude-box/deep/nested/path");
+      expect(translateRepoPath("/work/src")).toBe("/host/project/src");
+      expect(translateRepoPath("/work/deep/nested/path")).toBe("/host/project/deep/nested/path");
     } finally {
       if (original) process.env.CLAUDE_BOX_HOST_REPO = original;
       else delete process.env.CLAUDE_BOX_HOST_REPO;
@@ -369,7 +369,7 @@ describe("path translation (lib/keeper.ts)", () => {
 
   test("does not translate other paths", () => {
     const original = process.env.CLAUDE_BOX_HOST_REPO;
-    process.env.CLAUDE_BOX_HOST_REPO = "/Users/bobby/claude-box";
+    process.env.CLAUDE_BOX_HOST_REPO = "/host/project";
     try {
       expect(translateRepoPath("/tmp/repo")).toBe("/tmp/repo");
       expect(translateRepoPath("/workspace")).toBe("/workspace"); // not /work

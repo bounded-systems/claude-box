@@ -66,7 +66,7 @@ grep "$USER" /etc/subuid /etc/subgid || \
 ## Bring-up
 
 ```sh
-git clone https://github.com/bdelanghe/claude-box && cd claude-box
+git clone https://github.com/bounded-systems/claude-box && cd claude-box
 
 # 1. Build + load the box image (resolves to your arch automatically).
 nix build .#claude-image && podman load -i result
@@ -125,7 +125,7 @@ The README snippet now resolves on Linux because `claude-box` is exported for
 every Linux system:
 
 ```nix
-inputs.claude-box.url = "github:bdelanghe/claude-box";
+inputs.claude-box.url = "github:bounded-systems/claude-box";
 # …
 home.packages = [ inputs.claude-box.packages.${system}.claude-box ];
 ```
@@ -139,7 +139,7 @@ flake — no manual `quadlet` copy, no `systemctl --user enable`:
 
 ```nix
 {
-  inputs.claude-box.url = "github:bdelanghe/claude-box";
+  inputs.claude-box.url = "github:bounded-systems/claude-box";
 
   # in your nixosConfigurations.<host>.modules:
   imports = [ inputs.claude-box.nixosModules.default ];

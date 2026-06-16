@@ -54,7 +54,12 @@
   inputs.door-scout.url = "github:bounded-systems/door-scout/52bffb73f5d06624b3c89278dcf68f9863e7cadc";
   inputs.door-scout.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout }:
+  # door-concierge — the concierged introducer door, extracted to its own public repo.
+  # ./concierged.ts is a generated mirror (sync-door-concierge + concierged-mirror check).
+  inputs.door-concierge.url = "github:bounded-systems/door-concierge/4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae";
+  inputs.door-concierge.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -800,6 +805,19 @@
                 echo "synced scoutd.ts"
               '';
 
+            # sync-door-concierge — regenerate ./concierged.ts from the PINNED door-concierge.
+            sync-door-concierge =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-concierge" ''
+                set -euo pipefail
+                if [ ! -f "$PWD/concierged.ts" ]; then
+                  echo "run from the claude-box repo root (no ./concierged.ts here)" >&2
+                  exit 1
+                fi
+                install -m 644 ${door-concierge}/concierged.ts "$PWD/concierged.ts"
+                echo "synced concierged.ts"
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -946,6 +964,13 @@
         meta.description = "Sync ./scoutd.ts from the pinned door-scout input";
       };
 
+      # `nix run .#sync-door-concierge` → regenerate ./concierged.ts from the pinned input.
+      apps.aarch64-darwin.sync-door-concierge = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-concierge}/bin/sync-door-concierge";
+        meta.description = "Sync ./concierged.ts from the pinned door-concierge input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -1069,6 +1094,16 @@
         in pkgs.runCommand "scoutd-mirror" { } ''
           if ! diff -u ${door-scout}/scoutd.ts ${./scoutd.ts}; then
             echo "scoutd.ts drifted from the pinned input — run: nix run .#sync-door-scout" >&2
+            exit 1
+          fi
+          touch $out
+        '';
+      # ./concierged.ts must match the pinned door-concierge.
+      checks.aarch64-darwin.concierged-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "concierged-mirror" { } ''
+          if ! diff -u ${door-concierge}/concierged.ts ${./concierged.ts}; then
+            echo "concierged.ts drifted from the pinned input — run: nix run .#sync-door-concierge" >&2
             exit 1
           fi
           touch $out

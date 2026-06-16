@@ -29,7 +29,7 @@ jobs:
       releases_created: ${{ steps.rp.outputs.releases_created }}
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5 # v4
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -43,7 +43,7 @@ jobs:
       # Checking out the default branch pins us to the version the release set.
       # (release-please's manifest-mode per-package outputs evaluate empty here,
       # so we can't read the version from them.)
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: ${{ steps.rp.outputs.releases_created == 'true' }}
         with:
           ref: ${{ github.event.repository.default_branch }}

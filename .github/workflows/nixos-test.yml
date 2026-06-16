@@ -44,7 +44,7 @@ jobs:
     name: doors VM test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # GitHub's Linux runners ship /dev/kvm but not group-accessible by default;
       # this udev rule opens it so the nested QEMU VM can use hardware accel.
@@ -55,7 +55,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main — bump deliberately
         with:
           extra-conf: |
             extra-experimental-features = nix-command flakes

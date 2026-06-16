@@ -62,7 +62,7 @@
   # door-peercred — the launcherd SO_PEERCRED helper (Rust), extracted to its own
   # public repo. ./peercred/ is a generated mirror (sync-door-peercred +
   # peercred-mirror check); claude-box still BUILDS the binary from the mirror.
-  inputs.door-peercred.url = "github:bounded-systems/door-peercred/2e3ed4b5051d0acfcb206ff282847b40b00000ed";
+  inputs.door-peercred.url = "github:bounded-systems/door-peercred/9021b283905fcbc18075083f35a37ebf6c5cdc39";
   inputs.door-peercred.flake = false;
 
   outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge, door-peercred }:

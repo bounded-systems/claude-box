@@ -71,17 +71,17 @@
     "door-peercred": {
       "flake": false,
       "locked": {
-        "lastModified": 1781630205,
-        "narHash": "sha256-+6ADNwMC5XyUlJwE4foc+vLIVvRvqWEf3VarQ9usxNo=",
+        "lastModified": 1781635185,
+        "narHash": "sha256-ZyBzJVwTFKVStKSz9Ew0usJRnKGZ3NyCIrHIytmyeFY=",
         "owner": "bounded-systems",
         "repo": "door-peercred",
-        "rev": "2e3ed4b5051d0acfcb206ff282847b40b00000ed",
+        "rev": "9021b283905fcbc18075083f35a37ebf6c5cdc39",
         "type": "github"
       },
       "original": {
         "owner": "bounded-systems",
         "repo": "door-peercred",
-        "rev": "2e3ed4b5051d0acfcb206ff282847b40b00000ed",
+        "rev": "9021b283905fcbc18075083f35a37ebf6c5cdc39",
         "type": "github"
       }
     },

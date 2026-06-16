@@ -38,12 +38,24 @@ fn get_peer_cred(fd: i32) -> Option<(u32, u32, i32)> {
     const SO_PEERCRED: i32 = 17;
     const SOL_SOCKET: i32 = 1;
 
+    // getsockopt lives in libc, which Rust links by default — declare it directly
+    // rather than depend on the `libc` crate, keeping this binary dependency-free.
+    extern "C" {
+        fn getsockopt(
+            sockfd: i32,
+            level: i32,
+            optname: i32,
+            optval: *mut core::ffi::c_void,
+            optlen: *mut u32,
+        ) -> i32;
+    }
+
     let ret = unsafe {
-        libc::getsockopt(
+        getsockopt(
             fd,
             SOL_SOCKET,
             SO_PEERCRED,
-            &mut cred as *mut UCred as *mut libc::c_void,
+            &mut cred as *mut UCred as *mut core::ffi::c_void,
             &mut len as *mut u32,
         )
     };

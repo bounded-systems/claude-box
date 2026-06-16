@@ -37,7 +37,14 @@
   inputs.door-kit.url = "github:bounded-systems/door-kit/a3ae40e5075e3dbded3db9a0d345f842984a646b";
   inputs.door-kit.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit }:
+  # door-keeper — the keeperd git-signing door, extracted to its own public repo.
+  # ./keeperd.ts is a generated mirror, kept honest by the `keeperd-mirror` check.
+  # (claude-box still BUILDS keeperd-image from the mirror; consuming door-keeper's
+  # published image is the later slim-claude-box step.)
+  inputs.door-keeper.url = "github:bounded-systems/door-keeper/3ee805085447816a48313e28453ba0af24da7d49";
+  inputs.door-keeper.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -744,6 +751,19 @@
                 done
               '';
 
+            # sync-door-keeper — regenerate ./keeperd.ts from the PINNED door-keeper.
+            sync-door-keeper =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-keeper" ''
+                set -euo pipefail
+                if [ ! -f "$PWD/keeperd.ts" ]; then
+                  echo "run from the claude-box repo root (no ./keeperd.ts here)" >&2
+                  exit 1
+                fi
+                install -m 644 ${door-keeper}/keeperd.ts "$PWD/keeperd.ts"
+                echo "synced keeperd.ts"
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -869,6 +889,13 @@
         meta.description = "Sync ./lib/ from the pinned door-kit input";
       };
 
+      # `nix run .#sync-door-keeper` → regenerate ./keeperd.ts from the pinned input.
+      apps.aarch64-darwin.sync-door-keeper = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-keeper}/bin/sync-door-keeper";
+        meta.description = "Sync ./keeperd.ts from the pinned door-keeper input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -964,6 +991,16 @@
               exit 1
             fi
           done
+          touch $out
+        '';
+      # ./keeperd.ts must match the pinned door-keeper.
+      checks.aarch64-darwin.keeperd-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "keeperd-mirror" { } ''
+          if ! diff -u ${door-keeper}/keeperd.ts ${./keeperd.ts}; then
+            echo "keeperd.ts drifted from the pinned input — run: nix run .#sync-door-keeper" >&2
+            exit 1
+          fi
           touch $out
         '';
       checks.x86_64-linux.doors = doorsTest "x86_64-linux";

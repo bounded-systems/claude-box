@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "door-keeper": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781626054,
+        "narHash": "sha256-/q1LscbYQjFM9OsjZFzSGfCfF36qYnG55RKgYkxKZhI=",
+        "owner": "bounded-systems",
+        "repo": "door-keeper",
+        "rev": "3ee805085447816a48313e28453ba0af24da7d49",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "door-keeper",
+        "rev": "3ee805085447816a48313e28453ba0af24da7d49",
+        "type": "github"
+      }
+    },
     "door-kit": {
       "flake": false,
       "locked": {
@@ -69,6 +86,7 @@
     },
     "root": {
       "inputs": {
+        "door-keeper": "door-keeper",
         "door-kit": "door-kit",
         "guest-room": "guest-room",
         "nixpkgs": "nixpkgs",

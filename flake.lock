@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "door-concierge": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781628952,
+        "narHash": "sha256-UVpT+7i/FFuZsPHRBzHLXas0fA6PHT9i4+Rmem6dW+k=",
+        "owner": "bounded-systems",
+        "repo": "door-concierge",
+        "rev": "4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "door-concierge",
+        "rev": "4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae",
+        "type": "github"
+      }
+    },
     "door-keeper": {
       "flake": false,
       "locked": {
@@ -120,6 +137,7 @@
     },
     "root": {
       "inputs": {
+        "door-concierge": "door-concierge",
         "door-keeper": "door-keeper",
         "door-kit": "door-kit",
         "door-net": "door-net",

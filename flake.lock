@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "door-kit": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781623552,
+        "narHash": "sha256-zFHSjSmXDs7UGdIN9oC3g2q8N9tSNUJr5zscY9jMAl0=",
+        "owner": "bounded-systems",
+        "repo": "door-kit",
+        "rev": "a3ae40e5075e3dbded3db9a0d345f842984a646b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "door-kit",
+        "rev": "a3ae40e5075e3dbded3db9a0d345f842984a646b",
+        "type": "github"
+      }
+    },
     "guest-room": {
       "flake": false,
       "locked": {
@@ -33,10 +50,29 @@
         "type": "github"
       }
     },
+    "ocap-provenance": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781624331,
+        "narHash": "sha256-4rjHKU9rFhTqaaSoXF4hWA6ZzibiIcmvNyrZ/7eeP3o=",
+        "owner": "bounded-systems",
+        "repo": "ocap-provenance",
+        "rev": "28c7a8530e05edc446abf62cd2e04ab73f4f626f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "ocap-provenance",
+        "rev": "28c7a8530e05edc446abf62cd2e04ab73f4f626f",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
+        "door-kit": "door-kit",
         "guest-room": "guest-room",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "ocap-provenance": "ocap-provenance"
       }
     }
   },

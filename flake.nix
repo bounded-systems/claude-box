@@ -22,7 +22,22 @@
   inputs.guest-room.url = "github:bounded-systems/guest-room/5bc85b634a0a8d698243ba3b708f0420516308ec";
   inputs.guest-room.flake = false;
 
-  outputs = { self, nixpkgs, guest-room }:
+  # The capability-provenance contract, extracted to its own public repo and
+  # consumed here as a PINNED input. Single source of truth; ./contract/ is a
+  # generated mirror kept honest by the `ocap-provenance-mirror` check below.
+  # Bump with `nix flake update ocap-provenance` + `nix run .#sync-ocap-provenance`.
+  inputs.ocap-provenance.url = "github:bounded-systems/ocap-provenance/28c7a8530e05edc446abf62cd2e04ab73f4f626f";
+  inputs.ocap-provenance.flake = false;
+
+  # The in-box door-client SDK (keeper/scout/concierge/spawn clients + runtime),
+  # extracted to its own public repo and PINNED. ./lib/ is a generated mirror of
+  # door-kit's lib/, kept honest by the `door-kit-mirror` check below. Bump with
+  # `nix flake update door-kit` + `nix run .#sync-door-kit`. (door-kit itself pins
+  # the SAME guest-room rev as this flake — keep them in lockstep.)
+  inputs.door-kit.url = "github:bounded-systems/door-kit/a3ae40e5075e3dbded3db9a0d345f842984a646b";
+  inputs.door-kit.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -699,6 +714,36 @@
                 done
               '';
 
+            # sync-ocap-provenance — regenerate ./contract/ from the PINNED input.
+            sync-ocap-provenance =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-ocap-provenance" ''
+                set -euo pipefail
+                if [ ! -d "$PWD/contract" ]; then
+                  echo "run from the claude-box repo root (no ./contract here)" >&2
+                  exit 1
+                fi
+                for f in CHAIN.md README.md SLSA-MAPPING.md capability-provenance.v0.1.schema.json slsa.ts types.ts; do
+                  install -m 644 ${ocap-provenance}/$f "$PWD/contract/$f"
+                  echo "synced contract/$f"
+                done
+              '';
+
+            # sync-door-kit — regenerate ./lib/ from the PINNED door-kit/lib/.
+            sync-door-kit =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-kit" ''
+                set -euo pipefail
+                if [ ! -d "$PWD/lib" ]; then
+                  echo "run from the claude-box repo root (no ./lib here)" >&2
+                  exit 1
+                fi
+                for f in concierge.ts keeper.ts runtime.ts scout.ts spawn.ts; do
+                  install -m 644 ${door-kit}/lib/$f "$PWD/lib/$f"
+                  echo "synced lib/$f"
+                done
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -810,6 +855,20 @@
         meta.description = "Sync ./guest-room/ from the pinned guest-room input";
       };
 
+      # `nix run .#sync-ocap-provenance` → regenerate ./contract/ from the pinned input.
+      apps.aarch64-darwin.sync-ocap-provenance = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-ocap-provenance}/bin/sync-ocap-provenance";
+        meta.description = "Sync ./contract/ from the pinned ocap-provenance input";
+      };
+
+      # `nix run .#sync-door-kit` → regenerate ./lib/ from the pinned door-kit input.
+      apps.aarch64-darwin.sync-door-kit = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-kit}/bin/sync-door-kit";
+        meta.description = "Sync ./lib/ from the pinned door-kit input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -878,6 +937,30 @@
           for f in mod.ts protocol.ts daemon.ts; do
             if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
               echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
+              exit 1
+            fi
+          done
+          touch $out
+        '';
+      # ./contract/ must match the pinned ocap-provenance input.
+      checks.aarch64-darwin.ocap-provenance-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "ocap-provenance-mirror" { } ''
+          for f in CHAIN.md README.md SLSA-MAPPING.md capability-provenance.v0.1.schema.json slsa.ts types.ts; do
+            if ! diff -u ${ocap-provenance}/$f ${./contract}/$f; then
+              echo "contract/$f drifted from the pinned input — run: nix run .#sync-ocap-provenance" >&2
+              exit 1
+            fi
+          done
+          touch $out
+        '';
+      # ./lib/ must match the pinned door-kit/lib/.
+      checks.aarch64-darwin.door-kit-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "door-kit-mirror" { } ''
+          for f in concierge.ts keeper.ts runtime.ts scout.ts spawn.ts; do
+            if ! diff -u ${door-kit}/lib/$f ${./lib}/$f; then
+              echo "lib/$f drifted from the pinned input — run: nix run .#sync-door-kit" >&2
               exit 1
             fi
           done

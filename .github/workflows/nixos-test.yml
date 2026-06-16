@@ -34,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # FlakeHub Cache (OIDC — no secret)
 
 concurrency:
   group: nixos-test-${{ github.ref }}
@@ -59,6 +60,10 @@ jobs:
         with:
           extra-conf: |
             extra-experimental-features = nix-command flakes
+
+      # Shared nix binary cache: cache hits download prebuilt store paths instead
+      # of rebuilding; only changed derivations build (then get pushed). OIDC auth.
+      - uses: DeterminateSystems/flakehub-cache-action@4d48cd3cda2f381a3006ff800e1c1ca0c9809159 # v3.21.1
 
       # Native x86_64 runner → builds the x86_64-linux doors check directly. nix
       # auto-detects the `kvm` system feature once /dev/kvm is accessible.

@@ -41,28 +41,28 @@
   # ./keeperd.ts is a generated mirror, kept honest by the `keeperd-mirror` check.
   # (claude-box still BUILDS keeperd-image from the mirror; consuming door-keeper's
   # published image is the later slim-claude-box step.)
-  inputs.door-keeper.url = "github:bounded-systems/door-keeper/3ee805085447816a48313e28453ba0af24da7d49";
+  inputs.door-keeper.url = "https://flakehub.com/f/bounded-systems/door-keeper/*.tar.gz";
   inputs.door-keeper.flake = false;
 
   # door-net — the netd allowlist-egress door, extracted to its own public repo.
   # ./netd/netd.ts is a generated mirror (sync-door-net + netd-mirror check).
-  inputs.door-net.url = "github:bounded-systems/door-net/e4b5f47ef86392b1c4b3561ee05b9f43d9a44ef0";
+  inputs.door-net.url = "https://flakehub.com/f/bounded-systems/door-net/*.tar.gz";
   inputs.door-net.flake = false;
 
   # door-scout — the scoutd external-read door, extracted to its own public repo.
   # ./scoutd.ts is a generated mirror (sync-door-scout + scoutd-mirror check).
-  inputs.door-scout.url = "github:bounded-systems/door-scout/52bffb73f5d06624b3c89278dcf68f9863e7cadc";
+  inputs.door-scout.url = "https://flakehub.com/f/bounded-systems/door-scout/*.tar.gz";
   inputs.door-scout.flake = false;
 
   # door-concierge — the concierged introducer door, extracted to its own public repo.
   # ./concierged.ts is a generated mirror (sync-door-concierge + concierged-mirror check).
-  inputs.door-concierge.url = "github:bounded-systems/door-concierge/4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae";
+  inputs.door-concierge.url = "https://flakehub.com/f/bounded-systems/door-concierge/*.tar.gz";
   inputs.door-concierge.flake = false;
 
   # door-peercred — the launcherd SO_PEERCRED helper (Rust), extracted to its own
   # public repo. ./peercred/ is a generated mirror (sync-door-peercred +
   # peercred-mirror check); claude-box still BUILDS the binary from the mirror.
-  inputs.door-peercred.url = "github:bounded-systems/door-peercred/9021b283905fcbc18075083f35a37ebf6c5cdc39";
+  inputs.door-peercred.url = "https://flakehub.com/f/bounded-systems/door-peercred/*.tar.gz";
   inputs.door-peercred.flake = false;
 
   outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge, door-peercred }:

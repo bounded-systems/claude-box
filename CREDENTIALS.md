@@ -26,10 +26,11 @@ persistent capability grant; the box holds the socket, never the underlying key.
   key. ([KEEPERD.md](KEEPERD.md))
 - **authd** (`--remote-control`) — Remote Control claude.ai OAuth. RC is *not* a
   discrete effect — it **is the session itself** — so zero-knowledge brokering is
-  infeasible. The achievable ceiling: the host owns the refresh token (in op),
-  authd performs the OAuth refresh and injects an **access-token-only** credential
-  into the box's tmpfs, kept fresh before expiry. The box never holds the refresh
-  token and never refreshes. ([AUTHD.md](AUTHD.md))
+  infeasible. The achievable ceiling: the host *will* own the refresh token (in
+  op), and authd *will* perform the OAuth refresh and inject an
+  **access-token-only** credential into the box's tmpfs, kept fresh before expiry,
+  so the box never holds the refresh token and never refreshes. **authd is not yet
+  built** — it is a design + phased build plan ([AUTHD.md](AUTHD.md)); see Status.
 - **scoutd** (`--scout`) — external reads. **netd** (`--net`) — policed egress
   ([NETD.md](NETD.md)). **beadsd** (`--beads`) — beads reads/writes.
 
@@ -39,6 +40,24 @@ persistent capability grant; the box holds the socket, never the underlying key.
 - A credential persisting as the box's home-of-record — the exact problem authd
   exists to fix (see [AUTHD.md](AUTHD.md), "The problem RC creates").
 - Ambient interactive login *inside* a box to mint durable authority.
+
+## Status — realized vs. target
+
+This principle is **fully realized today only for keeperd** (git-write custody:
+the box holds the socket, never the signing key). For **RC it is the target, not
+yet the reality**:
+
+- **authd is not built yet** — [AUTHD.md](AUTHD.md) is a design + phased build
+  plan, and only its Phase 2 makes "the box never holds the credential" true.
+- Until then, **`claude-box login --scope full` is a deliberate box-local
+  interim**: it mints the credential by interactive login *inside* a box and
+  persists it to the account volume — which is exactly the last two "What this
+  rules out" bullets. It is acknowledged as such (see [AUTHD.md](AUTHD.md),
+  "Today's front door"), and authd is precisely what closes that gap.
+
+So read the principle above as the **invariant the door model is built toward** —
+honored by keeperd now, and by RC once authd lands — not a property every
+credential path already has.
 
 ## The contract
 

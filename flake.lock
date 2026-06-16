@@ -51,6 +51,23 @@
         "type": "github"
       }
     },
+    "door-scout": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781627844,
+        "narHash": "sha256-/FGss0N30YycR4BL586FNcuGY7TX5CnVNZPyVs/My0U=",
+        "owner": "bounded-systems",
+        "repo": "door-scout",
+        "rev": "52bffb73f5d06624b3c89278dcf68f9863e7cadc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "door-scout",
+        "rev": "52bffb73f5d06624b3c89278dcf68f9863e7cadc",
+        "type": "github"
+      }
+    },
     "guest-room": {
       "flake": false,
       "locked": {
@@ -106,6 +123,7 @@
         "door-keeper": "door-keeper",
         "door-kit": "door-kit",
         "door-net": "door-net",
+        "door-scout": "door-scout",
         "guest-room": "guest-room",
         "nixpkgs": "nixpkgs",
         "ocap-provenance": "ocap-provenance"

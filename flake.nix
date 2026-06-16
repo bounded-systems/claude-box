@@ -49,7 +49,12 @@
   inputs.door-net.url = "github:bounded-systems/door-net/e4b5f47ef86392b1c4b3561ee05b9f43d9a44ef0";
   inputs.door-net.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net }:
+  # door-scout — the scoutd external-read door, extracted to its own public repo.
+  # ./scoutd.ts is a generated mirror (sync-door-scout + scoutd-mirror check).
+  inputs.door-scout.url = "github:bounded-systems/door-scout/52bffb73f5d06624b3c89278dcf68f9863e7cadc";
+  inputs.door-scout.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -782,6 +787,19 @@
                 echo "synced netd/netd.ts"
               '';
 
+            # sync-door-scout — regenerate ./scoutd.ts from the PINNED door-scout.
+            sync-door-scout =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-scout" ''
+                set -euo pipefail
+                if [ ! -f "$PWD/scoutd.ts" ]; then
+                  echo "run from the claude-box repo root (no ./scoutd.ts here)" >&2
+                  exit 1
+                fi
+                install -m 644 ${door-scout}/scoutd.ts "$PWD/scoutd.ts"
+                echo "synced scoutd.ts"
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -921,6 +939,13 @@
         meta.description = "Sync ./netd/netd.ts from the pinned door-net input";
       };
 
+      # `nix run .#sync-door-scout` → regenerate ./scoutd.ts from the pinned input.
+      apps.aarch64-darwin.sync-door-scout = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-scout}/bin/sync-door-scout";
+        meta.description = "Sync ./scoutd.ts from the pinned door-scout input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -1034,6 +1059,16 @@
         in pkgs.runCommand "netd-mirror" { } ''
           if ! diff -u ${door-net}/netd/netd.ts ${./netd/netd.ts}; then
             echo "netd/netd.ts drifted from the pinned input — run: nix run .#sync-door-net" >&2
+            exit 1
+          fi
+          touch $out
+        '';
+      # ./scoutd.ts must match the pinned door-scout.
+      checks.aarch64-darwin.scoutd-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "scoutd-mirror" { } ''
+          if ! diff -u ${door-scout}/scoutd.ts ${./scoutd.ts}; then
+            echo "scoutd.ts drifted from the pinned input — run: nix run .#sync-door-scout" >&2
             exit 1
           fi
           touch $out

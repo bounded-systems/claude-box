@@ -59,7 +59,13 @@
   inputs.door-concierge.url = "github:bounded-systems/door-concierge/4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae";
   inputs.door-concierge.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge }:
+  # door-peercred — the launcherd SO_PEERCRED helper (Rust), extracted to its own
+  # public repo. ./peercred/ is a generated mirror (sync-door-peercred +
+  # peercred-mirror check); claude-box still BUILDS the binary from the mirror.
+  inputs.door-peercred.url = "github:bounded-systems/door-peercred/9021b283905fcbc18075083f35a37ebf6c5cdc39";
+  inputs.door-peercred.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge, door-peercred }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -818,6 +824,21 @@
                 echo "synced concierged.ts"
               '';
 
+            # sync-door-peercred — regenerate ./peercred/ from the PINNED door-peercred.
+            sync-door-peercred =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-peercred" ''
+                set -euo pipefail
+                if [ ! -d "$PWD/peercred/src" ]; then
+                  echo "run from the claude-box repo root (no ./peercred here)" >&2
+                  exit 1
+                fi
+                for f in Cargo.toml Cargo.lock src/main.rs; do
+                  install -m 644 ${door-peercred}/$f "$PWD/peercred/$f"
+                  echo "synced peercred/$f"
+                done
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -971,6 +992,13 @@
         meta.description = "Sync ./concierged.ts from the pinned door-concierge input";
       };
 
+      # `nix run .#sync-door-peercred` → regenerate ./peercred/ from the pinned input.
+      apps.aarch64-darwin.sync-door-peercred = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-peercred}/bin/sync-door-peercred";
+        meta.description = "Sync ./peercred/ from the pinned door-peercred input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -1106,6 +1134,18 @@
             echo "concierged.ts drifted from the pinned input — run: nix run .#sync-door-concierge" >&2
             exit 1
           fi
+          touch $out
+        '';
+      # ./peercred/ must match the pinned door-peercred.
+      checks.aarch64-darwin.peercred-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "peercred-mirror" { } ''
+          for f in Cargo.toml Cargo.lock src/main.rs; do
+            if ! diff -u ${door-peercred}/$f ${./peercred}/$f; then
+              echo "peercred/$f drifted from the pinned input — run: nix run .#sync-door-peercred" >&2
+              exit 1
+            fi
+          done
           touch $out
         '';
       checks.x86_64-linux.doors = doorsTest "x86_64-linux";

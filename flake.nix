@@ -44,7 +44,12 @@
   inputs.door-keeper.url = "github:bounded-systems/door-keeper/3ee805085447816a48313e28453ba0af24da7d49";
   inputs.door-keeper.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper }:
+  # door-net — the netd allowlist-egress door, extracted to its own public repo.
+  # ./netd/netd.ts is a generated mirror (sync-door-net + netd-mirror check).
+  inputs.door-net.url = "github:bounded-systems/door-net/e4b5f47ef86392b1c4b3561ee05b9f43d9a44ef0";
+  inputs.door-net.flake = false;
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -764,6 +769,19 @@
                 echo "synced keeperd.ts"
               '';
 
+            # sync-door-net — regenerate ./netd/netd.ts from the PINNED door-net.
+            sync-door-net =
+              let pkgs = pkgsFor "aarch64-darwin";
+              in pkgs.writeShellScriptBin "sync-door-net" ''
+                set -euo pipefail
+                if [ ! -f "$PWD/netd/netd.ts" ]; then
+                  echo "run from the claude-box repo root (no ./netd/netd.ts here)" >&2
+                  exit 1
+                fi
+                install -m 644 ${door-net}/netd/netd.ts "$PWD/netd/netd.ts"
+                echo "synced netd/netd.ts"
+              '';
+
             # setup — one-call local bringup for macOS (determinate, pinned).
             # Takes a fresh checkout from clone to a running box without the
             # manual dance: prereqs → podman machine → build+load image → doors.
@@ -896,6 +914,13 @@
         meta.description = "Sync ./keeperd.ts from the pinned door-keeper input";
       };
 
+      # `nix run .#sync-door-net` → regenerate ./netd/netd.ts from the pinned input.
+      apps.aarch64-darwin.sync-door-net = {
+        type = "app";
+        program = "${self.packages.aarch64-darwin.sync-door-net}/bin/sync-door-net";
+        meta.description = "Sync ./netd/netd.ts from the pinned door-net input";
+      };
+
       apps.aarch64-darwin.provenance = {
         type = "app";
         program = "${self.packages.aarch64-darwin.provenance}/bin/provenance";
@@ -999,6 +1024,16 @@
         in pkgs.runCommand "keeperd-mirror" { } ''
           if ! diff -u ${door-keeper}/keeperd.ts ${./keeperd.ts}; then
             echo "keeperd.ts drifted from the pinned input — run: nix run .#sync-door-keeper" >&2
+            exit 1
+          fi
+          touch $out
+        '';
+      # ./netd/netd.ts must match the pinned door-net.
+      checks.aarch64-darwin.netd-mirror =
+        let pkgs = pkgsFor "aarch64-darwin";
+        in pkgs.runCommand "netd-mirror" { } ''
+          if ! diff -u ${door-net}/netd/netd.ts ${./netd/netd.ts}; then
+            echo "netd/netd.ts drifted from the pinned input — run: nix run .#sync-door-net" >&2
             exit 1
           fi
           touch $out

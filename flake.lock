@@ -68,6 +68,23 @@
         "type": "github"
       }
     },
+    "door-peercred": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781630205,
+        "narHash": "sha256-+6ADNwMC5XyUlJwE4foc+vLIVvRvqWEf3VarQ9usxNo=",
+        "owner": "bounded-systems",
+        "repo": "door-peercred",
+        "rev": "2e3ed4b5051d0acfcb206ff282847b40b00000ed",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bounded-systems",
+        "repo": "door-peercred",
+        "rev": "2e3ed4b5051d0acfcb206ff282847b40b00000ed",
+        "type": "github"
+      }
+    },
     "door-scout": {
       "flake": false,
       "locked": {
@@ -141,6 +158,7 @@
         "door-keeper": "door-keeper",
         "door-kit": "door-kit",
         "door-net": "door-net",
+        "door-peercred": "door-peercred",
         "door-scout": "door-scout",
         "guest-room": "guest-room",
         "nixpkgs": "nixpkgs",

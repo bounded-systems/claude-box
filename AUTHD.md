@@ -149,3 +149,66 @@ authd writes the same shape into the box **minus `refreshToken`**, refreshing
 
 prx-9s14 (the `--remote-control` profile): the interim profile + spike are done;
 authd is the hardening that makes the box stop holding the credential.
+
+## Build plan (phased — gated on the continuity unknown)
+
+The design (B) is settled; the build order is driven by **Open Risk #1
+(continuity across expiry)**, because the answer to it decides how much authd has
+to do. Same discipline as CONCIERGE.md §9: each phase has a verification gate, and
+nothing downstream is claimed as a security boundary until the credential
+actually stops living in the box (Phase 3).
+
+- **Phase 0 — resolve the continuity unknown (do this *first*, before any
+  daemon).** Answer: when authd rewrites `accessToken`/`expiresAt` in the box's
+  credentials file, does the box's `claude` **re-read** it, or cache the token and
+  only refresh on a 401? Cheap experiment (don't wait 8h, don't trigger a live
+  rotation): hand a box an access-token-only credential with a **near-future
+  `expiresAt`**, let it idle past that, rewrite the file with a fresh
+  access-token, and observe whether the next request succeeds without a restart.
+  - **Gate:** *re-reads* → Phase 2 is a file-rewrite-on-a-timer (seamless);
+    *caches* → Phase 2 must also nudge/restart the RC session at refresh. This
+    single bit sets Phase 2's scope, so it's the cheapest thing to learn early.
+  - In parallel (no live refresh): **confirm the OAuth refresh spec** first-hand
+    (Risk #2) — endpoint `platform.claude.com/v1/oauth/token`, the public
+    `client_id`, and whether PKCE/`code_verifier` is required *on refresh* (likely
+    a conflation with initial auth). Read the docs/clients; do **not** verify by
+    rotating an in-use token.
+
+- **Phase 1 — `authd serve` (host-side, NOT yet wired into `--remote-control`).**
+  Build the daemon as a keeperd sibling: Unix socket / TCP-mode port, registered
+  in `knownDoors`. One op: `lease` → read the refresh token from op
+  (`AUTHD_OP_REF`), perform the `grant_type=refresh_token` exchange, **persist the
+  rotated refresh token back to op** (single-use chain, authd is sole writer),
+  return an **access-token-only** credential (the §"Credential shape" minus
+  `refreshToken`). Egress: authd needs `platform.claude.com` (its own net posture,
+  not the box's allowlist).
+  - **Gate:** `authd lease` returns a fresh access-token-only credential, and a
+    box handed *that* (manually mounted) starts an RC session — reusing the
+    already-verified fact that access-token-only runs RC. authd is **plumbing
+    here, not yet a boundary**: the box volume still holds a credential until
+    Phase 2/3.
+
+- **Phase 2 — wire `--remote-control` to source from the authd door.** The box
+  gets its credential from `lease` (written to **tmpfs**, no `refreshToken`)
+  **instead of** mounting `claude-<account>-config`; authd re-leases before the
+  ~8h expiry, applying the Phase-0 continuity mechanism (timer rewrite, +
+  nudge/restart iff caching). Add the **exclusive-use guard** (Risk #3): refuse /
+  warn if a concurrent host `claude` shares the same account login (rotation
+  conflict), or require a dedicated login.
+  - **Gate:** an RC box runs across a token expiry with **no `refreshToken`
+    anywhere in the box** and no manual re-login. This is where "the box borrows a
+    login, never holds one" becomes true — the boundary goes live.
+
+- **Phase 3 — cutover: move the home-of-record out of the box.** Migrate the
+  existing in-box-login full-scope credential from `claude-<account>-config` into
+  op (host). `claude-box login --scope full` becomes the **seam**: it persists to
+  op via authd instead of the box volume (CLI surface unchanged, custody moves —
+  exactly the migration AUTHD.md's intro promises). The box config volume is now
+  **credential-free** for RC.
+  - **Gate:** a fresh machine with only the op ref + `claude-box login` can drive
+    RC, and `grep -r refreshToken` finds nothing in any box volume.
+
+Until Phase 2, do not claim the box "doesn't hold the credential" — Phases 0–1
+are de-risking + plumbing; the box-local login (`claude-box login`, shipped) is
+still the home-of-record.
+

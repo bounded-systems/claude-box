@@ -449,6 +449,12 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --door NAME[:CAV...][@SOCK]  attach door with optional caveats
 
   # Management
+  claude-box login [a] --scope full|inference
+                              auth-only box for account <a> (no repo): run the
+                              login flow, persist to the account volume, exit.
+                              full = full-scope 'claude auth login' (needed for
+                              Remote Control); inference = the inference-only
+                              setup-token posture. --scope is required.
   claude-box ls               list accounts
   claude-box name <a> <desc>  label an account
   claude-box doors init       one-shot setup (build images, install units)
@@ -884,6 +890,49 @@ function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
  *  interactive entrypoint is byte-for-byte unchanged. */
 function remoteServeArgs(launch: Launch, account: string): string[] {
   return launch.remoteServe ? ["remote-control", "--name", account] : [];
+}
+
+/** Pure planner for `claude-box login` — the auth front door. Resolves the
+ *  account + required `--scope`, and synthesizes a repo-less Launch whose only
+ *  job is to host the login flow against the account's config volume:
+ *
+ *    full      → the --remote-control auth posture (OMIT the inference-only
+ *                setup-token so a full-scope in-box `claude auth login` is what
+ *                persists) + the net door, since OAuth needs egress.
+ *    inference → just the net door; the default posture forwards the
+ *                inference-only setup-token.
+ *
+ *  No repo, no room — authority here is the credential, not a worktree. `--scope`
+ *  is REQUIRED (no implicit default): minting a credential is an explicit choice,
+ *  and a full-scope token is far more powerful than an inference-only one, so the
+ *  caller says which on purpose. Throws on a missing/!known scope (fail closed).
+ *  Eventually this login moves behind authd (see AUTHD.md); today it is box-local. */
+function planLogin(
+  args: string[],
+  env: Env = process.env,
+): { account: string; scope: "full" | "inference"; launch: Launch } {
+  let account: string | undefined;
+  let scope: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--scope") {
+      scope = args[++i];
+      continue;
+    }
+    if (!a.startsWith("-") && account === undefined) {
+      account = a;
+      continue;
+    }
+    throw new Error(`claude-box login: unexpected argument "${a}"`);
+  }
+  if (scope === undefined) {
+    throw new Error("claude-box login: --scope is required (full | inference)");
+  }
+  if (scope !== "full" && scope !== "inference") {
+    throw new Error(`claude-box login: unknown --scope "${scope}" (expected: full | inference)`);
+  }
+  const launch = planLaunch(scope === "full" ? ["--remote-control"] : ["--net"], env);
+  return { account: account ?? "personal", scope, launch };
 }
 
 type Manifest = {
@@ -2353,6 +2402,32 @@ async function cmdAttach(launchId: string): Promise<number> {
   }
 }
 
+/** `claude-box login [account] --scope full|inference` — launch a minimal,
+ *  repo-less box bound to the account's config volume so you can authenticate
+ *  once and persist it. For `--scope full` you log in inside (`/login`), the
+ *  full-scope credential lands in `claude-<account>-config`, and it is then the
+ *  front door for `--remote-control`. See planLogin. */
+async function cmdLogin(args: string[]): Promise<number> {
+  let plan;
+  try {
+    plan = planLogin(args);
+  } catch (e) {
+    console.error((e as Error).message);
+    console.error("usage: claude-box login [account] --scope full|inference");
+    return 1;
+  }
+  const { account, scope, launch } = plan;
+  assertAccount(account);
+  console.error(
+    `claude-box: login box for '${account}' (scope: ${scope}, no repo). ` +
+      (scope === "full"
+        ? "Run /login inside to do a full-scope login, then exit — it persists in " +
+          `claude-${account}-config.`
+        : "Inference-only posture; exit when done."),
+  );
+  return run(account, launch);
+}
+
 async function main(): Promise<number> {
   const [first, ...rest] = Bun.argv.slice(2);
 
@@ -2374,6 +2449,8 @@ async function main(): Promise<number> {
       return cmdKill(rest[0] ?? "");
     case "attach":
       return cmdAttach(rest[0] ?? "");
+    case "login":
+      return cmdLogin(rest);
     case "doors":
       return cmdDoors(rest[0] ?? "", rest.slice(1));
     case "keeper-status":
@@ -2404,6 +2481,7 @@ export {
   knownGuests,
   resolveDoor,
   planLaunch,
+  planLogin,
   authEnvArgs,
   remoteServeArgs,
   BOX_CONFIG_DIR,

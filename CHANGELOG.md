@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.6.0...claude-box-v0.7.0) (2026-06-16)
+
+
+### Features
+
+* **cli:** add `claude-box login` — the auth front door ([#123](https://github.com/bounded-systems/claude-box/issues/123)) ([0fcac14](https://github.com/bounded-systems/claude-box/commit/0fcac1480ae1575b1c122ce711614d921f2a02c7))
+
 ## [0.6.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.5.0...claude-box-v0.6.0) (2026-06-15)
 
 

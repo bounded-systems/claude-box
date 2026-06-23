@@ -1,0 +1,10 @@
+{
+  "name": {
+    "type": "name",
+    "value": "Claude Box"
+  },
+  "description": {
+    "type": "meta",
+    "value": "A pinned, isolated, multi-account Claude runtime — Claude Code in a"
+  }
+}

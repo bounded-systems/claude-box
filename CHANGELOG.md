@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.7.0...claude-box-v0.8.0) (2026-06-16)
+
+
+### Features
+
+* vendor concierged.ts as a pinned mirror of door-concierge ([#139](https://github.com/bounded-systems/claude-box/issues/139)) ([a63f82d](https://github.com/bounded-systems/claude-box/commit/a63f82de9f2d4d85cb45fabc8f0ac562e1adc7fb))
+* vendor contract/ + lib/ as pinned mirrors (ocap-provenance, door-kit) ([#134](https://github.com/bounded-systems/claude-box/issues/134)) ([640f3fd](https://github.com/bounded-systems/claude-box/commit/640f3fd3f472dee0756b380e24751703f2becd1f))
+* vendor keeperd.ts as a pinned mirror of door-keeper ([#136](https://github.com/bounded-systems/claude-box/issues/136)) ([4b2019e](https://github.com/bounded-systems/claude-box/commit/4b2019e63e3888a8702b3846fd04eac502f58818))
+* vendor netd/netd.ts as a pinned mirror of door-net ([#137](https://github.com/bounded-systems/claude-box/issues/137)) ([ed38507](https://github.com/bounded-systems/claude-box/commit/ed385077d19e2131b1f62f20e9d0d1d066a0b7f7))
+* vendor peercred/ as a pinned mirror of door-peercred ([#141](https://github.com/bounded-systems/claude-box/issues/141)) ([31965de](https://github.com/bounded-systems/claude-box/commit/31965de1a54c466d7560c03cf277ce9a97b883b0))
+* vendor scoutd.ts as a pinned mirror of door-scout ([#138](https://github.com/bounded-systems/claude-box/issues/138)) ([87e6f8c](https://github.com/bounded-systems/claude-box/commit/87e6f8c219fca0a907ba6863cea801f048d1dc74))
+
 ## [0.7.0](https://github.com/bounded-systems/claude-box/compare/claude-box-v0.6.0...claude-box-v0.7.0) (2026-06-16)
 
 

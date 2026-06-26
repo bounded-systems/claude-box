@@ -54,7 +54,7 @@ The VM needs `nix-daemon` reachable over SSH. (Symptom of a VM with **no** Nix:
 connects, but there's nothing serving `nix-daemon --stdio` on the far end.)
 
 ```sh
-limactl shell <vm-name>     # e.g. bdelanghe-lima-devshell-main
+limactl shell <vm-name>     # e.g. alice-lima-devshell-main
 # inside the VM (Determinate installer; works on the usual Linux distros):
 curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
   | sh -s -- install linux --no-confirm

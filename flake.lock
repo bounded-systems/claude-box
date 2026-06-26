@@ -3,35 +3,31 @@
     "door-concierge": {
       "flake": false,
       "locked": {
-        "lastModified": 1781628952,
-        "narHash": "sha256-UVpT+7i/FFuZsPHRBzHLXas0fA6PHT9i4+Rmem6dW+k=",
-        "owner": "bounded-systems",
-        "repo": "door-concierge",
-        "rev": "4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae",
-        "type": "github"
+        "lastModified": 1781637837,
+        "narHash": "sha256-CaqqcGcmQQKnbiVpsH3gbV6dinOvoHfLYmDgu8I2m3I=",
+        "rev": "a1b2c1dbe098a1e6e8efa7909ebc617b38969321",
+        "revCount": 3,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-concierge/0.1.3%2Brev-a1b2c1dbe098a1e6e8efa7909ebc617b38969321/019ed1e4-b10a-7043-bfa5-ea049da71b27/source.tar.gz"
       },
       "original": {
-        "owner": "bounded-systems",
-        "repo": "door-concierge",
-        "rev": "4c3d8ec82d2df3126942ea1ae8d1b3d333cefbae",
-        "type": "github"
+        "type": "tarball",
+        "url": "https://flakehub.com/f/bounded-systems/door-concierge/%2A.tar.gz"
       }
     },
     "door-keeper": {
       "flake": false,
       "locked": {
-        "lastModified": 1781626054,
-        "narHash": "sha256-/q1LscbYQjFM9OsjZFzSGfCfF36qYnG55RKgYkxKZhI=",
-        "owner": "bounded-systems",
-        "repo": "door-keeper",
-        "rev": "3ee805085447816a48313e28453ba0af24da7d49",
-        "type": "github"
+        "lastModified": 1781637825,
+        "narHash": "sha256-A8PxouzTnYHr7F81Mi4I0zA/l90CCVVcufVFIr3Oos0=",
+        "rev": "fd9efda32f60deb4a55931f379013e41c2db90ba",
+        "revCount": 4,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-keeper/0.1.4%2Brev-fd9efda32f60deb4a55931f379013e41c2db90ba/019ed1e4-64c4-7e30-96d9-49fc272d580b/source.tar.gz"
       },
       "original": {
-        "owner": "bounded-systems",
-        "repo": "door-keeper",
-        "rev": "3ee805085447816a48313e28453ba0af24da7d49",
-        "type": "github"
+        "type": "tarball",
+        "url": "https://flakehub.com/f/bounded-systems/door-keeper/%2A.tar.gz"
       }
     },
     "door-kit": {
@@ -54,52 +50,46 @@
     "door-net": {
       "flake": false,
       "locked": {
-        "lastModified": 1781627051,
-        "narHash": "sha256-L6svnhSuHBZvpqcW+QWM9Ey9W5kY9U87NYycohiLQoI=",
-        "owner": "bounded-systems",
-        "repo": "door-net",
-        "rev": "e4b5f47ef86392b1c4b3561ee05b9f43d9a44ef0",
-        "type": "github"
+        "lastModified": 1781637829,
+        "narHash": "sha256-/XBdC4cKox9VrHp+tAPxh0Lda1gfS5TtD7/T57r2W90=",
+        "rev": "45fa219e3c23b8d96cc663645c07ec7b8a4189f6",
+        "revCount": 3,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-net/0.1.3%2Brev-45fa219e3c23b8d96cc663645c07ec7b8a4189f6/019ed1e4-a924-7aa1-9c02-1f16370a8278/source.tar.gz"
       },
       "original": {
-        "owner": "bounded-systems",
-        "repo": "door-net",
-        "rev": "e4b5f47ef86392b1c4b3561ee05b9f43d9a44ef0",
-        "type": "github"
+        "type": "tarball",
+        "url": "https://flakehub.com/f/bounded-systems/door-net/%2A.tar.gz"
       }
     },
     "door-peercred": {
       "flake": false,
       "locked": {
-        "lastModified": 1781635185,
-        "narHash": "sha256-ZyBzJVwTFKVStKSz9Ew0usJRnKGZ3NyCIrHIytmyeFY=",
-        "owner": "bounded-systems",
-        "repo": "door-peercred",
-        "rev": "9021b283905fcbc18075083f35a37ebf6c5cdc39",
-        "type": "github"
+        "lastModified": 1781637842,
+        "narHash": "sha256-9C6cLQSeriSEYS38nyBzyIYtwDX1CLmXPX7KJH3DMgk=",
+        "rev": "1a0b2c4610525541d96c36b06c91e51eeeb52204",
+        "revCount": 3,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-peercred/0.1.3%2Brev-1a0b2c4610525541d96c36b06c91e51eeeb52204/019ed1e4-a670-7142-bf2d-e1a857f2005c/source.tar.gz"
       },
       "original": {
-        "owner": "bounded-systems",
-        "repo": "door-peercred",
-        "rev": "9021b283905fcbc18075083f35a37ebf6c5cdc39",
-        "type": "github"
+        "type": "tarball",
+        "url": "https://flakehub.com/f/bounded-systems/door-peercred/%2A.tar.gz"
       }
     },
     "door-scout": {
       "flake": false,
       "locked": {
-        "lastModified": 1781627844,
-        "narHash": "sha256-/FGss0N30YycR4BL586FNcuGY7TX5CnVNZPyVs/My0U=",
-        "owner": "bounded-systems",
-        "repo": "door-scout",
-        "rev": "52bffb73f5d06624b3c89278dcf68f9863e7cadc",
-        "type": "github"
+        "lastModified": 1781637834,
+        "narHash": "sha256-4O8BLOUr2eOZbrlg0TWsgYT+OwM7+4IvJTiBXOcC79s=",
+        "rev": "6ac9a4689be9eb5673c8ea5e01de12e8ba4c302c",
+        "revCount": 3,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-scout/0.1.3%2Brev-6ac9a4689be9eb5673c8ea5e01de12e8ba4c302c/019ed1e4-a6f7-7043-a534-efdd96de8504/source.tar.gz"
       },
       "original": {
-        "owner": "bounded-systems",
-        "repo": "door-scout",
-        "rev": "52bffb73f5d06624b3c89278dcf68f9863e7cadc",
-        "type": "github"
+        "type": "tarball",
+        "url": "https://flakehub.com/f/bounded-systems/door-scout/%2A.tar.gz"
       }
     },
     "guest-room": {

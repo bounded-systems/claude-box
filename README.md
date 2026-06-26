@@ -77,7 +77,7 @@ topology (host / VM / room) is in [ROOM.md](./ROOM.md).
 ## Install (home-manager)
 
 ```nix
-inputs.claude-box.url = "github:bdelanghe/claude-box";
+inputs.claude-box.url = "github:bounded-systems/claude-box";
 # …
 home.packages = [ inputs.claude-box.packages.${system}.claude-box ];
 ```

@@ -1,0 +1,14 @@
+{
+  "name": {
+    "type": "name",
+    "value": "Claude Box"
+  },
+  "tagline": {
+    "type": "tagline",
+    "value": "A pinned, isolated, multi-account Claude runtime — Claude Code in a content-addressed OCI container, one account per …"
+  },
+  "description": {
+    "type": "meta",
+    "value": "A pinned, isolated, multi-account Claude runtime — Claude Code in a content-addressed OCI container, one account per volume, built reproducibly by nix.  Each account's auth/history/projects live in their own podman volume; the container itself is credential-free (see CAPABILIT…"
+  }
+}

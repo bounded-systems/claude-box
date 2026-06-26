@@ -136,15 +136,20 @@ narrowed; enforcement is the target's `checkCaveats` (already shipped, #99).
   is guest-agnostic — does it graduate into the public `guest-room` engine
   (like `protocol.ts`/`daemon.ts`), with claude-box running a concierged
   instance? Leaning yes; it's a generic capability-introduction service.
-- **Reference strength — DECIDED: signed grants, verified by the serving room
-  (not fd-passing).** Split the responsibilities: a **door only determines
-  availability** (am I live/reachable); **authority rides in a signed grant the
-  serving room validates** on every call. The question becomes *"do you hold a
-  valid signed grant?"*, not *"can you reach the socket?"* — socket
-  *reachability stops being authority*, so the §3 path reference is safe and we
-  don't need `SCM_RIGHTS`. Chosen over fd-passing because it is
-  **transport-agnostic**: a signed grant works over the `vsock`/`tcp` transports
-  `DoorTransport` already models, whereas `SCM_RIGHTS` is unix-local only.
+- **Reference strength — DECIDED: capability strength is chosen by transport
+  (ocap locally, signed grants in transit).** See
+  [ADR-CAPABILITY-TRANSPORT.md](./ADR-CAPABILITY-TRANSPORT.md) (2026-06-26),
+  which supersedes the earlier blanket "signed grants, not fd-passing" framing
+  this bullet originally recorded. The split:
+  - **`unix` transport (local):** the **held reference is the authority** — the
+    socket fd / bind-mount *is* the grant, delegated by `SCM_RIGHTS`. Pure ocap;
+    the mounted set is the capability set (`prx-sfr0`). No verify step.
+  - **`vsock`/`tcp` transport (in transit):** a **door only determines
+    availability** (am I live/reachable); **authority rides in a signed grant the
+    serving room validates** on every call — *"do you hold a valid signed
+    grant?"*, not *"can you reach the socket?"*. `SCM_RIGHTS` can't cross the
+    boundary, so the signed grant is the transport-agnostic substitute over the
+    `vsock`/`tcp` transports `DoorTransport` models.
   - **Signer.** Signing currently lives in **prx** (not yet extracted — likely
     its own repo). The issuer signs the grant; the serving room verifies against
     the issuer's public key. (Not keeperd.) Until extraction, the verify path is

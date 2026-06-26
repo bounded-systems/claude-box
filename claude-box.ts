@@ -221,6 +221,34 @@ function assertSocketExists(sock: string, doorName?: string): void {
   }
 }
 
+/** The podman argv fragment that wires a box's granted doors. Pure (no I/O — the
+ *  existence/reachability/hijack preflight stays in run()), so the capability
+ *  boundary is unit-testable.
+ *
+ *  UNIX mode mounts each granted socket INDIVIDUALLY (host socket → its guest
+ *  path): the mounted set IS the capability set (prx-sfr0). The old whole-run-dir
+ *  mount (`${runDir}:/run/doors`) exposed EVERY daemon socket regardless of
+ *  grant, so a scout-only box could still reach keeperd/netd; the per-door env
+ *  vars were only hints, not the boundary. Per-socket mounts make a non-granted
+ *  door physically unreachable inside the box — on the unix transport the held
+ *  reference IS the authority (see ADR-CAPABILITY-TRANSPORT).
+ *
+ *  TCP mode mounts nothing; the door is reached over the host gateway, so it only
+ *  points each env var at the guest TCP endpoint. */
+function planDoorMounts(doors: DoorGrant[], tcpMode: boolean): string[] {
+  const argv: string[] = [];
+  for (const d of doors) {
+    if (tcpMode) {
+      argv.push("--env", `${d.env}=${transportString(d.guest)}`);
+    } else {
+      const guestPath = unixPath(d.guest);
+      argv.push("-v", `${unixPath(d.host)}:${guestPath}`);
+      argv.push("--env", `${d.env}=${guestPath}`);
+    }
+  }
+  return argv;
+}
+
 /** True if a TCP listener accepts a connection at host:port within the timeout.
  *  The TCP-mode counterpart to assertSocketExists's existsSync check. */
 async function tcpReachable(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
@@ -1399,29 +1427,26 @@ async function run(
     }
   }
 
-  // Forward doors: TCP mode vs Unix socket mode
+  // Forward doors: preflight (side effects: existence / reachability / hijack
+  // check), then append the pure mount+env argv from planDoorMounts.
   if (doors.length > 0) {
     if (tcpMode) {
-      // TCP mode: no socket mounts needed, just set env vars to TCP endpoints.
       // Preflight each door's daemon so a down door fails here with a hint,
       // not later inside the box with an opaque connection error.
       for (const d of doors) {
         await assertTcpDoorReachable(d.name);
-        const endpoint = transportString(d.guest);
-        argv.push("--env", `${d.env}=${endpoint}`);
       }
     } else {
-      // Unix socket mode: mount socket directory, set env vars to socket paths
-      const hostDir = getRunDir(env);
-      assertSocketDir(`${hostDir}/placeholder`, undefined);
-      argv.push("-v", `${hostDir}:/run/doors`);
+      // Each granted socket must exist (daemon up) and sit in a non-world-
+      // writable dir (or another host user could pre-create the socket and MITM
+      // the door). planDoorMounts then mounts each granted socket INDIVIDUALLY.
       for (const d of doors) {
         const hostPath = unixPath(d.host);
-        const guestPath = unixPath(d.guest);
         assertSocketExists(hostPath, d.name);
-        argv.push("--env", `${d.env}=${guestPath}`);
+        assertSocketDir(hostPath, d.name); // hijack-risk check on the source dir
       }
     }
+    argv.push(...planDoorMounts(doors, tcpMode));
   }
   // The machine-readable surface for the in-box runtime (prx tool-gating).
   argv.push("--env", `CLAUDE_BOX_CAPABILITIES=${capabilityJson(manifest)}`);
@@ -2480,6 +2505,7 @@ export {
   knownRooms,
   knownGuests,
   resolveDoor,
+  planDoorMounts,
   planLaunch,
   planLogin,
   authEnvArgs,

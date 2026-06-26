@@ -77,8 +77,10 @@ function loadOrCreateKey(keyPath: string): SigningKey {
 
   if (existsSync(keyPath)) {
     privateKeyPem = readFileSync(keyPath, "utf-8");
-    const privateKey = createPrivateKey(privateKeyPem);
-    const publicKey = createPublicKey(privateKey);
+    // Derive the public key from the private-key PEM directly. Passing a
+    // KeyObject to createPublicKey trips the bun-types overload (it accepts a
+    // PEM/DER string but not a derived KeyObject); the PEM path is equivalent.
+    const publicKey = createPublicKey(privateKeyPem);
     publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
   } else {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");

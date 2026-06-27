@@ -56,8 +56,13 @@ describe("SLSA Provenance v1 format (default)", () => {
     const s = await slsaStmt() as any;
     const deps = s.predicate.buildDefinition.resolvedDependencies ?? [];
     const uris = deps.map((d: any) => d.uri);
-    // the nixpkgs rev pinned in flake.lock
+    // the nixpkgs rev pinned in flake.lock (the ROOT's nixpkgs, resolved via
+    // root.inputs — not whatever node happens to be keyed `nixpkgs`)
     expect(uris.some((u: string) => u.includes("9f11f828c213641c2369a9f1fa31fe31557e3156"))).toBe(true);
+    // ...and NOT a transitive dependency's nixpkgs (git-ai-flake pins unstable
+    // 89570f2). Guards the flake.lock node re-keying bug: attesting the wrong
+    // nixpkgs would silently misreport what built the image.
+    expect(uris.some((u: string) => u.includes("89570f24e97e614aa34aa9ab1c927b6578a43775"))).toBe(false);
     // the prx release pinned in flake.nix
     expect(uris.some((u: string) => u.includes("prx/releases/download"))).toBe(true);
   });

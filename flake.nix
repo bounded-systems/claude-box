@@ -65,7 +65,16 @@
   inputs.door-peercred.url = "https://flakehub.com/f/bounded-systems/door-peercred/*.tar.gz";
   inputs.door-peercred.flake = false;
 
-  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge, door-peercred }:
+  # git-ai — local-first AI/human edit provenance (git-ai-project/git-ai),
+  # packaged by bdelanghe/git-ai-flake. A real flake (exports packages.git-ai),
+  # so it is NOT `flake = false` like the door mirrors above. Shipped in the box
+  # so the agent can emit `git ai checkpoint` for AI-vs-human edit attribution.
+  # Posture-safe (cf. GH-5's removal of `gh`): git-ai writes ONLY to the repo's
+  # local .git, holds no credentials and needs no egress — it is provenance, not
+  # a push/credential path.
+  inputs.git-ai-flake.url = "github:bdelanghe/git-ai-flake/666cfafaf95ec6886c3100285da13a2cd9f9c959";
+
+  outputs = { self, nixpkgs, guest-room, ocap-provenance, door-kit, door-keeper, door-net, door-scout, door-concierge, door-peercred, git-ai-flake }:
     let
       # The image targets Linux. On an aarch64-darwin host this builds via a
       # Linux builder (prx-9yp) — the expression itself is builder-agnostic.
@@ -176,6 +185,7 @@
             prx                # the box's sanctioned tool (pinned v0.10.0)
             claude-code        # the star — pinned by the locked nixpkgs rev
             git                # local VCS ops (read/diff/status); pushes go via keeperd
+            git-ai-flake.packages.${system}.git-ai  # AI/human edit provenance — `git ai checkpoint` (writes local .git only; no creds, no egress)
             # NB: `gh` is deliberately ABSENT (GH-5). It was a latent direct-push
             # credential path — `gh auth login` + a token bypasses keeperd. With it
             # gone, the box has no tool that can establish push rights; writes go

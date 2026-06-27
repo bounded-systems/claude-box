@@ -18,12 +18,12 @@
     "door-keeper": {
       "flake": false,
       "locked": {
-        "lastModified": 1781637825,
-        "narHash": "sha256-A8PxouzTnYHr7F81Mi4I0zA/l90CCVVcufVFIr3Oos0=",
-        "rev": "fd9efda32f60deb4a55931f379013e41c2db90ba",
-        "revCount": 4,
+        "lastModified": 1782599122,
+        "narHash": "sha256-7C0tMjJznOUb/kyB01aPFbRLRF2AqBKfwXH3HDsQSRs=",
+        "rev": "dbe65e5143e0685b3278b6bd2bb69809c6ceffdc",
+        "revCount": 21,
         "type": "tarball",
-        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-keeper/0.1.4%2Brev-fd9efda32f60deb4a55931f379013e41c2db90ba/019ed1e4-64c4-7e30-96d9-49fc272d580b/source.tar.gz"
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-keeper/0.1.21%2Brev-dbe65e5143e0685b3278b6bd2bb69809c6ceffdc/019f0b30-921a-7793-9d6f-372aae3e6576/source.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -33,17 +33,17 @@
     "door-kit": {
       "flake": false,
       "locked": {
-        "lastModified": 1781623552,
-        "narHash": "sha256-zFHSjSmXDs7UGdIN9oC3g2q8N9tSNUJr5zscY9jMAl0=",
+        "lastModified": 1782600576,
+        "narHash": "sha256-n2GbyMypz0t4JX0fW3IlDoIbBY4WvfGR8bTzr26l7So=",
         "owner": "bounded-systems",
         "repo": "door-kit",
-        "rev": "a3ae40e5075e3dbded3db9a0d345f842984a646b",
+        "rev": "035d9620a1be7b99b08197b9bab03ee8c5ca3913",
         "type": "github"
       },
       "original": {
         "owner": "bounded-systems",
         "repo": "door-kit",
-        "rev": "a3ae40e5075e3dbded3db9a0d345f842984a646b",
+        "rev": "035d9620a1be7b99b08197b9bab03ee8c5ca3913",
         "type": "github"
       }
     },

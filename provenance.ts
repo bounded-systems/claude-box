@@ -57,7 +57,14 @@ async function materials(root: string): Promise<Material[]> {
   const out: Material[] = [];
 
   const lock = JSON.parse(await Bun.file(`${root}/flake.lock`).text());
-  const nixpkgs = lock?.nodes?.nixpkgs?.locked;
+  // Resolve the ROOT's nixpkgs via root.inputs, NOT the bare `nodes.nixpkgs`
+  // key: flake.lock node keys are assigned by traversal order and are not
+  // semantic. Once a transitive input pins its own nixpkgs, nix re-keys the
+  // nodes (e.g. `nixpkgs` becomes the dependency's, ours becomes `nixpkgs_2`),
+  // so assuming `nodes.nixpkgs` is ours would attest the WRONG rev.
+  const rootRef = lock?.nodes?.root?.inputs?.nixpkgs;
+  const nixpkgsKey = Array.isArray(rootRef) ? rootRef[rootRef.length - 1] : rootRef;
+  const nixpkgs = nixpkgsKey ? lock?.nodes?.[nixpkgsKey]?.locked : undefined;
   if (nixpkgs?.rev) {
     out.push({
       uri: `github:${nixpkgs.owner}/${nixpkgs.repo}/${nixpkgs.rev}`,

@@ -212,6 +212,38 @@
             pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
           };
 
+          # GitAI authorship hooks — baked as MANAGED settings at
+          # /etc/claude-code/managed-settings.json: a SYSTEM path the account-config
+          # volume does NOT shadow (unlike $CLAUDE_CONFIG_DIR/settings.json),
+          # highest precedence, hooks MERGE with (never replace) user/project hooks.
+          # Two complementary records (see GITAI-PROVENANCE.md):
+          #
+          #   1. `git ai checkpoint claude` (Pre+Post) — the model's rich self-report
+          #      via git-ai. Persists to .git notes, so it lands only in --repo-rw
+          #      boxes (the hardened box runs .git READ-ONLY); resilient || true.
+          #   2. record-authored (Post) — appends each edited file's repo-relative
+          #      path to $KEEPER_AUTHORSHIP_SINK. `keeper commit` reads + truncates
+          #      that sink and passes it as the authorship CLAIM, which keeperd
+          #      reconciles against the real staged diff and binds into the SIGNED
+          #      L3 (aiAuthored / divergent=bypass / stale). This is the channel
+          #      that works in the default hardened box — the box writes nothing to
+          #      .git; provenance rides keeperd's already-signed commit.
+          #
+          # Both are best-effort (|| true) so a hook never blocks an edit.
+          recordAuthoredPath = "/opt/gitai/record-authored.ts";
+          gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
+          recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
+          cmdHook = command: { type = "command"; inherit command; };
+          gitAiManagedSettings = (pkgs.formats.json { }).generate "managed-settings.json" {
+            hooks = {
+              PreToolUse = [{ matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }];
+              PostToolUse = [{
+                matcher = "Edit|Write";
+                hooks = [ (cmdHook gitAiHookCmd) (cmdHook recordAuthoredCmd) ];
+              }];
+            };
+          };
+
           # netd door relay (CAPABILITIES.md "Network is a door — not a NIC").
           # The box runs --network=none; if the launcher forwarded the netd door
           # (`--net`), expose it as a loopback proxy (127.0.0.1:3128) so the
@@ -250,6 +282,14 @@
             extraCommands = ''
               mkdir -p etc tmp ${builtins.substring 1 (-1) home}/.config/claude
               chmod 1777 tmp
+              # GitAI checkpoint hooks as managed (system) settings — not shadowed
+              # by the account-config volume at $CLAUDE_CONFIG_DIR (see gitAiManagedSettings).
+              mkdir -p etc/claude-code
+              cp ${gitAiManagedSettings} etc/claude-code/managed-settings.json
+              # The authorship-capture hook script (record-authored, run by the
+              # PostToolUse hook above).
+              mkdir -p opt/gitai
+              cp ${./scripts/record-authored.ts} opt/gitai/record-authored.ts
               cat > etc/passwd <<EOF
               root:x:0:0:root:/root:/bin/bash
               ${user}:x:${toString uid}:${toString uid}:${user}:${home}:/bin/bash
@@ -288,6 +328,12 @@
                 # (incl. --remote-control's full-scope login) persists here too.
                 "XDG_CONFIG_HOME=${xdgConfigHome}"
                 "CLAUDE_CONFIG_DIR=${configDir}"
+                # GitAI authorship sink: the record-authored PostToolUse hook
+                # appends edited paths here; `keeper commit` reads + truncates it
+                # and passes them as the authorship claim (GITAI-PROVENANCE.md).
+                # /tmp is the box's own ephemeral tmpfs (1777) — per-run, no .git
+                # write, works in the hardened box.
+                "KEEPER_AUTHORSHIP_SINK=/tmp/keeper-authored"
                 # Disable telemetry — the box has no route to statsig.anthropic.com
                 # and the failed connection attempts flood the netd log.
                 # NONESSENTIAL_TRAFFIC is the master switch: it stops the statsig

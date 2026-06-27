@@ -1,4 +1,5 @@
 /**
+ * @module
  * spawn.ts — in-box client for launcherd
  *
  * A box with the `--launcher` door can use this to spawn sub-boxes.
@@ -15,10 +16,13 @@
  *   console.log(`Spawned ${result.launchId} (pid ${result.pid})`);
  */
 
-import { connect } from "bun";
+// Bun.connect via the global (no `import … from "bun"`) so the package resolves
+// on JSR/Deno publish — the same way the guest-room protocol uses Bun globals.
+const connect = Bun.connect;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/** Options for spawning a sub-box via launcherd. */
 export type SpawnOptions = {
   /** Account name (default: "personal") */
   account?: string;
@@ -38,6 +42,7 @@ export type SpawnOptions = {
   depth?: number;
 };
 
+/** Result of spawning a sub-box via launcherd. */
 export type SpawnResult = {
   launchId: string;
   pid: number;
@@ -55,6 +60,7 @@ export type SpawnResult = {
   };
 };
 
+/** Health, policy, and capability status from launcherd. */
 export type LauncherdStatus = {
   version: string;
   uptime: number;
@@ -72,6 +78,7 @@ export type LauncherdStatus = {
   rooms: Record<string, string>;
 };
 
+/** Information about a running or exited box. */
 export type BoxInfo = {
   launchId: string;
   account: string;
@@ -83,8 +90,11 @@ export type BoxInfo = {
   status: "running" | "exited";
 };
 
+/** Error from launcherd operations, with an error code for pattern matching. */
 export class LauncherdError extends Error {
+  /** Machine-readable error code for pattern matching. */
   code: string;
+  /** Create a LauncherdError with a `code` and human-readable `message`. */
   constructor(code: string, message: string) {
     super(message);
     this.code = code;

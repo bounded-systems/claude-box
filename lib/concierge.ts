@@ -1,4 +1,5 @@
 /**
+ * @module
  * concierge.ts — in-box client for concierged (the --concierge door).
  *
  * Service-oriented delegation, replacing lib/spawn.ts's role: a box does not
@@ -32,6 +33,7 @@ function conciergeSocket(): string {
   return `${home}/.claude-box/concierged.sock`;
 }
 
+/** Options for registering a capability provider with the concierge. */
 export type RegisterOptions = {
   /** Logical capability name, e.g. "scout", "egress". */
   capability: string;
@@ -60,6 +62,7 @@ export async function resolve(capability: string, want: string[] = []): Promise<
   return door;
 }
 
+/** Summary of a capability currently served in the concierge registry. */
 export type CapabilityRow = { capability: string; grants: string; providers: number };
 
 /** List the capabilities currently served (discovery/introspection). */

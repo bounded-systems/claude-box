@@ -110,11 +110,14 @@ on its own simply doesn't apply to Record 2.
 
 ## Open questions
 
-- **Carrying Record 1 to keeperd.** The in-box hook writes git-notes (needs rw
-  `.git`). For the hardened box, the model self-report must reach keeperd without
-  a box-side `.git` write — a checkpoint sink keeperd reads (a writable scratch
-  path, or the `commit` request payload). Likely: hook writes claims to a
-  box-local file; `lib/keeper.ts commit` includes them.
+- **Carrying Record 1 to keeperd — RESOLVED (option A, the writable sink).** A
+  `record-authored` PostToolUse hook (`scripts/record-authored.ts`, baked into
+  the image) appends each edited file's repo-relative path to the sink at
+  `$KEEPER_AUTHORSHIP_SINK` (`/tmp/keeper-authored` — the box's ephemeral tmpfs,
+  no `.git` write). `keeper commit` reads + truncates the sink and passes it as
+  the `authorship` claim (door-kit ≥ v0.7.0); keeperd reconciles. Rationale: the
+  authoritative path is the keeperd door call (reconciled, signed); the sink is
+  just automatic capture of the box's *claim* (claim-not-authority).
 - **Hunk vs. file granularity.** File-level divergence is the v1; hunk-level
   (a human-edited region inside an AI-authored file) is stronger and matches
   git-ai's own line-stats model.

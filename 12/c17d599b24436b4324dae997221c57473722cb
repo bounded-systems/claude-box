@@ -1,0 +1,28 @@
+flake.nix
+  s_d18f41cb48193c::t_456d8210b9344a 289-292
+  s_d18f41cb48193c::t_90144b9c8d6c52 215,218-233,235-236,239-243
+  s_d18f41cb48193c::t_c99e4d8a7dcb69 331-336
+GITAI-PROVENANCE.md
+  s_d18f41cb48193c::t_bfa4f32993999c 113-120
+tests/record-authored.test.ts
+  s_d18f41cb48193c::t_85ae979944ad88 1-16,18-46,48-53
+  s_d18f41cb48193c::t_eb6787242ff36e 17,47
+scripts/record-authored.ts
+  s_d18f41cb48193c::t_84c13dbf31e53d 1-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "12c17d599b24436b4324dae997221c57473722cb",
+  "prompts": {},
+  "sessions": {
+    "s_d18f41cb48193c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e1595d1-4205-44e9-b5db-d6ccebeae882",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

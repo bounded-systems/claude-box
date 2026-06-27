@@ -212,6 +212,30 @@
             pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
           };
 
+          # GitAI checkpoint hooks — emit `git ai checkpoint claude` before/after
+          # Edit/Write so AI-vs-human authorship is tracked (git-ai shipped in the
+          # toolchain). Baked as MANAGED settings at
+          # /etc/claude-code/managed-settings.json: a SYSTEM path the account-config
+          # volume does NOT shadow (unlike $CLAUDE_CONFIG_DIR/settings.json),
+          # highest precedence, and hooks MERGE with (are never replaced by)
+          # user/project hooks. Resilient + guarded: the command never blocks an
+          # edit (|| true) and no-ops if git-ai is absent or the checkpoint write
+          # fails — e.g. the default hardened box runs .git READ-ONLY, and git-ai's
+          # git_notes backend can't write there, so provenance lands only in
+          # --repo-rw boxes for now. Routing note-writes through keeperd (the
+          # sanctioned .git writer) is the ocap-correct follow-up.
+          gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
+          gitAiHookMatcher = matcher: {
+            inherit matcher;
+            hooks = [{ type = "command"; command = gitAiHookCmd; }];
+          };
+          gitAiManagedSettings = (pkgs.formats.json { }).generate "managed-settings.json" {
+            hooks = {
+              PreToolUse = [ (gitAiHookMatcher "Edit|Write") ];
+              PostToolUse = [ (gitAiHookMatcher "Edit|Write") ];
+            };
+          };
+
           # netd door relay (CAPABILITIES.md "Network is a door — not a NIC").
           # The box runs --network=none; if the launcher forwarded the netd door
           # (`--net`), expose it as a loopback proxy (127.0.0.1:3128) so the
@@ -250,6 +274,10 @@
             extraCommands = ''
               mkdir -p etc tmp ${builtins.substring 1 (-1) home}/.config/claude
               chmod 1777 tmp
+              # GitAI checkpoint hooks as managed (system) settings — not shadowed
+              # by the account-config volume at $CLAUDE_CONFIG_DIR (see gitAiManagedSettings).
+              mkdir -p etc/claude-code
+              cp ${gitAiManagedSettings} etc/claude-code/managed-settings.json
               cat > etc/passwd <<EOF
               root:x:0:0:root:/root:/bin/bash
               ${user}:x:${toString uid}:${toString uid}:${user}:${home}:/bin/bash

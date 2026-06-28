@@ -36,19 +36,22 @@ interface ClientSocket {
   end(): void;
 }
 
+/** The socket-handler set `call` passes to Bun.connect (same for unix + tcp). */
+interface ConnectHandlers {
+  data(socket: ClientSocket, chunk: Uint8Array): void;
+  open(socket: ClientSocket): void;
+  error(socket: ClientSocket, error: Error): void;
+  close(socket: ClientSocket): void;
+}
+
 /** Bun's runtime global, declared locally with only the shape `call` needs (so
  *  the module type-checks without @types/bun). At runtime this is Bun's global,
- *  so `call` runs under the Bun runtime. */
+ *  so `call` runs under the Bun runtime. Both transports are declared: a unix
+ *  door (`{unix}`) and a tcp/vsock door (`{hostname,port}`). */
+type ConnectResult = Promise<{ catch(onrejected: (reason: unknown) => void): unknown }>;
 declare const Bun: {
-  connect(options: {
-    unix: string;
-    socket: {
-      data(socket: ClientSocket, chunk: Uint8Array): void;
-      open(socket: ClientSocket): void;
-      error(socket: ClientSocket, error: Error): void;
-      close(socket: ClientSocket): void;
-    };
-  }): Promise<{ catch(onrejected: (reason: unknown) => void): unknown }>;
+  connect(options: { unix: string; socket: ConnectHandlers }): ConnectResult;
+  connect(options: { hostname: string; port: number; socket: ConnectHandlers }): ConnectResult;
 };
 
 // ── Protocol types (shared across all doors) ────────────────────────────────
@@ -344,36 +347,40 @@ export async function call<T = unknown>(
 
   return new Promise((resolve, reject) => {
     let buffer = "";
-    const socket = Bun.connect({
-      ...connectTarget(endpoint),
-      socket: {
-        data(_socket, chunk) {
-          buffer += Buffer.from(chunk).toString("utf-8");
-          const idx = buffer.indexOf("\n");
-          if (idx !== -1) {
-            const line = buffer.slice(0, idx);
-            try {
-              const resp = JSON.parse(line) as ResponseEnvelope;
-              if (resp.ok) {
-                resolve(resp.result as T);
-              } else {
-                reject(new Error(resp.error?.message ?? "unknown error"));
-              }
-            } catch (e) {
-              reject(e);
+    const handlers: ConnectHandlers = {
+      data(socket, chunk) {
+        buffer += Buffer.from(chunk).toString("utf-8");
+        const idx = buffer.indexOf("\n");
+        if (idx !== -1) {
+          const line = buffer.slice(0, idx);
+          try {
+            const resp = JSON.parse(line) as ResponseEnvelope;
+            if (resp.ok) {
+              resolve(resp.result as T);
+            } else {
+              reject(new Error(resp.error?.message ?? "unknown error"));
             }
-            _socket.end();
+          } catch (e) {
+            reject(e);
           }
-        },
-        open(socket) {
-          socket.write(JSON.stringify(req) + "\n");
-        },
-        error(_socket, error) {
-          reject(error);
-        },
-        close() {},
+          socket.end();
+        }
       },
-    });
-    socket.catch(reject);
+      open(socket) {
+        socket.write(JSON.stringify(req) + "\n");
+      },
+      error(_socket, error) {
+        reject(error);
+      },
+      close() {},
+    };
+    // Branch on the transport so each Bun.connect call matches a concrete
+    // overload (unix vs tcp); spreading the union would defeat overload selection.
+    const target = connectTarget(endpoint);
+    const conn =
+      "unix" in target
+        ? Bun.connect({ unix: target.unix, socket: handlers })
+        : Bun.connect({ hostname: target.hostname, port: target.port, socket: handlers });
+    conn.catch(reject);
   });
 }

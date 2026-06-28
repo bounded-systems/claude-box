@@ -14,6 +14,7 @@ import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { planDoorMounts } from "../claude-box.ts";
 import { type DoorGrant, tcp, unix } from "../guest-room/mod.ts";
 import { call, createDoorHandlers } from "../guest-room/protocol.ts";
 import { type Interposer, frontDoorsWithInterposers, teardownInterposers } from "../door-interpose.ts";
@@ -108,5 +109,23 @@ describe("frontDoorsWithInterposers", () => {
     const { doors, interposers } = frontDoorsWithInterposers([tcpDoor], "launch-3");
     expect(interposers).toHaveLength(0);
     expect(doors[0]!.host).toEqual(tcp("host.internal", 3002));
+  });
+
+  test("the box MOUNTS the proxy, not the upstream (frontDoorsWithInterposers → planDoorMounts)", () => {
+    // The integration the live spawn rides on: a fronted door, fed to the same
+    // planDoorMounts launcherd uses, mounts the INTERPOSER at the guest path — so
+    // the box can only ever reach the proxy, never the upstream socket.
+    const seen: string[] = [];
+    const up = upstream(seen);
+    const { doors, interposers } = frontDoorsWithInterposers([doorAt(up, ["method=read"])], "launch-mount");
+    live = interposers;
+    paths.push(...interposers.map((i) => i.socketPath));
+
+    const proxyPath = (doors[0]!.host as { path: string }).path;
+    const argv = planDoorMounts(doors, false);
+    const mount = argv[argv.indexOf("-v") + 1];
+
+    expect(mount).toBe(`${proxyPath}:/run/doors/scoutd.sock`); // proxy mounted at the guest path
+    expect(mount).not.toContain(up); // the upstream socket is never mounted into the box
   });
 });

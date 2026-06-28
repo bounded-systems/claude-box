@@ -252,9 +252,21 @@
           # its own — standard tooling can't proxy straight to a unix socket, so
           # socat bridges loopback-TCP → /run/doors/netd.sock. Flags still pass through
           # to claude (`exec claude "$@"`); a bare run launches the TUI.
+          #
+          # prx-asr: as a long-lived per-repo-pod member (claude-room), the box is
+          # started with NO args and NO TTY — there is no one to drive it yet (the
+          # session:control door is sealed until prx-9s14). A bare `exec claude`
+          # there defaults to --print, exits "Input must be provided", and the
+          # container crash-loops (observed: 589k restarts). So when run with no
+          # args AND no TTY, IDLE instead — stay up, ready to be driven via the
+          # control door later. Interactive runs (a TTY → TUI) and explicit
+          # arg/flag passthrough are unchanged.
           entrypoint = pkgs.writeShellScript "claude-box-entrypoint" ''
             if [ -S /run/doors/netd.sock ]; then
               ${pkgs.socat}/bin/socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/doors/netd.sock &
+            fi
+            if [ "$#" -eq 0 ] && [ ! -t 0 ]; then
+              exec ${pkgs.coreutils}/bin/sleep infinity
             fi
             exec claude "$@"
           '';

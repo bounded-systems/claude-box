@@ -19,7 +19,7 @@
   # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
   # pin, kept honest by the `guest-room-mirror` check below. Bump with
   # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
-  inputs.guest-room.url = "github:bounded-systems/guest-room/d6aa54e6b674c0df0aa9fc358977ee0f9ffc6a53";
+  inputs.guest-room.url = "github:bounded-systems/guest-room/89e7b0918edf89151ee9e2cc858da0c6742ef289";
   inputs.guest-room.flake = false;
 
   # The capability-provenance contract, extracted to its own public repo and

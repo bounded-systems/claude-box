@@ -806,7 +806,7 @@
                   echo "run from the claude-box repo root (no ./guest-room here)" >&2
                   exit 1
                 fi
-                for f in mod.ts protocol.ts daemon.ts; do
+                for f in mod.ts protocol.ts daemon.ts interpose.ts; do
                   install -m 644 ${guest-room}/$f "$PWD/guest-room/$f"
                   echo "synced guest-room/$f"
                 done
@@ -1134,7 +1134,7 @@
       checks.aarch64-darwin.guest-room-mirror =
         let pkgs = pkgsFor "aarch64-darwin";
         in pkgs.runCommand "guest-room-mirror" { } ''
-          for f in mod.ts protocol.ts daemon.ts; do
+          for f in mod.ts protocol.ts daemon.ts interpose.ts; do
             if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
               echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
               exit 1

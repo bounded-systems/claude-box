@@ -79,7 +79,7 @@ describe("door-bridge e2e: unix proxy → bridge → grant-gated tcp door", () =
     const grant = signGrant(door, { audience: "room-A", exp: Date.now() + 60_000, nonce: "n1", keyId: "k1" }, sign);
     const proxy = front(door, "e2e-ok", () => grant);
     // The box spoke unix; the bridge carried the grant to the tcp door's gate.
-    expect(await call(proxy, "status", {})).toEqual({ ok: true });
+    expect(await call<{ ok: boolean }>(proxy, "status", {})).toEqual({ ok: true });
   });
 
   test("NO grant is rejected by the tcp gate — surfaced through the bridge (fail closed)", async () => {

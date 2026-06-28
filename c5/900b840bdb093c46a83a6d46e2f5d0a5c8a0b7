@@ -1,0 +1,33 @@
+guest-room/interpose.ts
+  s_8bfe0e8de6557c::t_82142a70df3c90 1-153
+door-interpose.ts
+  s_8bfe0e8de6557c::t_bf4529ad2b0eba 1-107
+tests/door-interpose.test.ts
+  s_8bfe0e8de6557c::t_34394d5c3185f6 92
+  s_8bfe0e8de6557c::t_037d108ac898ce 1-91,93-112
+launcherd.ts
+  s_8bfe0e8de6557c::t_a824165d9caad8 843-844,846-851,853,856-857,859-868
+  s_8bfe0e8de6557c::t_ce82c86575db25 31
+  s_8bfe0e8de6557c::t_635b75ae720f87 852
+  s_8bfe0e8de6557c::t_34926272998349 815-824,834
+  s_8bfe0e8de6557c::t_a6e88b3851d2e6 895-896,898
+  s_8bfe0e8de6557c::t_1b67ff04b1bb22 424
+  s_8bfe0e8de6557c::t_d481a03580de23 32-35
+  s_8bfe0e8de6557c::t_6c649efd587ad1 888
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c5900b840bdb093c46a83a6d46e2f5d0a5c8a0b7",
+  "prompts": {},
+  "sessions": {
+    "s_8bfe0e8de6557c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "159cecef-b114-4932-b219-6b198cbf9abd",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

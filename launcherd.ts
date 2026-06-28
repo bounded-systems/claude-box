@@ -223,43 +223,9 @@ function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: s
   return { allowed: true };
 }
 
-/**
- * Check attenuation: child doors must be a subset of parent doors.
- * A name-only spawn-time guard — a box cannot grant itself capabilities it
- * doesn't have. Returns true if allowed.
- *
- * NOTE (delegation model): this is the SPAWN-time check. The preferred model is
- * now service-oriented — a box is INTRODUCED to a capability by the concierge
- * (see CONCIERGE.md and concierged.ts) rather than spawning a child that
- * inherits a door subset; attenuation happens per-capability at introduction
- * time (`resolveProvider` + `checkCaveats`), not as a door-set comparison here.
- * This check remains as a defense-in-depth guard for the launch path, which is
- * now lifecycle (boot a room) rather than the delegation mechanism.
- */
-function checkAttenuation(
-  requestedDoors: string[],
-  parentDoors: string[] | undefined,
-  depth: number,
-): { allowed: boolean; reason?: string; violations?: string[] } {
-  // Root launches (depth 0) have no parent — no attenuation check needed
-  if (depth === 0 || parentDoors === undefined) {
-    return { allowed: true };
-  }
-
-  // Child launches must have doors ⊆ parent doors
-  const parentSet = new Set(parentDoors);
-  const violations = requestedDoors.filter((d) => !parentSet.has(d));
-
-  if (violations.length > 0) {
-    return {
-      allowed: false,
-      reason: `attenuation violation: child requested doors [${violations.join(", ")}] not in parent [${parentDoors.join(", ")}]`,
-      violations,
-    };
-  }
-
-  return { allowed: true };
-}
+// child ⊆ parent is now enforced at the REFERENCE level by resolveLaunchDoors
+// (a child can only be handed door references its parent's LaunchRecord holds),
+// so the old name-based checkAttenuation guard was retired (prx-e232).
 
 // ── L2 Attestation + Key Management ──────────────────────────────────────────
 
@@ -538,6 +504,25 @@ function __seedLaunch(rec: LaunchRecord): void {
   launches.set(rec.launchId, rec);
 }
 
+// Test seam for the caller cgroup read (real /proc isn't available for fake pids).
+let __testCallerCid: { set: boolean; value: string | undefined } = { set: false, value: undefined };
+function __setCallerContainerId(value: string | undefined): void { __testCallerCid = { set: true, value }; }
+function __clearCallerContainerId(): void { __testCallerCid = { set: false, value: undefined }; }
+
+/** The podman container Id of the spawn caller (the box it ran in), from the
+ *  caller's cgroup — undefined if the caller is NOT containerised (the host
+ *  operator at the root mint) or its cgroup can't be read. This is the kernel's
+ *  truth about which box connected; the caller cannot spoof its own cgroup. */
+function callerContainerId(pid: number | undefined): string | undefined {
+  if (__testCallerCid.set) return __testCallerCid.value;
+  if (!pid) return undefined;
+  try {
+    return containerIdFromCgroup(readFileSync(`/proc/${pid}/cgroup`, "utf-8"));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve requested door specs to concrete grants for a launch.
  *
  *  ROOT launch (no caller record — the host operator at the mint): resolve each
@@ -732,7 +717,6 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const roomName = params.room as string | undefined;
   const netOpen = (params.netOpen as boolean) ?? false;
   const guestArgs = (params.guestArgs as string[]) ?? [];
-  const clientDepth = (params.depth as number) ?? 0;  // self-reported; only a fallback (see below)
   let doorSpecs = (params.doors as string[]) ?? [];
 
   // Extract caller info (injected by peercred proxy via SO_PEERCRED)
@@ -742,23 +726,27 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     : undefined;
   const token = params._token as string | undefined;
 
-  // Object-anchored authority (prx-8k08, supersedes prx-irs5): a child's ceiling
-  // and depth are derived from the CALLER'S OWN LaunchRecord — launcherd's record
-  // of what it actually granted that box — looked up by the peercred caller pid,
-  // NOT from client-sent params (which an in-box caller could forge to over-report
-  // its doors or under-report its depth). When no record matches (a root launch
-  // from the host operator, or a caller whose pid we can't resolve) we fall back
-  // to the client-sent values — i.e. exactly today's behavior, no regression —
-  // so this only ever HARDENS a matched caller, never loosens an unmatched one.
-  const callerRecord = caller?.pid ? findCallerRecord(caller.pid) : undefined;
-  const depth = callerRecord ? callerRecord.depth + 1 : clientDepth;
-  const parentDoorNames = callerRecord ? callerRecord.doors.map((d) => d.name) : undefined;
-  const parentDoors = parentDoorNames ?? (params._parentDoors as string[] | undefined);
-  if (callerRecord) {
-    log("INFO", `caller pid ${caller!.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${parentDoorNames!.join(",")}]); enforcing child depth ${depth} ⊆ those doors`);
-    if (params.depth !== undefined && (params.depth as number) !== depth) {
-      log("WARN", `caller sent depth=${params.depth} but its record is depth ${callerRecord.depth} — ignoring client value, enforcing ${depth}`);
+  // Object-anchored authority (prx-8k08/prx-p4vb + prx-e232). Classify the caller
+  // by its CGROUP (kernel truth, unspoofable), not client claims:
+  //  - CONTAINER caller (cgroup is a podman libpod scope) → MUST resolve to a
+  //    launch launcherd made; its child's ceiling/depth/references come from that
+  //    record. A container we didn't launch is REFUSED (fail closed) — not trusted.
+  //  - NON-container caller (the host operator on the direct socket) → the ROOT
+  //    MINT: depth 0, doors resolved globally, no attenuation.
+  // There is no client-trusted fallback: _parentDoors and the client depth are
+  // gone. Reference-passing (resolveLaunchDoors) + the record are the only
+  // authority; over-granting is unsayable, not rejected by a name check.
+  const callerCid = callerContainerId(caller?.pid);
+  let callerRecord: LaunchRecord | undefined;
+  if (callerCid) {
+    callerRecord = findLaunchByContainerId(callerCid);
+    if (!callerRecord) {
+      throw { code: "UNKNOWN_CALLER", message: "spawn caller is a container launcherd did not launch" };
     }
+  }
+  const depth = callerRecord ? callerRecord.depth + 1 : 0;
+  if (callerRecord) {
+    log("INFO", `caller pid ${caller?.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${callerRecord.doors.map((d) => d.name).join(",")}]); child depth ${depth}, references delegated from the parent`);
   }
 
   // Validate account
@@ -801,20 +789,11 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     }
   }
 
-  // Check attenuation: child doors must be subset of parent doors
-  // This is checked AFTER room expansion so the full door set is validated
-  const attenuationCheck = checkAttenuation(doorSpecs, parentDoors, depth);
-  if (!attenuationCheck.allowed) {
-    throw {
-      code: "ATTENUATION_VIOLATION",
-      message: attenuationCheck.reason,
-      violations: attenuationCheck.violations,
-    };
-  }
-
   // Resolve doors to concrete grants. A child spawn (callerRecord present) gets
-  // the PARENT's actual references — not a global name re-resolution — so it can
-  // only ever delegate doors it holds, at the parent's socket + caveats (prx-8k08).
+  // the PARENT's actual references — not a global name re-resolution — and a door
+  // the parent doesn't hold is refused here. So "child ⊆ parent" is enforced by
+  // construction at the REFERENCE level; the old name-based attenuation check is
+  // retired (prx-e232). A root launch resolves globally (the mint).
   const doors = resolveLaunchDoors(doorSpecs, callerRecord);
 
   // Check door prerequisites
@@ -1199,13 +1178,14 @@ export {
   checkRateLimit,
   checkConcurrentLimit,
   checkDepthLimit,
-  checkAttenuation,
   recordLaunch,
   findCallerRecord,
   findLaunchByContainerId,
   containerIdFromCgroup,
   resolveLaunchDoors,
   __seedLaunch,
+  __setCallerContainerId,
+  __clearCallerContainerId,
 };
 export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };
 

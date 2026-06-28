@@ -384,6 +384,7 @@
                 cp -r ${./contract} $out/app/contract
                 cp ${./lib/keeper.ts} $out/app/lib/keeper.ts
                 cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
                 cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
                 cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';
@@ -464,6 +465,7 @@
                 mkdir -p $out/app/netd $out/app/lib $out/app/guest-room
                 cp ${./netd/netd.ts} $out/app/netd/netd.ts
                 cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
                 cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
                 cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';

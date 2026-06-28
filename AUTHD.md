@@ -170,6 +170,12 @@ actually stops living in the box (Phase 3).
   rotation): hand a box an access-token-only credential with a **near-future
   `expiresAt`**, let it idle past that, rewrite the file with a fresh
   access-token, and observe whether the next request succeeds without a restart.
+  - **Harness:** `tools/authd-continuity.ts` (`stage` / `rewrite-fresh` / `status`)
+    runs exactly this — it moves only the client-side `expiresAt` on a credential
+    you supply (no live rotation, never logs the token; an access token stays
+    server-valid ~8h, so the same token probes re-read vs cache). You drive the
+    interactive `claude`; the harness stages + rewrites. Owner-run (needs a valid
+    credential).
   - **Gate:** *re-reads* → Phase 2 is a file-rewrite-on-a-timer (seamless);
     *caches* → Phase 2 must also nudge/restart the RC session at refresh. This
     single bit sets Phase 2's scope, so it's the cheapest thing to learn early.

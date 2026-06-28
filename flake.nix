@@ -19,7 +19,7 @@
   # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
   # pin, kept honest by the `guest-room-mirror` check below. Bump with
   # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
-  inputs.guest-room.url = "github:bounded-systems/guest-room/89e7b0918edf89151ee9e2cc858da0c6742ef289";
+  inputs.guest-room.url = "github:bounded-systems/guest-room/66ee3c1da1e0aa1f3ec82ceb557038ceef427f1f";
   inputs.guest-room.flake = false;
 
   # The capability-provenance contract, extracted to its own public repo and
@@ -806,7 +806,7 @@
                   echo "run from the claude-box repo root (no ./guest-room here)" >&2
                   exit 1
                 fi
-                for f in mod.ts protocol.ts daemon.ts; do
+                for f in mod.ts protocol.ts daemon.ts interpose.ts; do
                   install -m 644 ${guest-room}/$f "$PWD/guest-room/$f"
                   echo "synced guest-room/$f"
                 done
@@ -1134,7 +1134,7 @@
       checks.aarch64-darwin.guest-room-mirror =
         let pkgs = pkgsFor "aarch64-darwin";
         in pkgs.runCommand "guest-room-mirror" { } ''
-          for f in mod.ts protocol.ts daemon.ts; do
+          for f in mod.ts protocol.ts daemon.ts interpose.ts; do
             if ! diff -u ${guest-room}/$f ${./guest-room}/$f; then
               echo "guest-room/$f drifted from the pinned input — run: nix run .#sync-guest-room" >&2
               exit 1

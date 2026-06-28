@@ -338,12 +338,15 @@ export async function call<T = unknown>(
   endpoint: string,
   method: string,
   params: Record<string, unknown> = {},
-  opts: { auth?: string; sign?: (req: RequestEnvelope) => string } = {},
+  opts: { auth?: string; sign?: (req: RequestEnvelope) => string; grant?: SignedGrant } = {},
 ): Promise<T> {
   const id = crypto.randomUUID();
   const req: RequestEnvelope = { id, method, params };
   const auth = opts.sign ? opts.sign(req) : opts.auth;
   if (auth !== undefined) req.auth = auth;
+  // A signed grant the caller presents to a tcp/vsock serving room (no-op on a
+  // unix door, where the held reference is authority) — see RequestEnvelope.grant.
+  if (opts.grant !== undefined) req.grant = opts.grant;
 
   return new Promise((resolve, reject) => {
     let buffer = "";

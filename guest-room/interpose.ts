@@ -33,7 +33,7 @@
 
 import { Buffer } from "node:buffer";
 
-import { type CaveatVerifiers, type DoorGrant, checkCaveats } from "./mod.ts";
+import { type CaveatVerifiers, type DoorGrant, type SignedGrant, checkCaveats } from "./mod.ts";
 import {
   type DoorSocket,
   type RequestEnvelope,
@@ -55,7 +55,7 @@ export type Forwarder = (
   endpoint: string,
   method: string,
   params: Record<string, unknown>,
-  opts?: { auth?: string; sign?: (req: RequestEnvelope) => string },
+  opts?: { auth?: string; sign?: (req: RequestEnvelope) => string; grant?: SignedGrant },
 ) => Promise<unknown>;
 
 export interface InterposerOptions<Ctx = InterposeContext> {
@@ -69,6 +69,12 @@ export interface InterposerOptions<Ctx = InterposeContext> {
   deriveContext?: (req: InterposeContext) => Ctx;
   /** Credentials the interposer presents to the UPSTREAM (it is the upstream's client). */
   upstreamAuth?: { auth?: string; sign?: (req: RequestEnvelope) => string };
+  /** A SIGNED grant the bridge presents to a REMOTE (tcp/vsock) upstream so its
+   *  grant-gate admits the forwarded request. Omit for a local unix upstream
+   *  (the held reference is authority). This is what makes the interposer a
+   *  transport-spanning door-bridge: the box speaks unix to the proxy; the proxy
+   *  carries the grant on the wire. */
+  upstreamGrant?: SignedGrant;
   /** The forwarder (default: protocol `call`); injectable for tests. */
   forward?: Forwarder;
   /** Audit hook. */
@@ -98,7 +104,10 @@ export async function enforceAndForward<Ctx = InterposeContext>(
   }
   const forward = opts.forward ?? call;
   try {
-    const result = await forward(opts.upstream, req.method, req.params ?? {}, opts.upstreamAuth);
+    const result = await forward(opts.upstream, req.method, req.params ?? {}, {
+      ...opts.upstreamAuth,
+      grant: opts.upstreamGrant,
+    });
     opts.log?.("ALLOW", req.method);
     return ok(req.id, result);
   } catch (e) {

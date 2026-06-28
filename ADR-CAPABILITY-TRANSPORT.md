@@ -1,6 +1,7 @@
 # ADR — capability strength is chosen by transport: ocap locally, signed grants in transit
 
-> Status: **accepted** (2026-06-26). Tracking: epic `prx-86g9`
+> Status: **accepted** (2026-06-26) · **implemented** (2026-06-28, see
+> "Implementation status" below). Tracking: epic `prx-86g9`
 > (object-anchored capabilities). Supersedes the blanket "signed grants, **not**
 > fd-passing" decision recorded in [CONCIERGE.md](./CONCIERGE.md) §7, which
 > assumed a single model had to span every transport. Settles the hinge that
@@ -72,6 +73,30 @@ self-reported ceiling.
   launcherd policy gates the *initial* grant at root launch; post-root
   delegation is unchecked by construction (local: can't pass what you don't
   hold; transit: can only attenuate a signed grant, never widen it).
+
+### Implementation status — shipped (2026-06-28)
+
+All of the above landed; the transport-split model is live across the whole door
+surface, each piece verified in a pod-equivalent (podman VM):
+
+- **`prx-sfr0`** — mount only held doors: shipped.
+- **Transit grants on every serving door** — concierge mints; `scoutd`/`keeperd`
+  verify a per-request `req.grant`, `netd` (an HTTP CONNECT proxy) verifies a
+  connection-level grant in the `Proxy-Authorization` header → `407` otherwise
+  (`prx-kdia`). Keyless verify against the concierge's published keys.
+- **`prx-8k08` — reference-passing spawn.** Realized **not** by `SCM_RIGHTS`
+  (moot — spawn always goes through `launcherd`, which performs the `podman -v`
+  mounts) but by `launcherd` handing a child the **parent's actual references**
+  from the caller's own `LaunchRecord`. The caller is bound to its launch by its
+  **cgroup** (`/proc/<pid>/cgroup` → `libpod-<id>`, kernel truth; **`prx-p4vb`** —
+  without it the match silently missed, since the peercred caller pid is the
+  container's process, not the `podman run` cli pid).
+- **`prx-e232` — lineage authz retired.** The name-based `child ⊆ parent` check
+  and client `_parentDoors` are gone; caller classification is cgroup-anchored and
+  **fail-closed** (a container we didn't launch → `UNKNOWN_CALLER`; the host
+  operator → the root mint). `checkDepthLimit` stays as a resource guard.
+- **`prx-yweb`** — caveat enforcement via interposition: still open (the one
+  follow-up; transit-side `checkCaveats` already ships).
 
 ## ocap fit
 

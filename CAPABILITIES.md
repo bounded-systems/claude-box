@@ -237,9 +237,14 @@ can only narrow from there.
 - **Post-root delegation is deliberately unchecked**, by construction: you cannot
   hand on a reference you don't hold (local) or widen a signed grant you were
   issued (transit), so authority is monotonically non-increasing from the mint —
-  no per-hop policy gate is needed or wanted. (The launcher's residual
-  `child ⊆ parent` spawn check is a stopgap for the in-box spawn path until
-  reference-passing spawn, `prx-8k08`, replaces it; it can only narrow.)
+  no per-hop policy gate is needed or wanted. This now holds on the **spawn path**
+  too: `launcherd` derives a child's references from the **caller's own
+  `LaunchRecord`** — correlating the spawn caller to its launch by the caller's
+  **cgroup** (kernel truth, unspoofable; `prx-p4vb`) — and hands the child the
+  parent's *actual* door references (`prx-8k08`). A box we didn't launch is
+  refused (fail closed); the old name-based `child ⊆ parent` check and the
+  client-sent `_parentDoors` were retired (`prx-e232`). Over-granting is
+  *unsayable* on spawn, not rejected by a check.
 
 ## Why this matters
 

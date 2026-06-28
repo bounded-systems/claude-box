@@ -107,12 +107,21 @@ over the now-trusted caveats. The door itself only answers availability.
 - Multiple providers for one capability ⇒ the concierge picks (round-robin /
   policy). [NEEDS CLARIFICATION — see §7.]
 
-## 5. launcherd's reduced role — lifecycle, not delegation
+## 5. launcherd's role — lifecycle + local reference-delegation
 
-launcherd stops being the delegation mechanism. It keeps only **lifecycle**:
-boot a room (container/daemon) so that it can `register` with the concierge.
-The `child ⊆ parent` door-set check, `_parentDoors`, and spawn-time attenuation
-are gone (reverted). A freshly booted room has **no** authority until it
+> Refined by [ADR-CAPABILITY-TRANSPORT.md](./ADR-CAPABILITY-TRANSPORT.md): the
+> blanket "launcherd does no delegation, authority only by concierge
+> introduction" is softened to a **transport split**. The concierge-introduction
+> model below is the **transit** (`vsock`/`tcp`) path; on the **local** (`unix`)
+> path launcherd legitimately delegates by **reference-passing spawn** (it hands a
+> child the parent's *actual* references from the caller's `LaunchRecord`,
+> cgroup-anchored — `prx-8k08`/`prx-p4vb`).
+
+The `child ⊆ parent` door-set check, `_parentDoors`, and the name-based
+spawn-time attenuation **are gone** (`prx-e232`) — but not because launcherd
+stopped delegating; because over-granting became *unsayable* (a child can only be
+handed references its launch holds) rather than rejected by a check. For the
+transit path, a freshly booted room still has **no** authority until it
 `resolve`s capabilities through the concierge — authority is acquired by
 introduction, not inherited at birth.
 

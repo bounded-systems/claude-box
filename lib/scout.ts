@@ -19,6 +19,9 @@
 // on JSR/Deno publish — the same way the guest-room protocol uses Bun globals.
 const connect = Bun.connect;
 
+import { heldGrant } from "./concierge.ts";
+import type { SignedGrant } from "../guest-room/mod.ts";
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /** Options for fetching repository metadata via scoutd. */
@@ -192,6 +195,9 @@ type RequestEnvelope = {
   id: string;
   method: string;
   params?: Record<string, unknown>;
+  /** The signed grant this box holds for "scout", presented so a tcp/vsock
+   *  serving room can verify it (no-op on a unix door). */
+  grant?: SignedGrant;
 };
 
 type ResponseEnvelope = {
@@ -212,7 +218,8 @@ async function request<T>(method: string, params: Record<string, unknown> = {}):
 
     const socketHandler = {
       open(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never) {
-        const req: RequestEnvelope = { id, method, params };
+        const grant = heldGrant("scout"); // present it iff resolved (tcp/vsock gate)
+        const req: RequestEnvelope = { id, method, params, ...(grant ? { grant } : {}) };
         sock.write(JSON.stringify(req) + "\n");
       },
       data(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never, data: Buffer) {

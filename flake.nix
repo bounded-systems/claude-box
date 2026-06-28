@@ -19,7 +19,7 @@
   # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
   # pin, kept honest by the `guest-room-mirror` check below. Bump with
   # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
-  inputs.guest-room.url = "github:bounded-systems/guest-room/5bc85b634a0a8d698243ba3b708f0420516308ec";
+  inputs.guest-room.url = "github:bounded-systems/guest-room/d6aa54e6b674c0df0aa9fc358977ee0f9ffc6a53";
   inputs.guest-room.flake = false;
 
   # The capability-provenance contract, extracted to its own public repo and
@@ -34,7 +34,7 @@
   # door-kit's lib/, kept honest by the `door-kit-mirror` check below. Bump with
   # `nix flake update door-kit` + `nix run .#sync-door-kit`. (door-kit itself pins
   # the SAME guest-room rev as this flake — keep them in lockstep.)
-  inputs.door-kit.url = "github:bounded-systems/door-kit/035d9620a1be7b99b08197b9bab03ee8c5ca3913";
+  inputs.door-kit.url = "github:bounded-systems/door-kit/3499484e3d1d4f390030d3f5dd355b9071843d78";
   inputs.door-kit.flake = false;
 
   # door-keeper — the keeperd git-signing door, extracted to its own public repo.
@@ -384,6 +384,7 @@
                 cp -r ${./contract} $out/app/contract
                 cp ${./lib/keeper.ts} $out/app/lib/keeper.ts
                 cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
                 cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
                 cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';
@@ -464,6 +465,7 @@
                 mkdir -p $out/app/netd $out/app/lib $out/app/guest-room
                 cp ${./netd/netd.ts} $out/app/netd/netd.ts
                 cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
                 cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
                 cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
               '';

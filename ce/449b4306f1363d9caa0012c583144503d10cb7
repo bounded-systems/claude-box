@@ -1,0 +1,27 @@
+claude-box.ts
+  s_d18f41cb48193c::t_21774e8c781009 119-126
+  s_d18f41cb48193c::t_eb9217e731a0b4 1417-1437
+  s_d18f41cb48193c::t_4686481a0928fb 1444-1445,1447,1450,1452,1454
+  s_d18f41cb48193c::t_26d2e2a588c410 921-930
+  s_d18f41cb48193c::t_dc8b2b153ab389 1662-1667
+  s_d18f41cb48193c::t_751d5b87a93bdb 44
+tests/remote-control.test.ts
+  s_d18f41cb48193c::t_1503907d284d53 16
+  s_d18f41cb48193c::t_ac8b1b5c201194 109-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "ce449b4306f1363d9caa0012c583144503d10cb7",
+  "prompts": {},
+  "sessions": {
+    "s_d18f41cb48193c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e1595d1-4205-44e9-b5db-d6ccebeae882",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

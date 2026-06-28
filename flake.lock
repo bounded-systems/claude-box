@@ -50,12 +50,12 @@
     "door-net": {
       "flake": false,
       "locked": {
-        "lastModified": 1782657679,
-        "narHash": "sha256-4kdWSybbZm6bO/2N5HOmMY0PrWaCRa2SGQZR6IU8sRM=",
-        "rev": "9314f38c5fc410c5f0c686e65568f2d5e85b0744",
-        "revCount": 13,
+        "lastModified": 1782685702,
+        "narHash": "sha256-BjvuWIuA/UfGgSU0N1TLGsSJNc0Pi+gk1m608fFCHXo=",
+        "rev": "5a48a59e96344703305c43f620d025f343c9d347",
+        "revCount": 14,
         "type": "tarball",
-        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-net/0.1.13%2Brev-9314f38c5fc410c5f0c686e65568f2d5e85b0744/019f0eae-0ac0-7313-a1ab-a35f537785ac/source.tar.gz"
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-net/0.1.14%2Brev-5a48a59e96344703305c43f620d025f343c9d347/019f1059-b69a-7743-bf41-fbf53f1918cd/source.tar.gz"
       },
       "original": {
         "type": "tarball",

@@ -13,7 +13,7 @@
  *   nix run nixpkgs#bun -- test tests/remote-control.test.ts
  */
 import { test, expect, describe } from "bun:test";
-import { planLaunch, authEnvArgs, buildManifest, remoteServeArgs } from "../claude-box.ts";
+import { planLaunch, authEnvArgs, buildManifest, remoteServeArgs, rcEgressAllow, RC_NETD_ALLOW } from "../claude-box.ts";
 
 const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
 const WITH_TOKEN = { HOME: "/tmp", CLAUDE_CODE_OAUTH_TOKEN: "tok-abc" } as Record<
@@ -103,6 +103,28 @@ describe("--remote-control: manifest still reflects policed egress", () => {
     const m = buildManifest("personal", planLaunch(["--remote-control"], EMPTY), EMPTY);
     expect(m.doors.map((d) => d.name)).toContain("net");
     expect(m.netOpen).toBe(false);
+  });
+});
+
+describe("rcEgressAllow: the RC profile's scoped-netd allowlist", () => {
+  test("an RC launch widens the default anthropic allowlist with the RC hosts", () => {
+    const allow = rcEgressAllow(planLaunch(["--remote-control"], EMPTY));
+    expect(allow).toContain("api.anthropic.com"); // the default base is kept
+    expect(allow).toContain("statsig.anthropic.com"); // + the RC feature-flag/telemetry host
+    expect(allow).toEqual(expect.arrayContaining(RC_NETD_ALLOW));
+  });
+
+  test("--remote-serve shares the same RC allowlist", () => {
+    expect(rcEgressAllow(planLaunch(["--remote-serve"], EMPTY))).toContain("statsig.anthropic.com");
+  });
+
+  test("a DEFAULT launch returns [] — it keeps the shared netd, allowlist untouched", () => {
+    expect(rcEgressAllow(planLaunch(["--net"], EMPTY))).toEqual([]);
+    expect(rcEgressAllow(planLaunch(["--repo", "."], WITH_TOKEN))).toEqual([]);
+  });
+
+  test("the widening is RC-only: the default never sees statsig", () => {
+    expect(rcEgressAllow(planLaunch([], EMPTY))).not.toContain("statsig.anthropic.com");
   });
 });
 

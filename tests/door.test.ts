@@ -140,7 +140,7 @@ test("manifest is honest about what is denied, not just granted", () => {
 test("a no-grant box still names its denials (knows what it cannot do)", () => {
   const m = buildManifest("personal", planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
-  expect(m.denied.map((d) => d.name).sort()).toEqual(["beads", "keeper", "launcher", "net", "scout"]);
+  expect(m.denied.map((d) => d.name).sort()).toEqual(["auth", "beads", "keeper", "launcher", "net", "scout"]);
 });
 
 // ── network is a door, with launch effects ──

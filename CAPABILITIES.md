@@ -213,6 +213,34 @@ destined for its own repo (`bounded-systems/ocap-provenance`); see
 [`contract/CHAIN.md`](./contract/CHAIN.md). L1 (sign + SLSA-attest the box image)
 is the self-contained next step in this flake; L2/L3 land in keeperd.
 
+## Where authority originates — the root mint, then attenuating delegation
+
+A box holds no ambient authority; every capability traces to a single origin and
+can only narrow from there.
+
+- **The root mint — the only ambient-authority origin.** `launcherd` gates the
+  INITIAL grant at root launch against its policy (`isRoomAllowed`, the `rooms`
+  catalog, `maxConcurrent`, `rateLimit`). This is the one place authority enters
+  the system: a launch either matches policy and mints a manifest of doors, or it
+  is refused. Everything downstream can only attenuate.
+
+- **Delegation is chosen by transport, not re-checked per hop** (see
+  [ADR-CAPABILITY-TRANSPORT.md](./ADR-CAPABILITY-TRANSPORT.md)):
+  - **`unix` (local):** the held reference IS the authority — a box can reach only
+    the door sockets bind-mounted into it (`prx-sfr0`), and can delegate only
+    references it already holds. Over-granting is *unsayable*, not rejected.
+  - **`vsock`/`tcp` (in transit):** a reachable socket is not authority. The
+    concierge MINTS a signed grant (audience/exp/nonce-bound) and the serving room
+    VERIFIES it before honoring a call (`verifyGrantWithKeys` — keyless, against
+    the concierge's published keys), then enforces its caveats.
+
+- **Post-root delegation is deliberately unchecked**, by construction: you cannot
+  hand on a reference you don't hold (local) or widen a signed grant you were
+  issued (transit), so authority is monotonically non-increasing from the mint —
+  no per-hop policy gate is needed or wanted. (The launcher's residual
+  `child ⊆ parent` spawn check is a stopgap for the in-box spawn path until
+  reference-passing spawn, `prx-8k08`, replaces it; it can only narrow.)
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a

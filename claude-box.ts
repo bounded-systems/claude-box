@@ -1194,7 +1194,11 @@ async function startScopedNetd(
   const proc = Bun.spawn(
     ["nix", "run", "nixpkgs#bun", "--", `${import.meta.dir}/netd/netd.ts`, "serve", "--port", String(port)],
     {
-      env: { ...process.env, NETD_ALLOW: allow.join(",") },
+      // NETD_REQUIRE_GRANT=0: this is a LOCAL, co-located scoped netd the box
+      // reaches over the host loopback — trusted like a mount, so it opts out of
+      // the tcp signed-grant gate (which is for an untrusted REMOTE netd). Without
+      // this it would 407 the ungranted box it exists to serve.
+      env: { ...process.env, NETD_ALLOW: allow.join(","), NETD_REQUIRE_GRANT: "0" },
       stdout: "ignore",
       stderr: "ignore",
     },

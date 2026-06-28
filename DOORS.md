@@ -53,10 +53,12 @@ makes the whole model fall out:
   [ADR-CAPABILITY-TRANSPORT.md](./ADR-CAPABILITY-TRANSPORT.md) and
   [CAPABILITIES.md](./CAPABILITIES.md) "Where authority originates"): on `unix`
   the held reference IS the authority (you can only pass references you hold); on
-  `vsock`/`tcp` authority rides in a signed grant the serving room verifies. The
-  launcher's name-based `child ⊆ parent` check is the in-box-spawn stopgap until
-  reference-passing spawn (`prx-8k08`) makes over-granting unsayable rather than
-  rejected.
+  `vsock`/`tcp` authority rides in a signed grant the serving room verifies. This
+  now holds on the spawn path: `launcherd` hands a child the **parent's actual
+  references** from the caller's own `LaunchRecord`, correlating the caller to its
+  launch by cgroup (`prx-8k08`/`prx-p4vb`), so over-granting is unsayable rather
+  than rejected — the old name-based `child ⊆ parent` check was retired
+  (`prx-e232`).
 - **Even auth is a dispatched capability.** A box should not hold its API token;
   "inference egress" is a capability obtained by dispatching to the net guest,
   which **injects** the credential (secret-free — see below). `cbox`'s env-token

@@ -464,6 +464,25 @@ const ROOMS: Record<string, Room> = {
 const launches = new Map<string, LaunchRecord>();
 const startedAt = new Date();
 
+/** Find the LaunchRecord for the box whose process is `pid` — the peercred
+ *  caller of a spawn request. This is what makes a child's ceiling object-
+ *  anchored: launcherd trusts its OWN record of what that box holds, not the
+ *  box's self-report. Returns undefined for a caller we didn't launch (a root
+ *  launch from the host operator), in which case the caller falls back to its
+ *  client-sent values (today's behavior). */
+function findCallerRecord(pid: number): LaunchRecord | undefined {
+  for (const rec of launches.values()) {
+    if (rec.pid === pid) return rec;
+  }
+  return undefined;
+}
+
+/** Test seam: insert a LaunchRecord so a spawn's caller-record lookup can be
+ *  exercised without launching a real box. */
+function __seedLaunch(rec: LaunchRecord): void {
+  launches.set(rec.launchId, rec);
+}
+
 function generateLaunchId(): string {
   return `box-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -622,7 +641,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const roomName = params.room as string | undefined;
   const netOpen = (params.netOpen as boolean) ?? false;
   const guestArgs = (params.guestArgs as string[]) ?? [];
-  const depth = (params.depth as number) ?? 0;  // Spawn depth (0 = root, 1 = first child, etc.)
+  const clientDepth = (params.depth as number) ?? 0;  // self-reported; only a fallback (see below)
   let doorSpecs = (params.doors as string[]) ?? [];
 
   // Extract caller info (injected by peercred proxy via SO_PEERCRED)
@@ -632,9 +651,23 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     : undefined;
   const token = params._token as string | undefined;
 
-  // Parent doors (for attenuation check on nested launches)
-  // In-box callers pass their manifest's doors so we can enforce child ⊆ parent
-  const parentDoors = params._parentDoors as string[] | undefined;
+  // Object-anchored authority (prx-8k08, supersedes prx-irs5): a child's ceiling
+  // and depth are derived from the CALLER'S OWN LaunchRecord — launcherd's record
+  // of what it actually granted that box — looked up by the peercred caller pid,
+  // NOT from client-sent params (which an in-box caller could forge to over-report
+  // its doors or under-report its depth). When no record matches (a root launch
+  // from the host operator, or a caller whose pid we can't resolve) we fall back
+  // to the client-sent values — i.e. exactly today's behavior, no regression —
+  // so this only ever HARDENS a matched caller, never loosens an unmatched one.
+  const callerRecord = caller?.pid ? findCallerRecord(caller.pid) : undefined;
+  const depth = callerRecord ? callerRecord.depth + 1 : clientDepth;
+  const parentDoors = callerRecord ? callerRecord.doors : (params._parentDoors as string[] | undefined);
+  if (callerRecord) {
+    log("INFO", `caller pid ${caller!.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${callerRecord.doors.join(",")}]); enforcing child depth ${depth} ⊆ those doors`);
+    if (params.depth !== undefined && (params.depth as number) !== depth) {
+      log("WARN", `caller sent depth=${params.depth} but its record is depth ${callerRecord.depth} — ignoring client value, enforcing ${depth}`);
+    }
+  }
 
   // Validate account
   if (!/^[A-Za-z0-9._-]+$/.test(account)) {
@@ -1074,6 +1107,8 @@ export {
   checkDepthLimit,
   checkAttenuation,
   recordLaunch,
+  findCallerRecord,
+  __seedLaunch,
 };
 export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };
 

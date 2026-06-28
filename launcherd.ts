@@ -411,12 +411,37 @@ async function getImageDigest(): Promise<string | null> {
   }
 }
 
+/** The podman container Id for a just-launched box (named `launchId`). Recorded
+ *  so a later spawn's caller can be correlated back to its launch by cgroup (the
+ *  peercred pid is the container's process, not the `podman run` cli — verified
+ *  prx-p4vb). Best-effort with a short retry (the container registers just after
+ *  `podman run` starts); null if it never resolves → caller-matching falls back
+ *  to pid-equality. */
+async function getContainerId(launchId: string): Promise<string | undefined> {
+  for (let i = 0; i < 15; i++) {
+    try {
+      const proc = Bun.spawn(
+        ["podman", "inspect", launchId, "--format", "{{.Id}}"],
+        { stdout: "pipe", stderr: "ignore" },
+      );
+      const out = (await new Response(proc.stdout).text()).trim();
+      await proc.exited;
+      if (/^[0-9a-f]{64}$/.test(out)) return out;
+    } catch {
+      // not registered yet
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return undefined;
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type LaunchRecord = {
   launchId: string;
   account: string;
-  pid: number;
+  pid: number;          // the `podman run` cli pid (attach/kill); NOT the peercred caller pid
+  containerId?: string; // podman container Id — correlates a spawn caller's cgroup back here
   startedAt: Date;
   doors: DoorGrant[];  // the ACTUAL granted references (host socket + caveats), not names
   repo?: string;
@@ -464,13 +489,43 @@ const ROOMS: Record<string, Room> = {
 const launches = new Map<string, LaunchRecord>();
 const startedAt = new Date();
 
-/** Find the LaunchRecord for the box whose process is `pid` — the peercred
- *  caller of a spawn request. This is what makes a child's ceiling object-
- *  anchored: launcherd trusts its OWN record of what that box holds, not the
- *  box's self-report. Returns undefined for a caller we didn't launch (a root
- *  launch from the host operator), in which case the caller falls back to its
- *  client-sent values (today's behavior). */
+/** Extract a podman container Id from /proc/<pid>/cgroup text. Podman containers
+ *  live under `…/libpod-<64-hex-id>.scope/…` (verified prx-p4vb); return that id
+ *  (the full container Id, == `podman inspect .Id`) or undefined. Pure. */
+function containerIdFromCgroup(cgroupText: string): string | undefined {
+  const m = cgroupText.match(/libpod-([0-9a-f]{64})\.scope/);
+  return m ? m[1] : undefined;
+}
+
+/** The launch whose recorded container Id matches (the caller's container). */
+function findLaunchByContainerId(containerId: string): LaunchRecord | undefined {
+  for (const rec of launches.values()) {
+    if (rec.containerId === containerId) return rec;
+  }
+  return undefined;
+}
+
+/** Find the LaunchRecord for the box a spawn request came from — what makes a
+ *  child's ceiling object-anchored (launcherd trusts its OWN record, not the
+ *  box's self-report).
+ *
+ *  The peercred caller `pid` is the CONTAINER's process (PID-1 or a descendant),
+ *  NOT the `podman run` cli pid launcherd's `proc.pid` holds (verified prx-p4vb).
+ *  So correlate via the caller's cgroup — every process in the box shares the
+ *  container's `libpod-<id>.scope` — matching the container Id recorded at launch.
+ *  Fall back to pid-equality (a non-containerised caller, or a box launched before
+ *  its container id resolved); failing both, undefined → root launch / the
+ *  client-trusted fallback (no worse than before). */
 function findCallerRecord(pid: number): LaunchRecord | undefined {
+  try {
+    const cid = containerIdFromCgroup(readFileSync(`/proc/${pid}/cgroup`, "utf-8"));
+    if (cid) {
+      const rec = findLaunchByContainerId(cid);
+      if (rec) return rec;
+    }
+  } catch {
+    // /proc unreadable (non-Linux, or the pid is gone) — fall through to pid match
+  }
   for (const rec of launches.values()) {
     if (rec.pid === pid) return rec;
   }
@@ -810,10 +865,16 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     stderr: "inherit",
   });
 
+  // Record the container Id so a later spawn's caller (whose peercred pid is the
+  // container's process, not this cli pid) can be correlated back to this launch
+  // by cgroup — what makes object-anchored spawn actually engage in the pod (prx-p4vb).
+  const containerId = await getContainerId(launchId);
+
   const record: LaunchRecord = {
     launchId,
     account,
     pid: proc.pid,
+    containerId,
     startedAt: new Date(),
     doors, // the actual granted references — a child spawn delegates these (prx-8k08)
     repo,
@@ -1141,6 +1202,8 @@ export {
   checkAttenuation,
   recordLaunch,
   findCallerRecord,
+  findLaunchByContainerId,
+  containerIdFromCgroup,
   resolveLaunchDoors,
   __seedLaunch,
 };

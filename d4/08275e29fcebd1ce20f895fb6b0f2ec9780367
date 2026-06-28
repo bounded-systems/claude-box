@@ -1,0 +1,23 @@
+lib/concierge.ts
+  s_98e316d0b3248a::t_ca8688e17f1505 10-14,25-35,69-86,90-96
+lib/keeper.ts
+  s_98e316d0b3248a::t_87963affd3c2d8 26-28,152-154,175-176
+lib/scout.ts
+  s_98e316d0b3248a::t_af2c3d8fa4aef0 22-24,198-200,221-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "d408275e29fcebd1ce20f895fb6b0f2ec9780367",
+  "prompts": {},
+  "sessions": {
+    "s_98e316d0b3248a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8db980ee-eb6b-4866-832b-f795cef7f33c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

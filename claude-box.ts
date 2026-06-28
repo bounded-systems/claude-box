@@ -53,6 +53,7 @@ const TCP_PORTS: Record<string, number> = {
   keeperd: 3001,
   netd: 3128,  // HTTP proxy port
   scoutd: 3002,
+  authd: 3003, // RC credential-broker door (prx-6194)
 };
 
 // ── Guest catalog ─────────────────────────────────────────────────────────────
@@ -196,6 +197,7 @@ const DAEMON_HINTS: Record<string, string> = {
   net: "nix run .#netd -- serve",
   scout: "nix run .#scoutd -- serve",
   launcher: "nix run .#launcherd -- serve",
+  auth: "bun authd.ts serve", // RC credential-broker door (prx-6194; .#authd image is Phase 2)
 };
 /** A door socket's dir must not be world-writable, or another host user can
  *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
@@ -323,6 +325,15 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       grants: "signed git writes (commit/push/refs) via keeperd",
       use: "Route every git write through keeperd at /run/doors/keeperd.sock ($KEEPERD_SOCK). You hold NO git credentials and NO signing key — request a signed write and keeperd performs it. A raw `git push` cannot work; there is nothing in the box to push with.",
       deny: "No git-write authority in this box. Do not push, mutate refs, or claim a commit landed on a remote — it will fail. If the task needs it, it must be RELAUNCHED with --keeper.",
+    },
+    auth: {
+      flag: "--auth",
+      inBox: "/run/doors/authd.sock",
+      env: "AUTHD_SOCK",
+      hostDefault: env.AUTHD_SOCK ?? defaultHostSock("authd", env),
+      grants: "a leased, access-token-only Claude credential via authd (Remote Control)",
+      use: "Lease the Remote Control credential from authd at /run/doors/authd.sock ($AUTHD_SOCK). You hold NO refresh token — authd owns it host-side and lends you only a short-lived access token (it re-leases before expiry). Do not persist or refresh it yourself.",
+      deny: "No Remote Control credential in this box. Do not attempt `claude auth login` or expect a full-scope token; relaunch with --remote-control (which mounts authd) if RC is needed.",
     },
     beads: {
       flag: "--beads",

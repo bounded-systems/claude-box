@@ -1,0 +1,21 @@
+DOORS.md
+  s_3086de54355107::t_25751cdc8f4af4 8-10
+GHAPPD.md
+  s_3086de54355107::t_eb81f13a9245e3 1-158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "345b9c135ebf64a0f2c79e250b70b65afe92ff98",
+  "prompts": {},
+  "sessions": {
+    "s_3086de54355107": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "596c64d8-d3a2-48a6-b328-a7e6b9ad525c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

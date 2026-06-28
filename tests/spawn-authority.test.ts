@@ -7,7 +7,14 @@
 //
 //   nix run nixpkgs#bun -- test tests/spawn-authority.test.ts
 import { describe, test, expect } from "bun:test";
-import { handleRequest, findCallerRecord, resolveLaunchDoors, __seedLaunch } from "../launcherd";
+import {
+  handleRequest,
+  findCallerRecord,
+  findLaunchByContainerId,
+  containerIdFromCgroup,
+  resolveLaunchDoors,
+  __seedLaunch,
+} from "../launcherd";
 import { unix, type DoorGrant } from "../guest-room/mod.ts";
 
 const door = (name: string, hostPath: string): DoorGrant => ({
@@ -103,5 +110,29 @@ describe("resolveLaunchDoors — reference-passing", () => {
   test("root launch (no caller record) resolves names globally", () => {
     const out = resolveLaunchDoors(["scout"], undefined);
     expect(out[0]!.name).toBe("scout"); // global door catalog, the root mint
+  });
+});
+
+describe("cgroup correlation — caller pid → container (prx-p4vb)", () => {
+  // Real podman cgroup line shape (verified in the podman VM): the container Id
+  // sits in `libpod-<64hex>.scope`, == `podman inspect .Id`.
+  const CID = "155a4fee5fc5cc950e1ecdfb08b0341f889eedba4f323cf3a21f7b601051ab74";
+  const cgroup = `0::/user.slice/user-501.slice/user@501.service/user.slice/libpod-${CID}.scope/container\n`;
+
+  test("containerIdFromCgroup extracts the podman container Id", () => {
+    expect(containerIdFromCgroup(cgroup)).toBe(CID);
+  });
+
+  test("returns undefined for a non-podman cgroup", () => {
+    expect(containerIdFromCgroup("0::/system.slice/sshd.service\n")).toBeUndefined();
+  });
+
+  test("findLaunchByContainerId matches the recorded container — the real-box correlation", () => {
+    __seedLaunch({
+      launchId: "L-c", account: "personal", pid: 11, containerId: CID,
+      startedAt: new Date(), doors: [door("scout", "/run/scoutd.sock")], depth: 1,
+    } as unknown as Parameters<typeof __seedLaunch>[0]);
+    expect(findLaunchByContainerId(CID)?.launchId).toBe("L-c");
+    expect(findLaunchByContainerId("0".repeat(64))).toBeUndefined();
   });
 });

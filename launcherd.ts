@@ -29,6 +29,11 @@ import {
   type Launch,
 } from "./claude-box";
 import {
+  type Interposer,
+  frontDoorsWithInterposers,
+  teardownInterposers,
+} from "./door-interpose.ts";
+import {
   defaultSocketPath as runtimeSocketPath,
   prepareSocket,
   createLogger,
@@ -416,6 +421,7 @@ type LaunchRecord = {
   manifest: Manifest;
   attestation?: L2Attestation;
   proc: ReturnType<typeof Bun.spawn>;
+  interposers?: Interposer[]; // caveat-enforcing proxies fronting this box's caveated doors (prx-yweb)
 };
 
 // ── Rooms ────────────────────────────────────────────────────────────────────
@@ -806,6 +812,16 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     };
   }
 
+  const launchId = generateLaunchId();
+
+  // prx-yweb / trust 6.3: front each CAVEATED door with an interposer that holds
+  // the upstream socket and enforces the caveats on traffic; the box mounts only
+  // the proxy, so a request outside the caveat never reaches the upstream. An
+  // uncaveated (or tcp) door passes through unchanged — no behavior change.
+  // launcherd keeps the ORIGINAL references in the record for delegation; the
+  // interposers are torn down when the box exits.
+  const { doors: mountDoors, interposers } = frontDoorsWithInterposers(doors, launchId);
+
   // Build the launch (reuse planLaunch logic structure)
   const launch: Launch = {
     guest: (params.guest as string) ?? "claude",
@@ -815,7 +831,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     repoClone: false,
     pod: false,
     writable: [],
-    doors,
+    doors: mountDoors,
     netOpen: (params.netOpen as boolean) ?? netOpen,
     remoteControl: false,
     remoteServe: false,
@@ -823,26 +839,33 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   };
   const manifest = buildManifest(account, launch, process.env, depth);
   const manifestJson = capabilityJson(manifest);
-  const launchId = generateLaunchId();
 
-  // Build L2 attestation if signing is enabled
+  // From here on the interposers are live; tear them down if launch assembly or
+  // spawn fails, so a failed launch never leaks proxy sockets.
   let attestation: L2Attestation | undefined;
-  if (signingKey) {
-    const imageDigest = await getImageDigest();
-    if (imageDigest) {
-      attestation = buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    // Build L2 attestation if signing is enabled
+    if (signingKey) {
+      const imageDigest = await getImageDigest();
+      if (imageDigest) {
+        attestation = buildL2Attestation(launchId, imageDigest, manifest, manifestJson);
+      }
     }
+
+    // Build podman argv
+    const argv = await buildPodmanArgv(account, launch, manifest, launchId);
+
+    // Spawn
+    proc = Bun.spawn(argv, {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+  } catch (e) {
+    teardownInterposers(interposers);
+    throw e;
   }
-
-  // Build podman argv
-  const argv = await buildPodmanArgv(account, launch, manifest, launchId);
-
-  // Spawn
-  const proc = Bun.spawn(argv, {
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
 
   // Record the container Id so a later spawn's caller (whose peercred pid is the
   // container's process, not this cli pid) can be correlated back to this launch
@@ -862,15 +885,17 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     manifest,
     attestation,
     proc,
+    interposers, // torn down on exit (prx-yweb)
   };
   launches.set(launchId, record);
 
   // Record for rate limiting
   recordLaunch();
 
-  // Clean up when process exits
+  // Clean up when process exits: tear down the box's caveat-enforcing
+  // interposers (close servers, unlink sockets) so they don't outlive the box.
   proc.exited.then(() => {
-    // Could emit an event or log here
+    teardownInterposers(interposers);
   });
 
   return {

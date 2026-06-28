@@ -6,7 +6,7 @@
 //    socket + caveats, not a global name re-resolution, and can't re-point or invent one.
 //
 //   nix run nixpkgs#bun -- test tests/spawn-authority.test.ts
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import {
   handleRequest,
   findCallerRecord,
@@ -14,7 +14,11 @@ import {
   containerIdFromCgroup,
   resolveLaunchDoors,
   __seedLaunch,
+  __setCallerContainerId,
+  __clearCallerContainerId,
 } from "../launcherd";
+
+afterEach(() => __clearCallerContainerId());
 import { unix, type DoorGrant } from "../guest-room/mod.ts";
 
 const door = (name: string, hostPath: string): DoorGrant => ({
@@ -42,36 +46,62 @@ const seed = (over: Record<string, unknown> = {}) => {
 const launch = (params: Record<string, unknown>) =>
   handleRequest(JSON.stringify({ id: "1", method: "launch", params }));
 
-describe("caller-record-derived ceiling + depth", () => {
-  test("findCallerRecord resolves a seeded launch by pid", () => {
+describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", () => {
+  test("findCallerRecord resolves a seeded launch by pid (fallback path)", () => {
     seed({ launchId: "L-x", pid: 7777 });
     expect(findCallerRecord(7777)?.launchId).toBe("L-x");
     expect(findCallerRecord(1)).toBeUndefined();
   });
 
-  test("child requesting a door the caller lacks is denied — forged _parentDoors ignored", async () => {
-    seed({ pid: 4242, doors: [door("scout", "/run/scoutd.sock")], depth: 1 });
+  test("a container caller may only spawn doors its launch holds (forged request refused)", async () => {
+    seed({ launchId: "L-a", containerId: "CIDA", doors: [door("scout", "/run/scoutd.sock")], depth: 1 });
+    __setCallerContainerId("CIDA"); // caller resolves to L-a via its cgroup
     const resp = await launch({
       account: "personal",
-      doors: ["keeper"], // not held by the caller
-      depth: 0, // lie
-      _parentDoors: ["keeper", "scout"], // lie — claims keeper
-      _caller: { uid: 1000, pid: 4242 },
+      doors: ["keeper"], // L-a doesn't hold keeper
+      depth: 0, // ignored — depth comes from the record
+      _parentDoors: ["keeper", "scout"], // ignored — no client-trusted fallback anymore
+      _caller: { uid: 1000, pid: 1 },
     });
     expect(resp.ok).toBe(false);
-    expect(resp.error?.code).toBe("ATTENUATION_VIOLATION");
+    expect(resp.error?.code).toBe("ATTENUATION_VIOLATION"); // from resolveLaunchDoors
   });
 
-  test("depth is derived from the caller's record, not the client value", async () => {
-    seed({ pid: 4243, doors: [door("scout", "/run/scoutd.sock")], depth: 3 }); // at maxDepth
+  test("child depth is derived from the caller's record (depth limit enforced)", async () => {
+    seed({ launchId: "L-b", containerId: "CIDB", doors: [door("scout", "/run/scoutd.sock")], depth: 3 });
+    __setCallerContainerId("CIDB");
     const resp = await launch({
       account: "personal",
       doors: ["scout"],
-      depth: 0, // lie
-      _caller: { uid: 1000, pid: 4243 },
+      depth: 0, // lie — would pass if trusted
+      _caller: { uid: 1000, pid: 1 },
     });
     expect(resp.ok).toBe(false);
     expect(resp.error?.code).toBe("DEPTH_LIMIT"); // child depth 4 > max 3
+  });
+
+  test("a container caller launcherd did NOT launch is refused (fail closed)", async () => {
+    __setCallerContainerId("CID-NOT-OURS");
+    const resp = await launch({
+      account: "personal",
+      doors: ["scout"],
+      _caller: { uid: 1000, pid: 1 },
+    });
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("UNKNOWN_CALLER");
+  });
+
+  test("a non-container caller is the root mint — resolved globally, no attenuation/deny", async () => {
+    __setCallerContainerId(undefined); // host operator: cgroup is not a libpod scope
+    const resp = await launch({
+      account: "personal",
+      doors: ["scout"],
+      _caller: { uid: 501, pid: 1 },
+    });
+    // not denied for attenuation or unknown-caller — it's the mint; it only fails
+    // later trying to reach the real (absent) socket.
+    expect(resp.error?.code).not.toBe("ATTENUATION_VIOLATION");
+    expect(resp.error?.code).not.toBe("UNKNOWN_CALLER");
   });
 });
 

@@ -418,7 +418,7 @@ type LaunchRecord = {
   account: string;
   pid: number;
   startedAt: Date;
-  doors: string[];
+  doors: DoorGrant[];  // the ACTUAL granted references (host socket + caveats), not names
   repo?: string;
   depth: number;
   caller?: CallerInfo;  // SO_PEERCRED info from peercred proxy
@@ -481,6 +481,42 @@ function findCallerRecord(pid: number): LaunchRecord | undefined {
  *  exercised without launching a real box. */
 function __seedLaunch(rec: LaunchRecord): void {
   launches.set(rec.launchId, rec);
+}
+
+/** Resolve requested door specs to concrete grants for a launch.
+ *
+ *  ROOT launch (no caller record — the host operator at the mint): resolve each
+ *  name globally via the door catalog; an explicit `name=host` may override the
+ *  socket. This is where ambient authority legitimately originates.
+ *
+ *  CHILD spawn (caller record present): bind each requested door to the PARENT's
+ *  ACTUAL held reference (its host socket + caveats), looked up by name in the
+ *  caller's LaunchRecord — NOT re-resolved globally. A box can only delegate a
+ *  reference it holds, at the parent's socket; a door the parent lacks is refused,
+ *  and a `name=host` override is ignored (a child cannot re-point a door at a new
+ *  socket). This makes "can't delegate what you don't hold" true at the reference
+ *  level, not just the name level (prx-8k08). */
+function resolveLaunchDoors(doorSpecs: string[], callerRecord: LaunchRecord | undefined): DoorGrant[] {
+  if (!callerRecord) {
+    return doorSpecs.map((spec) => {
+      const eq = spec.indexOf("=");
+      const name = eq < 0 ? spec : spec.slice(0, eq);
+      const host = eq < 0 ? undefined : spec.slice(eq + 1);
+      return resolveDoor(name, host);
+    });
+  }
+  const held = new Map(callerRecord.doors.map((d) => [d.name, d] as const));
+  return doorSpecs.map((spec) => {
+    const name = spec.indexOf("=") < 0 ? spec : spec.slice(0, spec.indexOf("="));
+    const grant = held.get(name);
+    if (!grant) {
+      throw {
+        code: "ATTENUATION_VIOLATION",
+        message: `door "${name}" not held by caller — a box can only delegate references it holds`,
+      };
+    }
+    return grant; // the parent's actual reference (host + caveats), passed through
+  });
 }
 
 function generateLaunchId(): string {
@@ -577,7 +613,7 @@ async function handleList(params: Record<string, unknown>): Promise<unknown> {
       account: rec.account,
       pid: rec.pid,
       startedAt: rec.startedAt.toISOString(),
-      doors: rec.doors,
+      doors: rec.doors.map((d) => d.name),
       repo: rec.repo,
       depth: rec.depth,
       caller: rec.caller,  // SO_PEERCRED info (uid/gid/pid of spawner)
@@ -661,9 +697,10 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   // so this only ever HARDENS a matched caller, never loosens an unmatched one.
   const callerRecord = caller?.pid ? findCallerRecord(caller.pid) : undefined;
   const depth = callerRecord ? callerRecord.depth + 1 : clientDepth;
-  const parentDoors = callerRecord ? callerRecord.doors : (params._parentDoors as string[] | undefined);
+  const parentDoorNames = callerRecord ? callerRecord.doors.map((d) => d.name) : undefined;
+  const parentDoors = parentDoorNames ?? (params._parentDoors as string[] | undefined);
   if (callerRecord) {
-    log("INFO", `caller pid ${caller!.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${callerRecord.doors.join(",")}]); enforcing child depth ${depth} ⊆ those doors`);
+    log("INFO", `caller pid ${caller!.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${parentDoorNames!.join(",")}]); enforcing child depth ${depth} ⊆ those doors`);
     if (params.depth !== undefined && (params.depth as number) !== depth) {
       log("WARN", `caller sent depth=${params.depth} but its record is depth ${callerRecord.depth} — ignoring client value, enforcing ${depth}`);
     }
@@ -720,14 +757,10 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     };
   }
 
-  // Resolve doors
-  const doors: DoorGrant[] = [];
-  for (const spec of doorSpecs) {
-    const eq = spec.indexOf("=");
-    const name = eq < 0 ? spec : spec.slice(0, eq);
-    const host = eq < 0 ? undefined : spec.slice(eq + 1);
-    doors.push(resolveDoor(name, host));
-  }
+  // Resolve doors to concrete grants. A child spawn (callerRecord present) gets
+  // the PARENT's actual references — not a global name re-resolution — so it can
+  // only ever delegate doors it holds, at the parent's socket + caveats (prx-8k08).
+  const doors = resolveLaunchDoors(doorSpecs, callerRecord);
 
   // Check door prerequisites
   const doorChecks = await checkDoors(doors);
@@ -782,7 +815,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     account,
     pid: proc.pid,
     startedAt: new Date(),
-    doors: doors.map((d) => d.name),
+    doors, // the actual granted references — a child spawn delegates these (prx-8k08)
     repo,
     depth,
     caller,
@@ -1108,6 +1141,7 @@ export {
   checkAttenuation,
   recordLaunch,
   findCallerRecord,
+  resolveLaunchDoors,
   __seedLaunch,
 };
 export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };

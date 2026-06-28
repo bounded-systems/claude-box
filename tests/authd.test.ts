@@ -96,14 +96,27 @@ describe("refreshAccessToken — gated until Phase 0, then mockable", () => {
     expect(err?.code).toBe("REFRESH_GATED");
   });
 
-  test("with the flag + a mocked token endpoint, returns creds + the rotated refresh token", async () => {
+  test("posts the confirmed refresh spec (form-encoded, client_id, no PKCE) + returns rotated creds", async () => {
     process.env.AUTHD_REFRESH_LIVE = "1";
-    const mockFetch = (async () =>
-      new Response(
+    let seen: { url: string; ct: string; body: string } | undefined;
+    const mockFetch = (async (url: string, init: { headers: Record<string, string>; body: string }) => {
+      seen = { url, ct: init.headers["content-type"], body: init.body };
+      return new Response(
         JSON.stringify({ access_token: "new-acc", refresh_token: "new-ref", expires_in: 28800, scope: "user:profile user:inference" }),
         { status: 200 },
-      )) as unknown as typeof fetch;
+      );
+    }) as unknown as typeof fetch;
     const { creds, rotatedRefreshToken } = await refreshAccessToken("old-ref", mockFetch);
+
+    // The request matches what the claude-code client sends (Phase 0, confirmed).
+    expect(seen?.url).toBe("https://platform.claude.com/v1/oauth/token");
+    expect(seen?.ct).toBe("application/x-www-form-urlencoded");
+    const params = new URLSearchParams(seen!.body);
+    expect(params.get("grant_type")).toBe("refresh_token");
+    expect(params.get("refresh_token")).toBe("old-ref");
+    expect(params.get("client_id")).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+    expect(params.has("code_verifier")).toBe(false); // no PKCE on refresh
+
     expect(creds.claudeAiOauth.accessToken).toBe("new-acc");
     expect(rotatedRefreshToken).toBe("new-ref");
     expect(creds.claudeAiOauth.scopes).toContain("user:inference");

@@ -65,32 +65,44 @@ export function toAccessTokenOnly(creds: ClaudeCredentials): ClaudeCredentials {
 }
 
 // ── OAuth2 refresh (authd → Anthropic) ───────────────────────────────────────
-// AUTHD.md Risk #2: the endpoint / client_id / whether PKCE is required ON REFRESH
-// are community-sourced and must be CONFIRMED FIRST-HAND (Phase 0) before this is
-// enabled — a live rotation is single-use and would invalidate the in-use token,
-// so do NOT verify by triggering one. `fetchImpl` is injectable so tests mock it.
+// Spec CONFIRMED first-hand from the claude-code client (AUTHD.md Phase 0 / Risk
+// #2 — by reading the client, NOT by a live rotation): POST
+// `platform.claude.com/v1/oauth/token`, body `application/x-www-form-urlencoded`
+// = { grant_type=refresh_token, refresh_token, client_id, scope }. There is NO
+// `code_verifier`/PKCE on refresh (PKCE is only the initial auth flow). `fetchImpl`
+// is injectable so tests mock it.
 const TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
+// The PUBLIC claude-code OAuth client id (not a secret; app=claude-code). Overridable.
+const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const DEFAULT_SCOPES = ["org:create_api_key", "user:inference", "user:mcp_servers", "user:profile"];
 
 export async function refreshAccessToken(
   refreshToken: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ creds: ClaudeCredentials; rotatedRefreshToken: string }> {
-  // [Phase 0 GATE] The spec is unconfirmed, so a live refresh stays OFF unless the
-  // operator opts in after confirming it — a misconfigured launch must not rotate
-  // a live token. (Tests pass a fetchImpl AND set the flag; production waits on Phase 0.)
+  // [Phase 0 GATE] The refresh spec is confirmed, but a live rotation is single-use
+  // and the continuity behaviour is still unverified — so the live exchange stays
+  // OFF unless the operator opts in. A misconfigured launch must not rotate a live
+  // token. (Tests pass a fetchImpl AND set the flag; production waits on Phase 0.)
   if (process.env.AUTHD_REFRESH_LIVE !== "1") {
     throw {
       code: "REFRESH_GATED",
-      message: "live OAuth refresh disabled until AUTHD.md Phase 0 confirms the spec (set AUTHD_REFRESH_LIVE=1)",
+      message: "live OAuth refresh disabled until AUTHD.md Phase 0 verifies continuity (set AUTHD_REFRESH_LIVE=1)",
     };
   }
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: process.env.AUTHD_CLIENT_ID ?? CLAUDE_CODE_CLIENT_ID,
+    scope: DEFAULT_SCOPES.join(" "),
+  });
   const res = await fetchImpl(TOKEN_ENDPOINT, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refreshToken }),
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
   });
   if (!res.ok) throw { code: "REFRESH_FAILED", message: `token endpoint returned ${res.status}` };
-  const body = (await res.json()) as {
+  const r = (await res.json()) as {
     access_token: string;
     refresh_token: string;
     expires_in: number;
@@ -98,13 +110,13 @@ export async function refreshAccessToken(
   };
   const creds: ClaudeCredentials = {
     claudeAiOauth: {
-      accessToken: body.access_token,
-      refreshToken: body.refresh_token, // kept host-side; stripped before the box sees it
-      expiresAt: Date.now() + body.expires_in * 1000,
-      scopes: body.scope?.split(" ") ?? [],
+      accessToken: r.access_token,
+      refreshToken: r.refresh_token, // kept host-side; stripped before the box sees it
+      expiresAt: Date.now() + r.expires_in * 1000,
+      scopes: r.scope?.split(" ") ?? [],
     },
   };
-  return { creds, rotatedRefreshToken: body.refresh_token };
+  return { creds, rotatedRefreshToken: r.refresh_token };
 }
 
 /** Read the host-owned refresh token from op (AUTHD_OP_REF = op://vault/item/field).

@@ -125,11 +125,16 @@ authd writes the same shape into the box **minus `refreshToken`**, refreshing
    `refreshToken`-based refresh on 401? If it re-reads, B is seamless. If it
    caches, authd must nudge/restart the session at refresh. Hard to test quickly
    (8h token life) — treat as the build's primary risk.
-2. **OAuth refresh specifics are community-sourced, not official.** Endpoint
-   (`platform.claude.com/v1/oauth/token`), the public client_id, and whether a
-   `code_verifier`/PKCE is required *on refresh* (likely a conflation with the
-   initial auth flow) all need first-hand confirmation. **Do not verify by
-   triggering a live refresh** — rotation would invalidate the in-use token.
+2. **OAuth refresh specifics — RESOLVED (confirmed first-hand from the claude-code
+   client, no live rotation, prx-6194 Phase 0).** POST
+   `https://platform.claude.com/v1/oauth/token`, body **`application/x-www-form-urlencoded`**
+   = `grant_type=refresh_token` · `refresh_token` · `client_id` · `scope`. The public
+   client id is **`9d1c250a-e61b-44d9-88ed-5944d1962f5e`** (app=claude-code); default
+   scopes `org:create_api_key user:inference user:mcp_servers user:profile`. **No
+   `code_verifier`/PKCE on refresh** (PKCE is only the initial auth flow — the
+   suspected conflation, confirmed). authd's `refreshAccessToken` implements exactly
+   this; it stays gated behind `AUTHD_REFRESH_LIVE=1` only on Risk #1 (continuity)
+   now, not the spec.
 3. **Exclusive use.** The RC credential should not be shared with a concurrent
    host `claude` session (rotation conflict). Consider a dedicated login.
 
@@ -168,11 +173,10 @@ actually stops living in the box (Phase 3).
   - **Gate:** *re-reads* → Phase 2 is a file-rewrite-on-a-timer (seamless);
     *caches* → Phase 2 must also nudge/restart the RC session at refresh. This
     single bit sets Phase 2's scope, so it's the cheapest thing to learn early.
-  - In parallel (no live refresh): **confirm the OAuth refresh spec** first-hand
-    (Risk #2) — endpoint `platform.claude.com/v1/oauth/token`, the public
-    `client_id`, and whether PKCE/`code_verifier` is required *on refresh* (likely
-    a conflation with initial auth). Read the docs/clients; do **not** verify by
-    rotating an in-use token.
+  - The OAuth refresh spec (Risk #2) is **DONE** — confirmed first-hand from the
+    claude-code client (see Risk #2 above): form-encoded, `client_id`
+    `9d1c250a-…`, no PKCE on refresh. `refreshAccessToken` implements it. So Phase 0
+    reduces to the **continuity** bit; the live exchange stays gated on it.
 
 - **Phase 1 — `authd serve` (host-side, NOT yet wired into `--remote-control`).**
   Build the daemon as a keeperd sibling: Unix socket / TCP-mode port, registered

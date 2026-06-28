@@ -41,6 +41,7 @@ import {
   tcp,
   attenuate,
 } from "./guest-room/mod.ts";
+import { DEFAULT_ALLOW } from "./netd/netd.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 const VOLUME_RE = /^claude-(.*)-config$/;
@@ -114,6 +115,14 @@ const NETD_PROXY = "http://127.0.0.1:3128";
 
 // In TCP mode (DOORS_TCP=1), the proxy points directly to netd on the host.
 const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
+
+// Extra egress hosts the --remote-control profile needs ON TOP of the default
+// anthropic allowlist: the GrowthBook/statsig feature-flag + telemetry endpoint
+// that delivers the `tengu_ccr_bridge` RC flag. authEnvArgs() un-suppresses the
+// flag fetch; without these the shared netd (anthropic-only) blocks it as the
+// fail-closed boundary, so RC never activates. Minimal + enumerated — never
+// --net-open. [Spike S1] enumerates any further hosts via netd's DENY log.
+export const RC_NETD_ALLOW = ["statsig.anthropic.com"];
 
 
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
@@ -909,6 +918,16 @@ function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
   return [];
 }
 
+/** The egress allowlist for a launch's scoped netd. The --remote-control profile
+ *  widens the default anthropic allowlist with the RC feature-flag/telemetry
+ *  hosts (RC_NETD_ALLOW); EVERY other launch returns [] — it keeps using the
+ *  shared netd, unchanged. So the wider allowlist is scoped to this one launch's
+ *  own netd; the default box's egress boundary is untouched. */
+export function rcEgressAllow(launch: Launch): string[] {
+  if (!(launch.remoteControl || launch.remoteServe)) return [];
+  return [...DEFAULT_ALLOW, ...RC_NETD_ALLOW];
+}
+
 /** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
  *  entrypoint is `claude`, so prepending these args boots it as
  *  `claude remote-control --name <account>` — a headless RC server the app
@@ -1395,21 +1414,44 @@ async function run(
     );
   }
 
+  // --remote-control: route this box's egress through its OWN scoped netd whose
+  // allowlist adds the RC feature-flag/telemetry hosts (rcEgressAllow), so the
+  // GrowthBook flag fetch the RC posture re-enables (authEnvArgs) can actually
+  // reach — without widening the shared netd every other box uses. Like
+  // --repo-origin, it needs TCP mode (the box reaches the scoped netd over the
+  // host gateway). The scoped netd opts out of the grant gate (it's local).
+  let rcNetd: { port: number; stop: () => void } | undefined;
+  const rcAllow = rcEgressAllow(launch);
+  if (rcAllow.length > 0 && !netOpen) {
+    if (!tcpMode) {
+      console.error(
+        "claude-box: --remote-control needs TCP mode for its scoped egress door — set DOORS_TCP=1.",
+      );
+      process.exit(2);
+    }
+    rcNetd = await startScopedNetd(rcAllow);
+    console.error(
+      `claude-box: --remote-control — egress door allowlists [${rcAllow.join(", ")}] (netd :${rcNetd.port})`,
+    );
+  }
+
   if (netOpen) {
     console.error(
       "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
     );
   } else if (tcpMode && doors.length > 0) {
     // TCP mode: use default network so container can reach host.containers.internal
-    // netd's allowlist is the security boundary (HTTPS_PROXY → netd)
+    // netd's allowlist is the security boundary (HTTPS_PROXY → netd). For an RC
+    // launch, point at its OWN scoped netd (wider allowlist) instead of the shared.
     if (netDoor) {
+      const proxy = rcNetd ? `http://host.containers.internal:${rcNetd.port}` : NETD_TCP_PROXY;
       argv.push(
         "--env",
-        `HTTPS_PROXY=${NETD_TCP_PROXY}`,
+        `HTTPS_PROXY=${proxy}`,
         "--env",
-        `HTTP_PROXY=${NETD_TCP_PROXY}`,
+        `HTTP_PROXY=${proxy}`,
         "--env",
-        `ALL_PROXY=${NETD_TCP_PROXY}`,
+        `ALL_PROXY=${proxy}`,
         "--env",
         "NO_PROXY=localhost,127.0.0.1",
       );
@@ -1615,6 +1657,12 @@ async function run(
   if (gitDoor) {
     console.error(`claude-box: stopping git-pull door (netd :${gitDoor.port})`);
     gitDoor.stop();
+  }
+
+  // Tear down the per-launch RC egress door.
+  if (rcNetd) {
+    console.error(`claude-box: stopping --remote-control egress door (netd :${rcNetd.port})`);
+    rcNetd.stop();
   }
 
   // Clean up the isolated clone on exit (a plain temp dir, not a worktree).

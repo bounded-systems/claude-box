@@ -195,6 +195,11 @@ host (a single allowlist can name several hosts). A typical box's pod runs:
   revoked right after the clone.
 - **keeper** — delegated signing; **scout** — read content.
 - *(push is keeper, not egress; in-box git after the clone needs no egress.)*
+- **remote-control egress** — the `--remote-control` profile's *own* scoped netd,
+  allowlist `…anthropic.com` **+** `statsig.anthropic.com`/GrowthBook (the
+  feature-flag endpoint), so the Claude app can drive the box. Wider but still
+  enumerated (never `--net-open`), and scoped to that one launch — the default
+  box's egress door is untouched. See CAPABILITIES.md "The `--remote-control` profile".
 
 Two capabilities → two doors. Conflating them into one process (one netd, many
 allowlists) re-creates the shared-authority anti-pattern at pod scale.

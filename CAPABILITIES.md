@@ -246,6 +246,37 @@ can only narrow from there.
   client-sent `_parentDoors` were retired (`prx-e232`). Over-granting is
   *unsayable* on spawn, not rejected by a check.
 
+## The `--remote-control` profile — an honest, scoped relaxation
+
+`--remote-control` (and its server form `--remote-serve`) lets the Claude app
+drive a *boxed* session. It is the **one** profile that relaxes the default
+posture, and every relaxation is **scoped to that launch** — the default box is
+byte-for-byte unchanged (pinned by `tests/remote-control.test.ts`).
+
+What it relaxes, and the boundary that stays:
+
+- **Feature-flag fetch (Gate A).** The default box bakes
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (kills the auto-updater, Sentry,
+  feedback, *and* GrowthBook). RC needs GrowthBook to evaluate the `tengu_ccr_bridge`
+  flag, so `authEnvArgs()` unsets that umbrella and **re-asserts the three
+  RC-compatible blocks granularly** (updates, error-reporting, feedback) — only
+  telemetry/GrowthBook becomes reachable, and even that is bounded by netd below.
+- **Token (Gate B).** RC does **not** forward the inference-only
+  `CLAUDE_CODE_OAUTH_TOKEN`; it uses the full-scope `claude auth login` credential
+  the user persists in the `claude-<account>-config` volume. The box still holds
+  no standing secret beyond that account credential. *(Open: whether in-box
+  `claude auth login` completes via a device/paste flow — the `prx-9s14` spike.)*
+- **Egress is still a policed door — just a wider allowlist.** RC gets its **own
+  scoped netd** whose allowlist is `DEFAULT_ALLOW + RC_NETD_ALLOW` (the anthropic
+  hosts **plus** `statsig.anthropic.com` and the enumerated GrowthBook host). It is
+  **never** `--net-open` — the allowlist is explicit and minimal, and it is *this
+  launch's own netd*, so no other box's egress widens. netd remains the
+  fail-closed boundary that drops anything off the list.
+
+So the relaxation is legible and contained: a wider-but-still-enumerated egress
+allowlist and a full-scope login, for one opt-in profile, with the default
+hardened box untouched.
+
 ## Why this matters
 
 - **Least authority** — a box for reading docs gets no `--keeper`; a box doing a

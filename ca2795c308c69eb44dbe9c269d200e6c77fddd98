@@ -1,0 +1,28 @@
+launcherd.ts
+  s_d18f41cb48193c::t_d2792b8f442aae 729-744,747-749
+  s_d18f41cb48193c::t_716a00ee7eab5b 1187-1188
+  s_d18f41cb48193c::t_b3335193a7b34f 226-228
+  s_d18f41cb48193c::t_3fb06617fe3720 793-796
+  s_d18f41cb48193c::t_47bf68737cd7e2 507-525,750
+tests/spawn-authority.test.ts
+  s_d18f41cb48193c::t_2e136c90ccb0ea 9,17-18,20-21
+  s_d18f41cb48193c::t_9e95be3121a68b 49-50,56-58,61-64,67,70-72,76-77,82-105
+tests/launcherd.test.ts
+  s_d18f41cb48193c::t_d63d40df0ece83 381-385
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "ca2795c308c69eb44dbe9c269d200e6c77fddd98",
+  "prompts": {},
+  "sessions": {
+    "s_d18f41cb48193c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e1595d1-4205-44e9-b5db-d6ccebeae882",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

@@ -37,7 +37,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { toAccessTokenOnly, type ClaudeCredentials } from "../authd.ts";
 
 const NEAR_EXPIRY_MS = 90_000; // 90s — long enough to start a session, short enough to wait out
@@ -58,10 +59,13 @@ export function bumpExpiry(creds: ClaudeCredentials, now: number, ttlMs = FRESH_
 }
 
 // ── CLI (impure: file I/O; never logs the token) ─────────────────────────────
+// The target is a THROWAWAY dir by default — NEVER $CLAUDE_CONFIG_DIR, so the
+// experiment can't clobber the operator's live login. Run the test `claude` with
+// CLAUDE_CONFIG_DIR pointed at this same dir. Override with --target.
 function configDir(args: string[]): string {
   const i = args.indexOf("--target");
   if (i >= 0 && args[i + 1]) return args[i + 1]!;
-  return process.env.CLAUDE_CONFIG_DIR ?? join(process.env.HOME ?? "/tmp", ".config", "claude");
+  return join(tmpdir(), "authd-continuity");
 }
 function credPath(dir: string): string {
   return join(dir, ".credentials.json");
@@ -88,6 +92,16 @@ function main(): number {
     const source = rest.find((a) => !a.startsWith("--"));
     if (!source) {
       console.error("usage: stage <path-to-.credentials.json> [--target DIR]");
+      return 2;
+    }
+    // Never overwrite the SOURCE (that's your live login). The staged copy must
+    // go to a throwaway the test `claude` reads via CLAUDE_CONFIG_DIR.
+    if (resolve(source) === resolve(target)) {
+      console.error(
+        `refusing to overwrite the SOURCE credential (${target}) — that's a live login.\n` +
+          `Pass --target <throwaway-dir> (e.g. --target ${join(tmpdir(), "authd-continuity")}) and run the test\n` +
+          `claude with CLAUDE_CONFIG_DIR set to that dir, so your real ~/.config/claude is never touched.`,
+      );
       return 2;
     }
     const staged = stageCredential(readCreds(source), now);

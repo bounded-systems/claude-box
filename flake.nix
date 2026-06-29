@@ -302,6 +302,22 @@
               # PostToolUse hook above).
               mkdir -p opt/gitai
               cp ${./scripts/record-authored.ts} opt/gitai/record-authored.ts
+              # git-ai config: baked at the user home so git-ai picks it up on
+              # first run without any interactive setup. git_path points to the
+              # nix-managed git binary in /bin; telemetry and version-check noise
+              # are disabled (the box has no route to telemetry endpoints anyway).
+              # prompt_storage=notes stores session context with each checkpoint
+              # so git ai show-prompt works when .git is writable (--repo-rw).
+              mkdir -p ${builtins.substring 1 (-1) home}/.git-ai
+              cat > ${builtins.substring 1 (-1) home}/.git-ai/config.json <<'GITAI_EOF'
+              {
+                "git_path": "/bin/git",
+                "prompt_storage": "notes",
+                "telemetry_oss": "off",
+                "disable_auto_updates": true,
+                "disable_version_checks": true
+              }
+              GITAI_EOF
               cat > etc/passwd <<EOF
               root:x:0:0:root:/root:/bin/bash
               ${user}:x:${toString uid}:${toString uid}:${user}:${home}:/bin/bash

@@ -40,16 +40,23 @@ jobs:
       - name: Front Desk App not configured — skipping
         if: ${{ vars.FRONT_DESK_CLIENT_ID == '' }}
         run: echo "FRONT_DESK_CLIENT_ID unset; relying on the central sweep. See docs/handoffs/gh-project-room.md."
+      # The instant add is BEST-EFFORT by design — the central sweep
+      # (front-desk-sync.yml / gh-project-room) is the backstop. So the
+      # credentialed steps are continue-on-error: a transient failure (e.g. the
+      # App INSTALLATION hitting its API rate limit during a burst of PRs) must
+      # NOT red-flag every PR org-wide; the sweep still lands the card.
       - name: Mint Front Desk token from the GitHub App
         id: app-token
         if: ${{ vars.FRONT_DESK_CLIENT_ID != '' }}
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.FRONT_DESK_CLIENT_ID }}
           private-key: ${{ secrets.FRONT_DESK_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
       - name: Add to Front Desk
-        if: ${{ vars.FRONT_DESK_CLIENT_ID != '' }}
+        if: ${{ vars.FRONT_DESK_CLIENT_ID != '' && steps.app-token.outputs.token != '' }}
+        continue-on-error: true
         uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e # v1.0.2
         with:
           project-url: https://github.com/orgs/bounded-systems/projects/2

@@ -5,6 +5,11 @@ on:
   pull_request:
     types: [opened, closed, reopened, labeled, unlabeled]
 jobs:
+  # NOTE: this calls a reusable workflow, which cannot take `continue-on-error`
+  # (it's a parse error there). So a transient failure in the central reusable
+  # (e.g. the Front Desk App installation's API rate limit) still surfaces here —
+  # the durable fix is in bounded-systems/gh-project-room (retry/backoff or
+  # best-effort there). It is a non-required check, so it does not block merges.
   sync:
     uses: bounded-systems/gh-project-room/.github/workflows/trigger-sync.yml@main
     secrets: inherit

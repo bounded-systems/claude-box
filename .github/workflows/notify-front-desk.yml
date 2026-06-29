@@ -6,5 +6,9 @@ on:
     types: [opened, closed, reopened, labeled, unlabeled]
 jobs:
   sync:
+    # Best-effort notify — the central sweep is the backstop, so a transient
+    # failure in the reusable workflow (e.g. the Front Desk App installation's
+    # API rate limit during a burst of PRs) must not red-flag the PR.
+    continue-on-error: true
     uses: bounded-systems/gh-project-room/.github/workflows/trigger-sync.yml@main
     secrets: inherit

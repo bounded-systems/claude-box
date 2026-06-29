@@ -456,6 +456,13 @@ async function gitPush(params: {
     throw { code: "GIT_PUSH_FAILED", message: pushResult.stderr };
   }
 
+  // Best-effort: push git-ai attribution notes so they survive container
+  // teardown. In --repo-rw boxes the checkpoint hook writes refs/notes/ai;
+  // this carries them to the remote alongside the branch. In hardened
+  // (read-only .git) boxes no notes exist — git push errors out silently and
+  // the keeperd-attestation path remains the attribution record.
+  await gitExec(repo, ["push", remote, "refs/notes/ai"]);
+
   return {
     pushed: `${remote}/${targetBranch}`,
     commits,

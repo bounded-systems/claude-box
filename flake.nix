@@ -230,11 +230,36 @@
           #      .git; provenance rides keeperd's already-signed commit.
           #
           # Both are best-effort (|| true) so a hook never blocks an edit.
+          #
+          # disableClaudeAiConnectors — the box holds NO ambient authority by
+          # design (CAPABILITIES.md: "credential-free — no ssh keys, no push
+          # rights, no signing key"), but account-level Claude.ai connectors
+          # (Google Drive, Notion, Calendar — configured in Claude.ai web
+          # settings, NOT this repo) bypass that entirely: they apply to every
+          # session under the logged-in account regardless of which box it
+          # runs in, with no per-repo/per-task scoping. A box spun up for one
+          # isolated repo inherited owner-level Drive/Notion write access into
+          # an unrelated company's real business data (2026-07-03 finding).
+          # This key is a SYSTEM-level, account-agnostic kill switch — every
+          # box refuses connectors no matter which account's connectors exist,
+          # closing exactly the leak the doors architecture doesn't cover.
+          #
+          # disableBundledSkills / strictPluginOnlyCustomization — same
+          # rationale, applied to Skills: a skill is arbitrary instructions
+          # that can auto-invoke inside a session, so a user- or project-level
+          # skill dropped into $CLAUDE_CONFIG_DIR/skills or a repo's
+          # .claude/skills is another way to introduce ambient behavior this
+          # box's doors architecture never sees or gates. Locking both closes
+          # bundled skills AND any user/project-supplied ones; only
+          # plugin-shipped or managed-provided skills would still load.
           recordAuthoredPath = "/opt/gitai/record-authored.ts";
           gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
           recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
           cmdHook = command: { type = "command"; inherit command; };
           gitAiManagedSettings = (pkgs.formats.json { }).generate "managed-settings.json" {
+            disableClaudeAiConnectors = true;
+            disableBundledSkills = true;
+            strictPluginOnlyCustomization = [ "skills" ];
             hooks = {
               PreToolUse = [{ matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }];
               PostToolUse = [{

@@ -1508,6 +1508,25 @@ async function runPod(account: string, launch: Launch): Promise<number> {
   }
 }
 
+/** The stable name a --remote-serve bastion for this account runs under.
+ *  Every OTHER launch mode leaves podman to assign a random name (they're
+ *  one-shot and torn down with the session) — a bastion is meant to be the
+ *  ONE long-running box per account, so it gets a name worth checking for. */
+function bastionName(account: string): string {
+  return `claude-box-${account}-remote-serve`;
+}
+
+/** Is a bastion for this account already running? Real liveness, not just a
+ *  stale name — `podman ps` (not `ps -a`) only lists running containers. */
+function bastionAlreadyRunning(account: string): string | undefined {
+  const p = Bun.spawnSync(
+    ["podman", "ps", "--filter", `name=^${bastionName(account)}$`, "--format", "{{.Names}}"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const name = p.stdout.toString().trim();
+  return name || undefined;
+}
+
 async function run(
   account: string,
   launch: Launch,
@@ -1516,6 +1535,22 @@ async function run(
   assertAccount(account);
   // --pod: the box and its doors live in their own pod, off the host (POD.md).
   if (launch.pod) return runPod(account, launch);
+  // --remote-serve is meant to be the ONE persistent bastion per account —
+  // launching a second one silently (no --name, a random podman name) is
+  // exactly how this session ended up with 3+ orphaned duplicate sessions.
+  // Refuse rather than pile on another one; the existing session is still
+  // reachable at its own claude.ai/code URL.
+  if (launch.remoteServe) {
+    const existing = bastionAlreadyRunning(account);
+    if (existing) {
+      console.error(
+        `claude-box: a --remote-serve bastion for account '${account}' is already running (container "${existing}"). ` +
+          `Attach to it from claude.ai/code or the Claude app instead of launching another — ` +
+          `or stop it first with: podman kill ${existing}`,
+      );
+      return 1;
+    }
+  }
   const { guest, repo, repoRw, repoEphemeral, repoClone, repoOrigin, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
   const manifest = buildManifest(account, launch, env);
@@ -1534,6 +1569,9 @@ async function run(
     "--pids-limit",
     "2048",
   ];
+  if (launch.remoteServe) {
+    argv.push("--name", bastionName(account));
+  }
   // Only mount the account's config volume for guests that need it (claude).
   // Tool guests don't need or want claude's auth/history.
   if (guestPreset.needsConfig) {
@@ -2782,6 +2820,8 @@ export {
   tcpReachable,
   resolveWritableSubtree,
   originHostOf,
+  bastionName,
+  bastionAlreadyRunning,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 

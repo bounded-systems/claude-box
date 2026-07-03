@@ -110,6 +110,12 @@ const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config
 // CLAUDE_CONFIG_DIR / $XDG_CONFIG_HOME/claude (flake.nix). One path, both sides;
 // tests/xdg.test.ts pins this against flake.nix so they can't drift.
 const BOX_CONFIG_DIR = "/home/claude/.config/claude";
+// --remote-serve's workspace: NOT $HOME, because Claude Code never persists
+// workspace-trust acceptance for a home-directory workspace (it re-prompts
+// "Workspace not trusted" every launch — confirmed live). This dir is
+// ephemeral (container rootfs), recreated each launch; trust is pre-seeded
+// for it in .claude.json (the persistent config volume) instead.
+const RC_WORKSPACE = "/home/claude/workspace";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -1759,6 +1765,15 @@ async function run(
   ].join(" ");
   if (repoOrigin) {
     argv.push("--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh");
+  } else if (launch.remoteServe && guest === "claude") {
+    // Remote Control's workspace is the bare $HOME (no --repo mount), and
+    // Claude Code deliberately never persists trust-dialog acceptance for a
+    // home-directory workspace — it re-prompts "Workspace not trusted" on
+    // every single launch (confirmed live). Fix: run in a stable NON-home
+    // subdir instead, and pre-seed that dir's hasTrustDialogAccepted=true in
+    // .claude.json (which lives in the persistent config volume) before
+    // exec'ing claude. See RC_WORKSPACE below.
+    argv.push("--entrypoint", "sh");
   }
 
   // Use the guest's image and entrypoint.
@@ -1798,19 +1813,33 @@ async function run(
     // --remote-serve prepends the RC server-mode subcommand so the box boots as
     // `claude remote-control --name <account>` (see remoteServeArgs); empty
     // otherwise, leaving the interactive entrypoint untouched.
-    if (guest === "claude") {
-      if (launch.remoteServe) {
-        console.error(
-          `claude-box: --remote-serve — booting account '${account}' as a headless Remote Control server (attach from the Claude app/mobile as session '${account}')`,
-        );
+    if (guest === "claude" && launch.remoteServe) {
+      console.error(
+        `claude-box: --remote-serve — booting account '${account}' as a headless Remote Control server (attach from the Claude app/mobile as session '${account}')`,
+      );
+      // If a repo is mounted, RC runs THERE (/work, already the podman -w) —
+      // not the synthetic no-repo workspace. Either way the workspace still
+      // needs its trust pre-seeded (see RC_WORKSPACE above); /work doesn't
+      // need mkdir since planRepoMount already bind-mounted it.
+      const rcCwd = repo ? "/work" : RC_WORKSPACE;
+      // sh -c '<script>' claude-box <remoteServeArgs…> : "$@" is exactly the
+      // remote-control invocation (remoteServeArgs), never string-interpolated.
+      argv.push(
+        "-c",
+        `${repo ? "" : `mkdir -p ${rcCwd}; `}cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`,
+        "claude-box",
+        ...remoteServeArgs(launch, account),
+      );
+    } else {
+      if (guest === "claude") {
+        argv.push("--append-system-prompt", capabilityPrompt(manifest));
       }
-      argv.push(...remoteServeArgs(launch, account), "--append-system-prompt", capabilityPrompt(manifest));
+      // Add entrypoint override if the guest specifies one, then the args.
+      if (guestPreset.entrypoint) {
+        argv.push(...guestPreset.entrypoint);
+      }
+      argv.push(...guestArgs);
     }
-    // Add entrypoint override if the guest specifies one, then the args.
-    if (guestPreset.entrypoint) {
-      argv.push(...guestPreset.entrypoint);
-    }
-    argv.push(...guestArgs);
   }
   const proc = Bun.spawn(argv, {
     stdin: "inherit",

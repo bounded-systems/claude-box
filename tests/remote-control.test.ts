@@ -189,7 +189,13 @@ describe("--remote-serve: shares the remote-control auth posture", () => {
 describe("remoteServeArgs: the server-mode entrypoint prefix", () => {
   test("boots `claude remote-control --name <account>` for a serve launch", () => {
     const l = planLaunch(["--remote-serve"], EMPTY);
-    expect(remoteServeArgs(l, "work")).toEqual(["remote-control", "--name", "work"]);
+    expect(remoteServeArgs(l, "work")).toEqual([
+      "remote-control",
+      "--name",
+      "work",
+      "--remote-control-session-name-prefix",
+      "claude-box-work",
+    ]);
   });
 
   test("is empty for a non-serve launch (interactive entrypoint unchanged)", () => {

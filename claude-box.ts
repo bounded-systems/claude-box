@@ -977,10 +977,17 @@ export function rcEgressAllow(launch: Launch): string[] {
  *  `claude remote-control --name <account>` — a headless RC server the app
  *  attaches to, instead of an interactive session. `--name` is the account, so
  *  concurrent servers (`cbox personal --remote-serve`, `cbox work --remote-serve`)
- *  appear as distinct named sessions. Empty for any non-serve launch, so the
- *  interactive entrypoint is byte-for-byte unchanged. */
+ *  appear as distinct named sessions. Also sets
+ *  `--remote-control-session-name-prefix`: without it, spawned sessions are
+ *  prefixed with the CONTAINER's own hostname (a random hex podman assigns
+ *  each run — e.g. "de7792ab763e"), which is meaningless and changes every
+ *  launch; the account name is stable and identifies the box. Empty for any
+ *  non-serve launch, so the interactive entrypoint is byte-for-byte
+ *  unchanged. */
 function remoteServeArgs(launch: Launch, account: string): string[] {
-  return launch.remoteServe ? ["remote-control", "--name", account] : [];
+  return launch.remoteServe
+    ? ["remote-control", "--name", account, "--remote-control-session-name-prefix", `claude-box-${account}`]
+    : [];
 }
 
 /** Pure planner for `claude-box login` — the auth front door. Resolves the

@@ -156,11 +156,14 @@ describe("--remote-serve: planLaunch", () => {
     );
   });
 
-  test("rejects --pod and --repo-origin (not wired into those launch paths)", () => {
+  test("rejects --pod (not wired into that launch path)", () => {
     expect(() => planLaunch(["--remote-serve", "--pod"], EMPTY)).toThrow(/--pod/);
-    expect(() =>
-      planLaunch(["--remote-serve", "--repo-origin", "https://x/y.git"], EMPTY),
-    ).toThrow(/--repo-origin/);
+  });
+
+  test("--repo-origin IS wired (2026-07-03): no throw, repoOrigin carries through", () => {
+    const l = planLaunch(["--remote-serve", "--repo-origin", "https://x/y.git"], EMPTY);
+    expect(l.remoteServe).toBe(true);
+    expect(l.repoOrigin).toBe("https://x/y.git");
   });
 });
 

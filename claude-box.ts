@@ -658,6 +658,21 @@ type Launch = {
    *  container-internal /work (tmpfs) and runs the guest there. The repo enters
    *  as content through the net door (netd must allow the origin host). */
   repoOrigin?: string;
+  /** --repo-door PATH: a HOST bare repo, materialized via the repod sidecar
+   *  (prx-8uf2 continuation) — NO bind-mount and NO .git of any kind in
+   *  claude-room. repod alone gets read access to the bare repo; it runs
+   *  `git worktree add` (same-machine, no network/credentials needed) and
+   *  hands claude-room a plain checkout path on a shared pod-internal volume.
+   *  Reached over a unix socket on the pod's fabric — never TCP, since repod
+   *  and claude-room are co-located sidecars sharing one VM kernel (no
+   *  virtiofs crossing to avoid). Implies --pod (needs the shared fabric). */
+  repoDoor?: string;
+  /** --repo-door-ref NAME: the branch to request from repod (default "main").
+   *  A branch already checked out elsewhere on the host (e.g. the operator's
+   *  own worktree) can't ALSO be checked out by repod — git refuses two
+   *  worktrees on one branch — so a real launch usually wants a dedicated
+   *  session branch here, not the shared default. */
+  repoDoorRef: string;
   /** --pod: launch the box in its OWN podman pod with a netd sidecar (doors off
    *  the host, pod-local, isolated). See POD.md / DOORS.md. v1 = net egress. */
   pod: boolean;
@@ -705,6 +720,8 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let repoEphemeral = false;
   let repoClone = false;
   let repoOrigin: string | undefined;
+  let repoDoor: string | undefined;
+  let repoDoorRef = "main";
   let pod = false;
   let netOpen = false;
   let remoteControl = false;
@@ -760,6 +777,21 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
         );
       }
       repoOrigin = url;
+      continue;
+    }
+    if (t === "--repo-door") {
+      // A HOST bare repo, materialized via the repod sidecar — no bind-mount,
+      // no .git in claude-room (see Launch.repoDoor). Implies --pod.
+      const path = tail[++i];
+      if (!path) throw new Error("--repo-door requires a path to a bare repo");
+      repoDoor = path;
+      pod = true;
+      continue;
+    }
+    if (t === "--repo-door-ref") {
+      const ref = tail[++i];
+      if (!ref) throw new Error("--repo-door-ref requires a branch name");
+      repoDoorRef = ref;
       continue;
     }
     if (t === "--writable") {
@@ -852,18 +884,17 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
   }
   // --remote-serve rewrites the claude entrypoint into server mode, so it is
-  // meaningless for tool guests and not wired into the pod / clone-from-origin
-  // launch paths (each builds its own entrypoint). Fail closed on those combos
-  // rather than silently dropping the server mode.
+  // meaningless for tool guests and not wired into the pod launch path (which
+  // builds its own entrypoint). Fail closed on that combo rather than silently
+  // dropping the server mode. --repo-origin IS wired (2026-07-03): the
+  // clone-then-exec script also prepends remoteServeArgs when set — see
+  // run()'s repoOrigin branch.
   if (remoteServe) {
     if (guest !== "claude") {
       throw new Error(`--remote-serve is only valid for the claude guest (got "${guest}")`);
     }
     if (pod) {
       throw new Error("--remote-serve is not supported with --pod yet (separate launch path)");
-    }
-    if (repoOrigin) {
-      throw new Error("--remote-serve is not supported with --repo-origin yet (separate launch path)");
     }
   }
   return {
@@ -873,6 +904,8 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     repoEphemeral,
     repoClone,
     repoOrigin,
+    repoDoor,
+    repoDoorRef,
     pod,
     writable,
     doors: [...doors.values()],
@@ -1250,10 +1283,10 @@ async function startScopedNetd(
  * no repo. Host-mount `--repo` in a pod is a follow-up.
  */
 async function runPod(account: string, launch: Launch): Promise<number> {
-  const { guest, repo, repoOrigin, guestArgs } = launch;
+  const { guest, repo, repoOrigin, repoDoor, repoDoorRef, guestArgs } = launch;
   if (repo) {
     console.error(
-      "claude-box: --pod v1 supports --repo-origin or no repo; host-mount --repo in a pod is a follow-up (POD.md).",
+      "claude-box: --pod v1 supports --repo-origin/--repo-door or no repo; host-mount --repo in a pod is a follow-up (POD.md).",
     );
     process.exit(2);
   }
@@ -1261,12 +1294,17 @@ async function runPod(account: string, launch: Launch): Promise<number> {
   const manifest = buildManifest(account, launch);
 
   // The pod's netd door: anthropic egress + (if cloning in-box) the origin host.
+  // --repo-door needs NO egress at all (repod's clone is same-machine, no
+  // network) — it isn't added to the allowlist.
   const allow = ["api.anthropic.com", ".anthropic.com"];
   if (repoOrigin) allow.push(originHostOf(repoOrigin));
 
   const id = crypto.randomUUID().slice(0, 8);
   const podName = `claude-box-${account}-${id}`;
   const netdName = `${podName}-netd`;
+  const netdSharedVolume = `${podName}-netd-shared`;
+  const repodName = `${podName}-repod`;
+  const repodSharedVolume = `${podName}-repod-shared`;
   const sh = (a: string[]) => Bun.spawnSync(a, { stdout: "pipe", stderr: "pipe" });
 
   const created = sh(["podman", "pod", "create", "--name", podName]);
@@ -1278,11 +1316,22 @@ async function runPod(account: string, launch: Launch): Promise<number> {
   try {
     // netd SIDECAR — the egress door, in the pod's netns. Runs the netd script
     // from this source tree via the image's bun (no separate daemon image yet).
+    // UNIX SOCKET, not TCP: pod sidecars share one VM kernel (no virtiofs
+    // crossing, exactly like repod's shared-volume socket), so netd gets real
+    // kernel-enforced SO_PEERCRED identity for free — the same authority model
+    // keeperd/scoutd already use — instead of needing a signed-grant dance
+    // for a transport (TCP) that has no peer identity at all. claude-room's
+    // own launch below runs an in-box `socat` relay (already baked into the
+    // image, the SAME pattern the standalone launch's "Unix socket mode"
+    // already documents) so claude/git/npm can still speak ordinary
+    // HTTPS_PROXY=http://localhost:3128 — that TCP hop never leaves
+    // claude-room's own netns; the real authority boundary is netd's socket.
     const netd = sh([
       "podman", "run", "-d", "--pod", podName, "--name", netdName,
       "-v", `${import.meta.dir}:/src:ro`,
+      "-v", `${netdSharedVolume}:/shared`,
       "-e", `NETD_ALLOW=${allow.join(",")}`,
-      "--entrypoint", "bun", IMAGE, "/src/netd/netd.ts", "serve", "--port", "3128",
+      "--entrypoint", "bun", IMAGE, "/src/netd/netd.ts", "serve", "--socket", "/shared/netd.sock",
     ]);
     if (netd.exitCode !== 0) {
       console.error(`claude-box: netd sidecar failed: ${netd.stderr.toString().trim()}`);
@@ -1290,10 +1339,10 @@ async function runPod(account: string, launch: Launch): Promise<number> {
     }
     console.error(`claude-box: --pod — netd door in pod ${podName} (allow=${allow.join(",")}); doors are OFF the host`);
 
-    // Wait for netd to bind inside the pod (the image's sh has /dev/tcp).
+    // Wait for netd's unix socket to appear inside the pod.
     let up = false;
     for (let i = 0; i < 40; i++) {
-      if (sh(["podman", "exec", netdName, "sh", "-c", "(exec 3<>/dev/tcp/localhost/3128) 2>/dev/null"]).exitCode === 0) {
+      if (sh(["podman", "exec", netdName, "test", "-S", "/shared/netd.sock"]).exitCode === 0) {
         up = true;
         break;
       }
@@ -1304,11 +1353,64 @@ async function runPod(account: string, launch: Launch): Promise<number> {
       process.exit(2);
     }
 
-    // The BOX in the same pod reaches netd at pod-localhost.
+    // repod SIDECAR (--repo-door only): the ONE place real git access to the
+    // host bare repo lives. The bare repo mount is READ-WRITE for repod —
+    // `git worktree add -b <newBranch>` writes a new ref into the bare
+    // repo's own refs/heads/ and its worktrees/ administrative area, so :ro
+    // isn't sufficient even though repod never touches tracked FILE CONTENT
+    // beyond what git itself manages. claude-room, which never mounts the
+    // bare repo at all, is unaffected either way — this is repod's own
+    // access, not a widening of what the agent can reach. READ-WRITE on a
+    // shared pod-internal volume ALSO mounted into claude-room, so whatever
+    // path repod returns is immediately valid there too. Reached over a unix
+    // socket on that same shared volume — pod-internal only, no TCP, no
+    // netd egress needed (a same-machine `git worktree add` needs no network).
+    if (repoDoor) {
+      const repod = sh([
+        "podman", "run", "-d", "--pod", podName, "--name", repodName,
+        "-v", `${import.meta.dir}:/src:ro`,
+        "-v", `${resolve(repoDoor)}:/bare-repo`,
+        "-v", `${repodSharedVolume}:/shared`,
+        "-e", "REPOD_BARE_REPO=/bare-repo",
+        "-e", "REPOD_OUT_DIR=/shared/checkouts",
+        "--entrypoint", "bun", IMAGE, "/src/repod.ts", "serve", "--socket", "/shared/repod.sock",
+      ]);
+      if (repod.exitCode !== 0) {
+        console.error(`claude-box: repod sidecar failed: ${repod.stderr.toString().trim()}`);
+        process.exit(2);
+      }
+      console.error(`claude-box: --repo-door — repod sidecar in pod ${podName}, bare repo ${repoDoor}; claude-room gets no .git, no bind-mount, only a materialized checkout`);
+
+      let repodUp = false;
+      for (let i = 0; i < 40; i++) {
+        if (sh(["podman", "exec", repodName, "test", "-S", "/shared/repod.sock"]).exitCode === 0) {
+          repodUp = true;
+          break;
+        }
+        await Bun.sleep(300);
+      }
+      if (!repodUp) {
+        console.error("claude-box: repod door did not come up in the pod");
+        process.exit(2);
+      }
+    }
+
+    // The BOX in the same pod reaches netd via an in-box `socat` relay (baked
+    // into the image), NOT directly — netd itself listens on a unix socket
+    // (see above); this relay is the ONE place TCP touches the box, and it
+    // never leaves claude-room's own netns. `& sleep 0.3` gives it a moment
+    // to bind before anything tries to use the proxy.
     const proxy = "http://localhost:3128";
+    // Runs unconditionally for every guest today — none of the current guests
+    // (claude, git, npm) support a unix-socket proxy target natively, so
+    // there's no case yet where skipping this would work. FILED, not built: if
+    // a future guest DID support unix-socket proxying directly, it'd be a
+    // legitimate optimization to detect that and skip the relay for it.
+    const netdRelayCmd = `socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/shared-netd/netd.sock & sleep 0.3;`;
     const argv = [
       "podman", "run", "-it", "--rm", "--pod", podName,
       "--security-opt", "no-new-privileges", "--cap-drop", "all", "--pids-limit", "2048",
+      "-v", `${netdSharedVolume}:/shared-netd`,
     ];
     if (guestPreset.needsConfig) {
       argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
@@ -1332,15 +1434,44 @@ async function runPod(account: string, launch: Launch): Promise<number> {
         // never block on a `Username:` prompt — the box has no TTY and no git creds,
         // so a prompt is an infinite hang (POD.md). Clone over netd is credential-
         // free: it works for PUBLIC repos; private repos need a read door (scout).
-        `export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; git clone --depth 1 "$1" /work || { echo "claude-box: clone failed — --repo-origin clones over netd with NO credentials (works for PUBLIC repos). For a private repo, use the scout read-door, which injects the token. There is no TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
+        `${netdRelayCmd} export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; git clone --depth 1 "$1" /work || { echo "claude-box: clone failed — --repo-origin clones over netd with NO credentials (works for PUBLIC repos). For a private repo, use the scout read-door, which injects the token. There is no TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
         "claude-box", repoOrigin,
       );
       if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
       argv.push(...guestArgs);
-    } else {
-      argv.push(IMAGE);
+    } else if (repoDoor) {
+      // Ask repod (over the shared unix socket, pod-internal) for a checkout,
+      // then cd into whatever path it hands back and exec the guest — same
+      // shared volume mounted at the same path in both containers, so the
+      // path repod returns is immediately valid here. NO .git, NO bind-mount
+      // of the real repo — claude-room never touches git at all. Both -v
+      // mounts must precede the image (podman treats anything after it as
+      // the container's own argv, not options).
+      // $1=ref, passed POSITIONALLY (never interpolated into the script), so
+      // an unusual branch name can't inject shell syntax; repod's own
+      // assertSafeRef is still the enforcement point, this is defense in depth.
+      argv.push(
+        "-v", `${repodSharedVolume}:/shared`,
+        "-v", `${import.meta.dir}:/src:ro`,
+        "-w", "/shared", "--entrypoint", "sh", IMAGE,
+        "-c",
+        `${netdRelayCmd} ref="$1"; shift; dir="$(bun /src/repod-client.ts /shared/repod.sock "$ref")" || { echo "claude-box: repod prepare failed" >&2; exit 1; }; cd "$dir" && exec ${guestCmd} "$@"`,
+        "claude-box",
+        repoDoorRef,
+      );
       if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
-      if (guestPreset.entrypoint) argv.push(...guestPreset.entrypoint);
+      argv.push(...guestArgs);
+    } else {
+      // No repo: still needs the netd relay started before the guest runs, so
+      // this now wraps in `sh -c` too (previously ran the image's own default
+      // entrypoint directly, since no startup step was needed pre-socat). The
+      // real command + its args are passed as trailing positional params
+      // (after `--`), never string-interpolated, so arbitrary guestArgs
+      // content can't inject shell syntax — `exec "$@"` just runs them.
+      const cmdTokens = guestPreset.entrypoint ?? [guestCmd];
+      argv.push("--entrypoint", "sh", IMAGE, "-c", `${netdRelayCmd} exec "$@"`, "claude-box");
+      argv.push(...cmdTokens);
+      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
       argv.push(...guestArgs);
     }
 
@@ -1601,7 +1732,13 @@ async function run(
   // the checkout. The URL is passed POSITIONALLY ($1), never interpolated into
   // the script, so it can't inject shell. Egress is the net door (netd must
   // allow the origin host). These podman opts must precede the image.
-  const guestCmd = guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh");
+  // remoteServeArgs() prepends "remote-control --name <account>" when
+  // --remote-serve is set — account is pre-validated (assertAccount's
+  // [A-Za-z0-9._-]+ regex) so it's safe to splice into the shell script below.
+  const guestCmd = [
+    guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh"),
+    ...remoteServeArgs(launch, account),
+  ].join(" ");
   if (repoOrigin) {
     argv.push("--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh");
   }
@@ -1619,12 +1756,20 @@ async function run(
       // root-owned but git runs as the box user, so mark it safe.
       // GIT_TERMINAL_PROMPT=0 + GIT_ASKPASS: fail fast on a 401/private origin,
       // never block on a `Username:` prompt (no TTY, no git creds in the box).
-      `url="$1"; gp="$2"; shift 2; export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; https_proxy="$gp" HTTPS_PROXY="$gp" git clone --depth 1 "$url" /work || { echo "claude-box: clone failed — --repo-origin clones with NO credentials (works for PUBLIC repos). Private repos need the scout read-door. No TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
+      // Both http(s)_proxy pairs are set — a plain http:// origin only honors
+      // http_proxy/HTTP_PROXY; an https:// remote only honors the https pair.
+      // Setting both is a no-op for whichever scheme isn't in play. --depth 1
+      // is tried first (shallow, fast, what a real smart-HTTP/SSH remote wants)
+      // and falls back to a full clone if it fails — dumb-HTTP (a bare static
+      // file server, no CGI) can't negotiate a shallow fetch at all.
+      `url="$1"; gp="$2"; shift 2; export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; export http_proxy="$gp" HTTP_PROXY="$gp" https_proxy="$gp" HTTPS_PROXY="$gp"; git clone --depth 1 "$url" /work 2>/dev/null || git clone "$url" /work || { echo "claude-box: clone failed — --repo-origin clones with NO credentials (works for PUBLIC repos). Private repos need the scout read-door. No TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
       "claude-box",
       repoOrigin,
       gitDoorProxy,
     );
-    if (guest === "claude") {
+    // `claude remote-control` has no --append-system-prompt equivalent (see the
+    // matching skip in the non-origin branch below) — omit it for RC server mode.
+    if (guest === "claude" && !launch.remoteServe) {
       argv.push("--append-system-prompt", capabilityPrompt(manifest));
     }
     argv.push(...guestArgs);

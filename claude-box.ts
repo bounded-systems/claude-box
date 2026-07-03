@@ -123,7 +123,15 @@ const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
 // flag fetch; without these the shared netd (anthropic-only) blocks it as the
 // fail-closed boundary, so RC never activates. Minimal + enumerated — never
 // --net-open. [Spike S1] enumerates any further hosts via netd's DENY log.
-export const RC_NETD_ALLOW = ["statsig.anthropic.com"];
+//
+// claude.ai added 2026-07-03: the `/login` OAuth flow (needed the FIRST time
+// an account does a full-scope `claude auth login` for RC, since RC rejects
+// the inference-only setup-token — see authEnvArgs) hits claude.ai directly,
+// not just *.anthropic.com. Without it netd 403s the CONNECT (confirmed live:
+// `curl -x http://127.0.0.1:3128 https://claude.ai` -> 403) and the login
+// dialog fails with an opaque "OAuth error: Request failed with status code
+// 403" — easy to misread as a credentials problem when it's an egress block.
+export const RC_NETD_ALLOW = ["statsig.anthropic.com", "claude.ai"];
 
 
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).

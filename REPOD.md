@@ -84,6 +84,38 @@ Migration in progress:
    the working tree is fully usable again (git index/refs writable in an
    ephemeral layer, never the host store) and Scout/other consumers share one
    read door.
+3. **repod pod-internal unix door — DONE (2026-07-03):** `--repo-door`/`repod.ts`
+   ship a working unix-socket door for pod-internal use — claude-room asks
+   repod (over a pod-shared volume, never TCP) for a worktree checkout of a
+   ref; no `.git`, no bind-mount, no git binary reach claude-room at all.
+   Verified live end-to-end (pod + netd sidecar + repod sidecar + a real
+   `claude -p` session).
+4. **repod TCP + signed-grant "bellhop" mode — DONE (2026-07-03):** `repod
+   serve --port N` mirrors `authd.ts`'s `serveTcp`/`gateGrant` exactly, scoped
+   to `door="repo"` — so a BARE, non-pod box (no `--repo`/`--repo-door` baked
+   in at launch) can reach repod over its existing `net` door, present a
+   concierge-minted signed grant, and get a checkout materialized on demand.
+   Verified live: fails closed (`UNAUTHORIZED`/`no-grant`) with no grant
+   presented.
+5. **client-side wiring — NOT STARTED:** nothing inside the box yet actually
+   *calls* the bellhop door. Needs a Claude Code skill or slash command
+   (`/request-door repo <ref>`?) baked into the image that: asks concierge
+   (over the existing net door) for a `door="repo"` grant, then calls repod's
+   TCP endpoint with it and reports back the checkout path. This is the
+   missing client half of "launch bare, request capabilities on demand" — the
+   daemon side (4) is done, nothing drives it yet. Open questions: which doors
+   should be requestable this way at all (`keeper`/git-push likely NOT — stays
+   opt-in-at-launch-only); slash command (explicit, user-triggered) vs. a Skill
+   (auto-invoked by the model) — slash command is the safer default.
+6. **caveats are still a flat door-name check, not real caveats — NOT
+   STARTED:** `gateGrant` in both `authd.ts` and `repod.ts` only checks
+   `grant.name === "<door>"`; the `caveats: []` field described in
+   CAPABILITIES.md/OCAP.md is real machinery (macaroon-style, only ever
+   narrows) but nothing populates or enforces it yet. For repod specifically,
+   a real caveat chain would let a grant be scoped to e.g. `ref=<name>`,
+   `before=<expiry>`, not just "any prepare on this bare repo, forever." Worth
+   doing before the client-side skill (5) starts minting grants people expect
+   to be narrow.
 
 Pairs with NETD.md (egress), SCOUT.md (external reads), and the keeperd/beadsd
 doors — the repo is the last raw-fs grant to become a capability.

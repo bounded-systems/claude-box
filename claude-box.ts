@@ -1636,12 +1636,23 @@ async function run(
     // `claude remote-control --name <account>` (see remoteServeArgs); empty
     // otherwise, leaving the interactive entrypoint untouched.
     if (guest === "claude") {
+      argv.push(...remoteServeArgs(launch, account));
       if (launch.remoteServe) {
+        // `claude remote-control` (the RC server subcommand) has no
+        // --append-system-prompt equivalent — it's a persistent session
+        // spawner, not the interactive `claude` entrypoint, and its CLI
+        // surface doesn't accept this flag (verified: `claude remote-control
+        // --help` lists no such option; passing it errors "Unknown argument").
+        // The capability-prompt injection is skipped for RC server mode as a
+        // result — spawned sessions won't see their granted/denied surface
+        // in-context the way a normal interactive box does. No known
+        // workaround at this CLI surface; revisit if RC gains a pass-through.
         console.error(
           `claude-box: --remote-serve — booting account '${account}' as a headless Remote Control server (attach from the Claude app/mobile as session '${account}')`,
         );
+      } else {
+        argv.push("--append-system-prompt", capabilityPrompt(manifest));
       }
-      argv.push(...remoteServeArgs(launch, account), "--append-system-prompt", capabilityPrompt(manifest));
     }
     // Add entrypoint override if the guest specifies one, then the args.
     if (guestPreset.entrypoint) {

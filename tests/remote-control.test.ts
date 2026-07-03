@@ -13,7 +13,16 @@
  *   nix run nixpkgs#bun -- test tests/remote-control.test.ts
  */
 import { test, expect, describe } from "bun:test";
-import { planLaunch, authEnvArgs, buildManifest, remoteServeArgs, rcEgressAllow, RC_NETD_ALLOW } from "../claude-box.ts";
+import {
+  planLaunch,
+  authEnvArgs,
+  buildManifest,
+  remoteServeArgs,
+  rcEgressAllow,
+  RC_NETD_ALLOW,
+  bastionName,
+  bastionAlreadyRunning,
+} from "../claude-box.ts";
 
 const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
 const WITH_TOKEN = { HOME: "/tmp", CLAUDE_CODE_OAUTH_TOKEN: "tok-abc" } as Record<
@@ -201,5 +210,26 @@ describe("remoteServeArgs: the server-mode entrypoint prefix", () => {
   test("is empty for a non-serve launch (interactive entrypoint unchanged)", () => {
     expect(remoteServeArgs(planLaunch([], EMPTY), "personal")).toEqual([]);
     expect(remoteServeArgs(planLaunch(["--remote-control"], EMPTY), "personal")).toEqual([]);
+  });
+});
+
+describe("bastionName: the one-bastion-per-account guard", () => {
+  test("is a stable, deterministic name per account (not podman's random default)", () => {
+    expect(bastionName("personal")).toBe("claude-box-personal-remote-serve");
+    expect(bastionName("work")).toBe("claude-box-work-remote-serve");
+  });
+
+  test("different accounts never collide", () => {
+    expect(bastionName("personal")).not.toBe(bastionName("work"));
+  });
+});
+
+describe("bastionAlreadyRunning: real podman liveness (skips without podman)", () => {
+  const PODMAN_READY = Bun.spawnSync(["sh", "-c", "command -v podman >/dev/null 2>&1"]).exitCode === 0;
+  const podmanTest = test.skipIf(!PODMAN_READY);
+
+  podmanTest("returns undefined when no bastion is running for this account", () => {
+    // A nonsense account name that can never match a real running container.
+    expect(bastionAlreadyRunning("no-such-account-ever")).toBeUndefined();
   });
 });

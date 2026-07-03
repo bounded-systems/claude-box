@@ -21,23 +21,45 @@
  *   - NO network, NO other host paths, NO credentials of any kind. A same-
  *     machine `git worktree add` against a local bare repo needs neither.
  *
- * Wire protocol: one operation, newline-delimited JSON (no framing library
- * needed — a single small request/response per connection, then close):
+ * Wire protocol (unix): one operation, newline-delimited JSON (no framing
+ * library needed — a single small request/response per connection, then
+ * close). The mounted socket IS authority — no grant needed:
  *   → {"op":"prepare","ref":"<branch>"}
  *   ← {"ok":true,"path":"<absolute path under REPOD_OUT_DIR>"}
  *   ← {"ok":false,"error":"<message>"}
  *
+ * Wire protocol (tcp): the "bellhop" mode (prx-9-tbd) — a BARE, non-pod box
+ * has no repod socket mounted, but it DOES have the net door, so it can reach
+ * repod over TCP the same way it reaches concierge/authd. TCP has no kernel
+ * peer identity, so this mode is signed-grant gated, door="repo", identical
+ * shape to authd's gateGrant: {id, method:"prepare", params:{ref}, grant} →
+ * {id, ok, result|error}. Concierge is the ONE place that vouches for a box;
+ * repod (the bellhop) just fetches once vouched. See authd.ts for the twin
+ * implementation this mirrors.
+ *
  * Usage:
- *   repod serve                              # foreground, default socket
+ *   repod serve                              # foreground, unix socket (pod)
  *   repod serve --socket /path.sock          # custom socket path
+ *   repod serve --port 3004                  # tcp, signed-grant gated (bellhop)
  *   REPOD_BARE_REPO=/bare-repo REPOD_OUT_DIR=/checkouts repod serve
  */
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { verify, createPublicKey } from "node:crypto";
 import type { Socket } from "bun";
 
-import { defaultSocketPath, prepareSocket, createLogger } from "./lib/runtime";
+import {
+  defaultSocketPath,
+  prepareSocket,
+  createLogger,
+  call,
+  type RequestEnvelope,
+  type ResponseEnvelope,
+  ok,
+  err,
+} from "./lib/runtime";
+import { verifyGrantWithKeys, type IssuerKeys } from "./guest-room/mod.ts";
 
 const log = createLogger("repod");
 
@@ -162,6 +184,97 @@ const handlers = {
   },
 };
 
+// ── TCP "bellhop" mode: signed-grant gated, door="repo" ──────────────────────
+// Identical shape to authd.ts's gate — see that file for the twin
+// implementation. A unix door's mounted socket IS authority; tcp/vsock has no
+// kernel peer identity, so the caller must present a concierge-minted grant.
+let grantRequired = false;
+
+function conciergeSocket(): string {
+  if (process.env.CONCIERGE_SOCK) return process.env.CONCIERGE_SOCK;
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime) return `${runtime}/concierged.sock`;
+  return `${process.env.HOME ?? "/tmp"}/.claude-box/concierged.sock`;
+}
+
+let issuerKeys: IssuerKeys | null = null;
+async function fetchIssuerKeys(force = false): Promise<IssuerKeys> {
+  if (issuerKeys && !force) return issuerKeys;
+  issuerKeys = await call<IssuerKeys>(conciergeSocket(), "keys");
+  return issuerKeys;
+}
+
+const grantVerifyWith = (data: string, signature: string, publicKeyPem: string): boolean =>
+  verify(null, Buffer.from(data), createPublicKey(publicKeyPem), Buffer.from(signature, "base64"));
+
+/** Gate a request on the tcp door: the presented signed grant must verify
+ *  against concierge's published keys, scoped to door="repo". */
+async function gateGrant(req: RequestEnvelope): Promise<{ ok: boolean; reason?: string }> {
+  if (!grantRequired) return { ok: true }; // unix: the mounted socket is authority
+  const grant = req.grant;
+  if (!grant) return { ok: false, reason: "no-grant" };
+  if (grant.name !== "repo") return { ok: false, reason: "wrong-door" };
+  const ctx = { audience: process.env.ROOM_ID ?? "", now: Date.now() };
+  let v = verifyGrantWithKeys(grant, ctx, await fetchIssuerKeys(), grantVerifyWith);
+  if (!v.ok && v.reason === "unknown-key") {
+    v = verifyGrantWithKeys(grant, ctx, await fetchIssuerKeys(true), grantVerifyWith);
+  }
+  return v;
+}
+
+const TCP_METHODS: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {
+  async prepare(params) {
+    const ref = params.ref;
+    if (typeof ref !== "string") throw { code: "INVALID_PARAMS", message: "expected {ref: string}" };
+    const result = prepareCheckout(ref, BARE_REPO, OUT_DIR);
+    if (!result.ok) throw { code: "PREPARE_FAILED", message: result.error };
+    return { path: result.path };
+  },
+};
+
+async function handleEnvelope(line: string): Promise<ResponseEnvelope> {
+  let req: RequestEnvelope;
+  try {
+    req = JSON.parse(line);
+  } catch {
+    return err("", "PARSE_ERROR", "invalid JSON");
+  }
+  const { id, method, params } = req;
+  if (!id || !method) return err(id ?? "", "INVALID_REQUEST", "id and method required");
+  const gate = await gateGrant(req);
+  if (!gate.ok) return err(id, "UNAUTHORIZED", `signed grant rejected: ${gate.reason}`);
+  const handler = TCP_METHODS[method];
+  if (!handler) return err(id, "UNKNOWN_METHOD", `unknown method: ${method}`);
+  try {
+    return ok(id, await handler(params ?? {}));
+  } catch (e) {
+    const error = e as { code?: string; message?: string };
+    return err(id, error.code ?? "INTERNAL_ERROR", error.message ?? String(e));
+  }
+}
+
+const tcpSocketHandler = {
+  async data(socket: Socket, data: Buffer) {
+    for (const l of data.toString().split("\n").filter(Boolean)) {
+      socket.write(JSON.stringify(await handleEnvelope(l)) + "\n");
+    }
+  },
+  open(_socket: Socket) {},
+  close(_socket: Socket) {},
+  error(_socket: Socket, e: Error) {
+    log("ERR", `tcp client ${e}`);
+  },
+};
+
+// Bind to 0.0.0.0 so the podman machine VM / a bare non-pod box can reach us
+// via host.containers.internal, same as authd's serveTcp.
+async function serveTcp(port: number, host: string = "0.0.0.0"): Promise<void> {
+  grantRequired = true;
+  log("INFO", `listening tcp ${host}:${port} (signed-grant gate, door="repo", fail-closed)`);
+  Bun.listen({ hostname: host, port, socket: tcpSocketHandler });
+  await new Promise(() => {});
+}
+
 function showUsage(): void {
   console.log(`repod — repo-materialization daemon for the claude-box --repod door
 
@@ -172,9 +285,26 @@ Usage:
 
 Environment:
   REPOD_SOCK        default unix socket path (fallback: ~/.claude-box/run/repod.sock)
-  REPOD_BARE_REPO   path to the host bare repo (read-only mount; required)
+  REPOD_BARE_REPO   path to the host bare repo (read-write mount; required)
   REPOD_OUT_DIR     shared output volume for materialized checkouts (default: /checkouts)
+  CONCIERGE_SOCK    concierge's unix socket (tcp mode only — verifies grants)
+  ROOM_ID           this room's audience for grant verification (tcp mode only)
+
+Ops (tcp/NDJSON envelope): prepare {ref} → {path}. Box identity = a
+concierge-minted signed grant for door="repo". See authd.ts for the twin
+implementation.
 `);
+}
+
+function seedSafeDirectory(): void {
+  if (!BARE_REPO) return;
+  // The bare repo is a host bind-mount; its on-disk UID won't match the
+  // container's, so git's dubious-ownership guard blocks every operation
+  // until explicitly marked safe. repod is the ONE trusted component with
+  // real access to it — this is exactly the place that trust should be
+  // asserted (mirrors --repo-origin's identical safe.directory call for its
+  // own throwaway clone).
+  Bun.spawnSync(["git", "config", "--global", "--add", "safe.directory", BARE_REPO]);
 }
 
 const args = Bun.argv.slice(2);
@@ -183,27 +313,35 @@ const cmd = args[0];
 if (!import.meta.main) {
   // Imported as a module (tests) — skip CLI dispatch.
 } else if (cmd === "serve") {
-  let socketPath = defaultSocketPath("repod");
+  let socketPath: string | undefined;
+  let port: number | undefined;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--socket" || args[i] === "-s") socketPath = args[++i]!;
+    else if (args[i] === "--port" || args[i] === "-p") port = Number(args[++i]);
   }
   mkdirSync(OUT_DIR, { recursive: true });
-  if (BARE_REPO) {
-    // The bare repo is a host bind-mount; its on-disk UID won't match the
-    // container's, so git's dubious-ownership guard blocks every operation
-    // until explicitly marked safe. repod is the ONE trusted component with
-    // real access to it — this is exactly the place that trust should be
-    // asserted (mirrors --repo-origin's identical safe.directory call for its
-    // own throwaway clone).
-    Bun.spawnSync(["git", "config", "--global", "--add", "safe.directory", BARE_REPO]);
+  seedSafeDirectory();
+  if (port) {
+    await serveTcp(port);
+  } else {
+    socketPath ??= defaultSocketPath("repod");
+    prepareSocket(socketPath);
+    Bun.listen<Cx>({ unix: socketPath, socket: handlers });
+    log("INFO", `listening unix ${socketPath} bareRepo=${BARE_REPO ?? "(unset)"} outDir=${OUT_DIR}`);
   }
-  prepareSocket(socketPath);
-  Bun.listen<Cx>({ unix: socketPath, socket: handlers });
-  log("INFO", `listening unix ${socketPath} bareRepo=${BARE_REPO ?? "(unset)"} outDir=${OUT_DIR}`);
 } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
   showUsage();
 } else {
   log("ERR", `unknown command "${cmd}"`);
   showUsage();
   process.exit(1);
+}
+
+// ── Exports for testing ──────────────────────────────────────────────────────
+export { gateGrant, handleEnvelope };
+export function __setGrantRequired(v: boolean): void {
+  grantRequired = v;
+}
+export function __setIssuerKeys(k: IssuerKeys | null): void {
+  issuerKeys = k;
 }

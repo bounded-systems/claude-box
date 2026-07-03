@@ -10,12 +10,14 @@
  * real throwaway bare repo + worktree on disk — no daemon/socket needed for
  * these; door-mounts.test.ts / door.test.ts cover the wiring shape.
  */
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateKeyPairSync, sign as nodeSign } from "node:crypto";
 
-import { assertSafeRef, prepareCheckout } from "../repod.ts";
+import { assertSafeRef, prepareCheckout, gateGrant, handleEnvelope, __setGrantRequired, __setIssuerKeys } from "../repod.ts";
+import { signGrant, unix, type DoorGrant, type IssuerKeys, type SignedGrant } from "../guest-room/mod.ts";
 
 function sh(args: string[], cwd: string): void {
   const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -108,4 +110,61 @@ test("prepareCheckout self-heals a broken/leftover registration at the target pa
   if (healed.ok) {
     expect(existsSync(join(healed.path, "README.md"))).toBe(true);
   }
+});
+
+// ── TCP "bellhop" mode: signed-grant gated, door="repo" ──────────────────────
+// Mirrors tests/authd.test.ts's gateGrant suite exactly — same shape, same
+// concierge-minted-grant mechanism, scoped to a different door name.
+const kp = generateKeyPairSync("ed25519");
+const pem = kp.publicKey.export({ type: "spki", format: "pem" }) as string;
+const sign = (d: string): string => nodeSign(null, Buffer.from(d), kp.privateKey).toString("base64");
+const keys: IssuerKeys = { keys: [{ kid: "k1", publicKeyPem: pem }] };
+
+const door = (name: string): DoorGrant => ({
+  name,
+  host: unix(`/tmp/${name}d.sock`),
+  guest: unix(`/run/doors/${name}d.sock`),
+  env: `${name.toUpperCase()}D_SOCK`,
+  grants: `${name} access`,
+  use: `use ${name}`,
+});
+const grant = (name: string): SignedGrant =>
+  signGrant(door(name), { audience: "room-A", exp: Date.now() + 60_000, nonce: "n1", keyId: "k1" }, sign);
+
+describe("repod gateGrant — door='repo' (the bellhop TCP mode)", () => {
+  beforeEach(() => {
+    process.env.ROOM_ID = "room-A";
+    __setGrantRequired(true);
+    __setIssuerKeys(keys);
+  });
+  afterAll(() => __setGrantRequired(false));
+
+  test("accepts a valid repo grant", async () => {
+    expect(await gateGrant({ id: "1", method: "prepare", grant: grant("repo") })).toEqual({ ok: true });
+  });
+
+  test("no grant → no-grant", async () => {
+    expect((await gateGrant({ id: "1", method: "prepare" })).reason).toBe("no-grant");
+  });
+
+  test("an AUTH grant cannot prepare a checkout (wrong-door)", async () => {
+    expect((await gateGrant({ id: "1", method: "prepare", grant: grant("auth") })).reason).toBe("wrong-door");
+  });
+
+  test("handleEnvelope refuses an ungranted prepare with UNAUTHORIZED (no handler reached)", async () => {
+    const resp = await handleEnvelope(JSON.stringify({ id: "9", method: "prepare", params: { ref: "main" } }));
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("UNAUTHORIZED");
+  });
+
+  test("handleEnvelope with a valid grant reaches the handler (not blocked at the gate)", async () => {
+    // TCP_METHODS.prepare uses the module-level REPOD_BARE_REPO/OUT_DIR (env-
+    // derived at import time), not this file's per-test tmpdir fixtures — so
+    // this only asserts the gate passes and the real handler runs, not that
+    // it succeeds. prepareCheckout's own success path is covered above.
+    const resp = await handleEnvelope(
+      JSON.stringify({ id: "1", method: "prepare", params: { ref: "main" }, grant: grant("repo") }),
+    );
+    expect(resp.error?.code).not.toBe("UNAUTHORIZED");
+  });
 });

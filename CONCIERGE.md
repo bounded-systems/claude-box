@@ -95,6 +95,45 @@ two steps at the serving room: (1) **verify the signature** (issued by prx's
 signer — see §7/§9; reachability alone is not authority), then (2) `checkCaveats`
 over the now-trusted caveats. The door itself only answers availability.
 
+## 3b. tcp/"bellhop" mode — the bootstrap-trust step for a bare box (2026-07-03)
+
+A unix caller is always trusted — the mounted socket IS authority, same as
+every door in this codebase. `concierged serve --port N` additionally listens
+on tcp, for a BARE box (a bastion — no `--repo`/`--auth`/etc. baked in at
+launch) that has no concierge socket mounted but does have the `net` door, so
+it can reach concierge the same way it reaches `authd`/`repod` over TCP.
+
+TCP has no kernel peer identity, so `resolve` over tcp needs a credential
+concierge can check — a **room**. The launcher registers one (`register-room`,
+unix-only, at box-creation time), naming an audience (the box's `ROOM_ID`) and
+exactly which capabilities that room may ever `resolve`:
+
+```ts
+// unix-only — the launcher calls this, never the box itself.
+"register-room"(params: {
+  roomId: string;           // the box's ROOM_ID (used as `audience` in resolve)
+  capabilities: string[];   // e.g. ["repo"] — the room's resolve allowlist
+  lease?: number;           // TTL seconds (default 3600, max 86400)
+}) -> { ttl: number }
+```
+
+This is an **introduction ticket, not the capability**: registering a room
+grants nothing by itself — no door details cross until the box later calls
+`resolve` with a live provider present, and even then only for capabilities
+in its own room's allowlist. `register`/`register-room`/`list` are refused
+outright over tcp (`FORBIDDEN`) — a box must never announce a fake provider,
+mint itself a room, or enumerate the registry. `resolve` over tcp with an
+unknown/expired room → `ROOM_UNKNOWN`; a capability outside the room's
+allowlist → `ROOM_NOT_AUTHORIZED`. `keys` (public, non-sensitive) is
+unrestricted on both transports, same as today.
+
+This is the piece that makes "launch bare, request a capability on demand"
+possible at all: `repod`'s own tcp+grant mode (REPOD.md) is the *fetching*
+half; this room mechanism is the *bootstrap-trust* half a bare box needs
+before it can ask concierge for anything in the first place. The in-box
+skill/slash-command that actually drives this end-to-end is not built yet —
+see REPOD.md's Status section.
+
 ## 4. Registry + liveness (etcd-shaped)
 
 - The registry maps `capability → provider record {door, env, grants, caveats, expiresAt}`.

@@ -74,7 +74,6 @@ export function toAccessTokenOnly(creds: ClaudeCredentials): ClaudeCredentials {
 const TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
 // The PUBLIC claude-code OAuth client id (not a secret; app=claude-code). Overridable.
 const CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const DEFAULT_SCOPES = ["org:create_api_key", "user:inference", "user:mcp_servers", "user:profile"];
 
 export async function refreshAccessToken(
   refreshToken: string,
@@ -90,18 +89,34 @@ export async function refreshAccessToken(
       message: "live OAuth refresh disabled until AUTHD.md Phase 0 verifies continuity (set AUTHD_REFRESH_LIVE=1)",
     };
   }
+  // No `scope` param: per RFC 6749 §6, omitting it on a refresh_token grant
+  // means "same scopes as the original grant" — sending a hand-maintained
+  // list here drifted from reality the moment Anthropic added a scope this
+  // login already had (user:sessions:claude_code, user:file_upload) that an
+  // earlier hardcoded DEFAULT_SCOPES didn't know about, and the token
+  // endpoint rejected the mismatch with invalid_scope. Omitting it entirely
+  // means this can't go stale again.
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: refreshToken,
     client_id: process.env.AUTHD_CLIENT_ID ?? CLAUDE_CODE_CLIENT_ID,
-    scope: DEFAULT_SCOPES.join(" "),
   });
   const res = await fetchImpl(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: body.toString(),
   });
-  if (!res.ok) throw { code: "REFRESH_FAILED", message: `token endpoint returned ${res.status}` };
+  if (!res.ok) {
+    // OAuth error responses are {error, error_description} (RFC 6749) — plain
+    // non-secret diagnostic fields, safe to surface (unlike the body of a
+    // successful exchange, which carries live tokens and must never be logged).
+    let errCode = `http ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string; error_description?: string };
+      if (body.error) errCode = body.error_description ? `${body.error}: ${body.error_description}` : body.error;
+    } catch {}
+    throw { code: "REFRESH_FAILED", message: `token endpoint rejected the refresh: ${errCode}` };
+  }
   const r = (await res.json()) as {
     access_token: string;
     refresh_token: string;
@@ -119,16 +134,29 @@ export async function refreshAccessToken(
   return { creds, rotatedRefreshToken: r.refresh_token };
 }
 
+/** The two shapes AUTHD_KEYCHAIN_SERVICE might name: the native `claude` CLI's
+ *  own macOS Keychain item (service "Claude Code-credentials"), which stores
+ *  the FULL ClaudeCredentials JSON blob — same shape as this file's own
+ *  ClaudeCredentials type, because it's the same client — or a bare refresh
+ *  token string, for a Keychain item set up purpose-built for authd. Either
+ *  way, `readFromKeychain` returns just the refresh token; the full parsed
+ *  blob (when it's the native shape) is also returned so a caller can
+ *  preserve every OTHER field when writing the rotated credential back. */
+function keychainName(): { service: string; account: string } {
+  const service = process.env.AUTHD_KEYCHAIN_SERVICE;
+  if (!service) throw { code: "NO_KEYCHAIN_SERVICE", message: "AUTHD_KEYCHAIN_SERVICE unset" };
+  const account = process.env.AUTHD_KEYCHAIN_ACCOUNT ?? process.env.USER ?? "claude-box";
+  return { service, account };
+}
+
 /** Read the host-owned refresh token from the macOS Keychain
  *  (AUTHD_KEYCHAIN_SERVICE / AUTHD_KEYCHAIN_ACCOUNT). Once the item is stored
  *  (`security add-generic-password`), this is a non-interactive local read —
  *  unlike `op read`, which blocks on a 1Password Touch ID/biometric prompt on
  *  every single lease. The item name is config, never a host path in code
  *  (AUTHD.md §Config). */
-async function readFromKeychain(): Promise<string> {
-  const service = process.env.AUTHD_KEYCHAIN_SERVICE;
-  const account = process.env.AUTHD_KEYCHAIN_ACCOUNT ?? process.env.USER ?? "claude-box";
-  if (!service) throw { code: "NO_KEYCHAIN_SERVICE", message: "AUTHD_KEYCHAIN_SERVICE unset" };
+async function readFromKeychain(): Promise<{ refreshToken: string; nativeBlob: ClaudeCredentials | null }> {
+  const { service, account } = keychainName();
   const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-a", account, "-w"], {
     stdout: "pipe",
     stderr: "ignore",
@@ -138,7 +166,39 @@ async function readFromKeychain(): Promise<string> {
   if (proc.exitCode !== 0 || !out) {
     throw { code: "KEYCHAIN_READ_FAILED", message: `security find-generic-password -s ${service} -a ${account} failed` };
   }
-  return out;
+  try {
+    const parsed = JSON.parse(out) as ClaudeCredentials;
+    if (!parsed.claudeAiOauth?.refreshToken) {
+      throw { code: "KEYCHAIN_NO_REFRESH_TOKEN", message: "Keychain item parsed as JSON but has no claudeAiOauth.refreshToken" };
+    }
+    return { refreshToken: parsed.claudeAiOauth.refreshToken, nativeBlob: parsed };
+  } catch (e) {
+    if ((e as { code?: string }).code) throw e; // our own thrown error above
+    // Not JSON — a purpose-built item holding a bare refresh token string.
+    return { refreshToken: out, nativeBlob: null };
+  }
+}
+
+/** Write a rotated refresh token back to the SAME Keychain item, so a live
+ *  refresh doesn't strand the host's login (AUTHD.md's Phase 2 write-back —
+ *  a live refresh's rotation is single-use; skipping this step invalidates
+ *  the OLD refresh token server-side with nowhere for the NEW one to land).
+ *  When the item was the native `claude` CLI blob, every other field
+ *  (accessToken/expiresAt/scopes/subscriptionType/rateLimitTier) is updated
+ *  too, so the native CLI keeps working seamlessly off the same item — this
+ *  is a real login refresh for it, not just bookkeeping for authd.
+ *  `-U` updates an existing item in place (same service+account), so this
+ *  never creates a second, competing Keychain entry. */
+async function writeToKeychain(creds: ClaudeCredentials): Promise<void> {
+  const { service, account } = keychainName();
+  const blob = JSON.stringify(creds);
+  const proc = Bun.spawnSync(
+    ["security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", blob],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (proc.exitCode !== 0) {
+    throw { code: "KEYCHAIN_WRITE_FAILED", message: `security add-generic-password failed: ${proc.stderr.toString().trim()}` };
+  }
 }
 
 /** Read the host-owned refresh token from op (AUTHD_OP_REF = op://vault/item/field). */
@@ -155,10 +215,12 @@ async function readFromOp(): Promise<string> {
 /** Read the host-owned refresh token. Prefers the Keychain (non-interactive,
  *  no per-lease biometric prompt) when AUTHD_KEYCHAIN_SERVICE is configured;
  *  falls back to op otherwise. Exactly one source is consulted per call — no
- *  silent double-prompt. */
-async function readRefreshToken(): Promise<string> {
+ *  silent double-prompt. The Keychain path also returns the native blob (if
+ *  the item was the real `claude` CLI's own credential shape), so a rotation
+ *  can write every field back, not just the refresh token in isolation. */
+async function readRefreshToken(): Promise<{ refreshToken: string; nativeBlob: ClaudeCredentials | null }> {
   if (process.env.AUTHD_KEYCHAIN_SERVICE) return readFromKeychain();
-  return readFromOp();
+  return { refreshToken: await readFromOp(), nativeBlob: null };
 }
 
 // ── Ops ──────────────────────────────────────────────────────────────────────
@@ -167,11 +229,26 @@ async function handleStatus(): Promise<unknown> {
 }
 
 /** lease: refresh the access token (rotating the host-side refresh token) and
- *  return an ACCESS-TOKEN-ONLY credential for the box. Persisting the rotated
- *  refresh token back to op (sole-writer rotation chain) is Phase 2. */
+ *  return an ACCESS-TOKEN-ONLY credential for the box.
+ *
+ *  Write-back (AUTHD.md Phase 2, now built): a live OAuth refresh ROTATES the
+ *  refresh token server-side — the old one stops working the instant this
+ *  succeeds. If the source was the native `claude` CLI's own Keychain item,
+ *  the rotated credential is written straight back to that SAME item, so the
+ *  host's own `claude` CLI keeps working off the new token — this refresh
+ *  serves double duty as a real login refresh for it, not just an authd
+ *  bookkeeping step. A bare-string Keychain item (no nativeBlob) or an op-
+ *  sourced token has no write-back target yet (op's sole-writer rotation
+ *  chain is still unbuilt) — those sources are left as they were before this
+ *  call; only their in-memory rotated value is used for THIS lease. */
 async function handleLease(): Promise<unknown> {
-  const refreshToken = await readRefreshToken();
-  const { creds } = await refreshAccessToken(refreshToken);
+  const { refreshToken, nativeBlob } = await readRefreshToken();
+  const { creds, rotatedRefreshToken } = await refreshAccessToken(refreshToken);
+  if (nativeBlob && process.env.AUTHD_KEYCHAIN_SERVICE) {
+    await writeToKeychain({
+      claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: rotatedRefreshToken },
+    });
+  }
   return toAccessTokenOnly(creds);
 }
 

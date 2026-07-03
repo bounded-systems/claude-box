@@ -123,4 +123,18 @@ describe("refreshAccessToken — gated until Phase 0, then mockable", () => {
     // The leased (box-facing) credential drops the refresh token authd just rotated.
     expect(toAccessTokenOnly(creds).claudeAiOauth.refreshToken).toBeUndefined();
   });
+
+  test("never sends a scope param — omitting it means \"same as originally granted\" (RFC 6749 §6), so a hardcoded scope list can't drift stale again (regression: invalid_scope when DEFAULT_SCOPES missed a real granted scope)", async () => {
+    process.env.AUTHD_REFRESH_LIVE = "1";
+    let seen: string | undefined;
+    const mockFetch = (async (_url: string, init: { body: string }) => {
+      seen = init.body;
+      return new Response(
+        JSON.stringify({ access_token: "a", refresh_token: "b", expires_in: 1, scope: "x" }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    await refreshAccessToken("old-ref", mockFetch);
+    expect(new URLSearchParams(seen!).has("scope")).toBe(false);
+  });
 });

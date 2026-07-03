@@ -119,9 +119,30 @@ export async function refreshAccessToken(
   return { creds, rotatedRefreshToken: r.refresh_token };
 }
 
-/** Read the host-owned refresh token from op (AUTHD_OP_REF = op://vault/item/field).
- *  The ref is config, never a host path in code (AUTHD.md §Config). */
-async function readRefreshToken(): Promise<string> {
+/** Read the host-owned refresh token from the macOS Keychain
+ *  (AUTHD_KEYCHAIN_SERVICE / AUTHD_KEYCHAIN_ACCOUNT). Once the item is stored
+ *  (`security add-generic-password`), this is a non-interactive local read —
+ *  unlike `op read`, which blocks on a 1Password Touch ID/biometric prompt on
+ *  every single lease. The item name is config, never a host path in code
+ *  (AUTHD.md §Config). */
+async function readFromKeychain(): Promise<string> {
+  const service = process.env.AUTHD_KEYCHAIN_SERVICE;
+  const account = process.env.AUTHD_KEYCHAIN_ACCOUNT ?? process.env.USER ?? "claude-box";
+  if (!service) throw { code: "NO_KEYCHAIN_SERVICE", message: "AUTHD_KEYCHAIN_SERVICE unset" };
+  const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-a", account, "-w"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  if (proc.exitCode !== 0 || !out) {
+    throw { code: "KEYCHAIN_READ_FAILED", message: `security find-generic-password -s ${service} -a ${account} failed` };
+  }
+  return out;
+}
+
+/** Read the host-owned refresh token from op (AUTHD_OP_REF = op://vault/item/field). */
+async function readFromOp(): Promise<string> {
   const ref = process.env.AUTHD_OP_REF;
   if (!ref) throw { code: "NO_OP_REF", message: "AUTHD_OP_REF unset (expected op://vault/item/field)" };
   const proc = Bun.spawn(["op", "read", ref], { stdout: "pipe", stderr: "ignore" });
@@ -129,6 +150,15 @@ async function readRefreshToken(): Promise<string> {
   await proc.exited;
   if (proc.exitCode !== 0 || !out) throw { code: "OP_READ_FAILED", message: `op read ${ref} failed` };
   return out;
+}
+
+/** Read the host-owned refresh token. Prefers the Keychain (non-interactive,
+ *  no per-lease biometric prompt) when AUTHD_KEYCHAIN_SERVICE is configured;
+ *  falls back to op otherwise. Exactly one source is consulted per call — no
+ *  silent double-prompt. */
+async function readRefreshToken(): Promise<string> {
+  if (process.env.AUTHD_KEYCHAIN_SERVICE) return readFromKeychain();
+  return readFromOp();
 }
 
 // ── Ops ──────────────────────────────────────────────────────────────────────

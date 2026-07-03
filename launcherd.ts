@@ -829,6 +829,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     repoRw,
     repoEphemeral: false,
     repoClone: false,
+    repoDoorRef: "main",
     pod: false,
     writable: [],
     doors: mountDoors,

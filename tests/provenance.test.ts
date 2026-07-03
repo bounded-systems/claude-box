@@ -57,8 +57,9 @@ describe("SLSA Provenance v1 format (default)", () => {
     const deps = s.predicate.buildDefinition.resolvedDependencies ?? [];
     const uris = deps.map((d: any) => d.uri);
     // the nixpkgs rev pinned in flake.lock (the ROOT's nixpkgs, resolved via
-    // root.inputs — not whatever node happens to be keyed `nixpkgs`)
-    expect(uris.some((u: string) => u.includes("9f11f828c213641c2369a9f1fa31fe31557e3156"))).toBe(true);
+    // root.inputs — not whatever node happens to be keyed `nixpkgs`). Bumped
+    // 2026-07-03 alongside the flake.nix pin (claude-code 2.1.175 -> 2.1.198).
+    expect(uris.some((u: string) => u.includes("8e6f3bfd2648296235457900689e18c56b210375"))).toBe(true);
     // ...and NOT a transitive dependency's nixpkgs (git-ai-flake pins unstable
     // 89570f2). Guards the flake.lock node re-keying bug: attesting the wrong
     // nixpkgs would silently misreport what built the image.

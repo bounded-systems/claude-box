@@ -8,11 +8,17 @@
   # a deliberate `nix flake update` + review, never a silent self-update.
   description = "Pinned OCI image for the personal Claude runtime (claude-code + agent toolchain)";
 
-  # Locked to the rev verified to carry claude-code 2.1.175 (aarch64-linux, unfree).
+  # Locked to the rev verified to carry claude-code 2.1.198 (aarch64-linux, unfree).
   # 2.1.x is the first line with `remote-control` (drive the in-box session from
-  # claude.ai/code or the Claude mobile app); 2.0.53 lacked it. Bumping the rev IS
-  # the version decision — re-pin here, then `nix flake update` to re-lock.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/9f11f828c213641c2369a9f1fa31fe31557e3156";
+  # claude.ai/code or the Claude mobile app); 2.0.53 lacked it. Bumped 2026-07-03
+  # from 2.1.175 → 2.1.198: 2.1.175 predates the version (2.1.182+) that actually
+  # honors `disableClaudeAiConnectors`/`disableBundledSkills`/
+  # `strictPluginOnlyCustomization` in managed-settings.json — those keys were
+  # silently no-ops on the old pin (found via live introspection inside the box:
+  # the setting was present in settings.json, but connectors stayed attached).
+  # Bumping the rev IS the version decision — re-pin here, then `nix flake update`
+  # to re-lock.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/8e6f3bfd2648296235457900689e18c56b210375";
 
   # The room+door capability engine, extracted to its own public repo and
   # consumed here as a PINNED input (flake.lock). It is the single source of

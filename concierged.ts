@@ -51,6 +51,7 @@ import {
   liveProviders,
   attenuate,
   unix,
+  tcp,
   signGrant,
   DOOR_NAME_RE,
   type DoorGrant,
@@ -207,36 +208,52 @@ function handleRegister(params: Record<string, unknown>, viaTcp = false): unknow
     throw { code: "FORBIDDEN", message: "register is unix-only (a box cannot announce itself as a provider)" };
   }
   const capability = params.capability as string;
-  const door = params.door as string; // the provider's socket path
   const env = (params.env as string) ?? `${(capability ?? "").toUpperCase().replace(/-/g, "_")}_SOCK`;
   const grants = (params.grants as string) ?? `service "${capability}"`;
   const caveats = (params.caveats as string[]) ?? undefined;
   const leaseSec = Math.min((params.lease as number) ?? DEFAULT_LEASE_SEC, MAX_LEASE_SEC);
+  // transport="tcp" registers a provider reachable over the net door (e.g.
+  // repod's bellhop mode) instead of a pod-internal unix socket — a bare box
+  // has no unix mount to concierge's providers either, so a resolved grant
+  // for it must be a tcp address the box can actually dial.
+  const transport = (params.transport as string) ?? "unix";
+  const door =
+    transport === "tcp"
+      ? tcp(params.host as string, params.port as number)
+      : unix(params.door as string);
+  const doorLabel = transport === "tcp" ? `${params.host}:${params.port}` : (params.door as string);
 
   if (!capability || !DOOR_NAME_RE.test(capability)) {
     throw { code: "INVALID_CAPABILITY", message: `capability must match ${DOOR_NAME_RE}` };
   }
-  if (!door) {
+  if (transport === "tcp") {
+    if (!params.host || !params.port) throw { code: "INVALID_PARAMS", message: "host and port required for transport=tcp" };
+  } else if (!params.door) {
     throw { code: "INVALID_PARAMS", message: "door (socket path) required" };
   }
 
   const grant: DoorGrant = {
     name: capability,
-    host: unix(door),
-    guest: unix(door),
+    host: door,
+    guest: door,
     env,
     grants,
-    use: `Reach the ${capability} service at ${door} ($${env}).`,
+    use: `Reach the ${capability} service at ${doorLabel} ($${env}).`,
     caveats: caveats?.length ? caveats : undefined,
   };
   const expiresAt = now() + leaseSec * 1000;
 
-  // Upsert: replace an existing entry for the same capability + socket (heartbeat).
-  const idx = registry.findIndex((e) => e.capability === capability && e.door.guest.kind === "unix" && (e.door.guest as { path: string }).path === door);
+  // Upsert: replace an existing entry for the same capability + door (heartbeat).
+  const sameDoor = (g: DoorGrant): boolean =>
+    g.guest.kind === transport &&
+    (transport === "tcp"
+      ? (g.guest as { host: string; port: number }).host === params.host && (g.guest as { host: string; port: number }).port === params.port
+      : (g.guest as { path: string }).path === params.door);
+  const idx = registry.findIndex((e) => e.capability === capability && sameDoor(e.door));
   if (idx >= 0) registry[idx] = { capability, door: grant, expiresAt };
   else registry.push({ capability, door: grant, expiresAt });
 
-  log("ALLOW", `register ${capability} → ${door} (lease ${leaseSec}s${caveats?.length ? `, ceiling: ${caveats.join("; ")}` : ""})`);
+  log("ALLOW", `register ${capability} → ${doorLabel} (${transport}, lease ${leaseSec}s${caveats?.length ? `, ceiling: ${caveats.join("; ")}` : ""})`);
   return { ttl: leaseSec };
 }
 

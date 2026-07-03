@@ -41,6 +41,25 @@ describe("register/list — unix-only", () => {
     expect(registry.length).toBe(0);
   });
 
+  test("register supports transport=tcp for a bellhop-mode provider (e.g. repod)", () => {
+    const res = handleRegister({ capability: "repo", transport: "tcp", host: "127.0.0.1", port: 3999 }) as {
+      ttl: number;
+    };
+    expect(res.ttl).toBeGreaterThan(0);
+    expect(registry.length).toBe(1);
+    expect(registry[0]!.door.guest).toEqual({ kind: "tcp", host: "127.0.0.1", port: 3999 });
+  });
+
+  test("register transport=tcp rejects missing host/port", () => {
+    expect(() => handleRegister({ capability: "repo", transport: "tcp" })).toThrow();
+  });
+
+  test("re-registering the same tcp door is a heartbeat (upsert, not a duplicate)", () => {
+    handleRegister({ capability: "repo", transport: "tcp", host: "127.0.0.1", port: 3999 });
+    handleRegister({ capability: "repo", transport: "tcp", host: "127.0.0.1", port: 3999 });
+    expect(registry.length).toBe(1);
+  });
+
   test("list is refused over tcp — a box can't enumerate the registry", () => {
     handleRegister({ capability: "repo", door: "/tmp/repod.sock" });
     expect(() => handleList({}, true)).toThrow();

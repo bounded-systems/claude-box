@@ -272,6 +272,8 @@
           recordAuthoredPath = "/opt/gitai/record-authored.ts";
           gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
           recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
+          credentialGuardPath = "/opt/security/credential-guard.ts";
+          credentialGuardCmd = "bun ${credentialGuardPath}";
           cmdHook = command: { type = "command"; inherit command; };
           # permissions: a hard deny on the leased credential file. The
           # classifier already refuses credential extraction (see #193 on
@@ -309,7 +311,15 @@
               ];
             };
             hooks = {
-              PreToolUse = [{ matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }];
+              PreToolUse = [
+                { matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }
+                # credential-guard: a second, dynamic layer alongside the
+                # static permissions.deny above — inspects the actual
+                # command/path string, catching variants a fixed pattern
+                # misses (see scripts/credential-guard.ts). Deliberately no
+                # `|| true` — this hook's exit code IS the block signal.
+                { matcher = "Bash|Read"; hooks = [ (cmdHook credentialGuardCmd) ]; }
+              ];
               PostToolUse = [{
                 matcher = "Edit|Write";
                 hooks = [ (cmdHook gitAiHookCmd) (cmdHook recordAuthoredCmd) ];
@@ -375,6 +385,9 @@
               # PostToolUse hook above).
               mkdir -p opt/gitai
               cp ${./scripts/record-authored.ts} opt/gitai/record-authored.ts
+              # The credential-guard PreToolUse hook script (see gitAiManagedSettings).
+              mkdir -p opt/security
+              cp ${./scripts/credential-guard.ts} opt/security/credential-guard.ts
               # git-ai config: baked at the user home so git-ai picks it up on
               # first run without any interactive setup. git_path points to the
               # nix-managed git binary in /bin; telemetry and version-check noise

@@ -267,10 +267,45 @@
           gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
           recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
           cmdHook = command: { type = "command"; inherit command; };
+          # permissions: opt-in tools + a hard deny on the leased credential file.
+          # The classifier already refuses credential extraction (see
+          # #193 on claude-box, verified live 2026-07-04), but that's a soft,
+          # prompt-dependent guardrail with no claude-box-side backstop if it
+          # ever changes upstream — this is that backstop. defaultMode "deny"
+          # means any tool NOT in `allow` below hard-fails with no prompt, so
+          # the allow list is deliberately the full set this box's actual
+          # workflows need (code editing, search, research, sub-agents) — NOT
+          # a per-Bash-command allowlist (that would be too brittle to
+          # enumerate; Bash itself is opted in, same as every other tool here).
+          # allowedMcpServers = [] is a full MCP lockdown: no MCP server loads
+          # by default (managed, so user/project .mcp.json can't override it)
+          # until a future managed entry explicitly opts one in.
+          credentialsPath = "${home}/.config/claude/.credentials.json";
           gitAiManagedSettings = (pkgs.formats.json { }).generate "managed-settings.json" {
             disableClaudeAiConnectors = true;
             disableBundledSkills = true;
             strictPluginOnlyCustomization = [ "skills" ];
+            allowedMcpServers = [ ];
+            permissions = {
+              defaultMode = "deny";
+              deny = [
+                "Read(${credentialsPath})"
+                "Bash(cat ${credentialsPath}*)"
+              ];
+              allow = [
+                "Bash(*)"
+                "Read(*)"
+                "Write(*)"
+                "Edit(*)"
+                "Grep(*)"
+                "Glob(*)"
+                "WebSearch(*)"
+                "WebFetch(*)"
+                "Task(*)"
+                "TodoWrite(*)"
+                "Skill(*)"
+              ];
+            };
             hooks = {
               PreToolUse = [{ matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }];
               PostToolUse = [{

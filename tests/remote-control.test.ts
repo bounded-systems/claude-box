@@ -196,12 +196,25 @@ describe("--remote-serve: shares the remote-control auth posture", () => {
 });
 
 describe("remoteServeArgs: the server-mode entrypoint prefix", () => {
-  test("boots `claude remote-control` for a serve launch", () => {
+  test("boots `claude remote-control` for a serve launch (no repo → same-dir spawn)", () => {
     const l = planLaunch(["--remote-serve"], EMPTY);
     expect(remoteServeArgs(l)).toEqual([
       "remote-control",
       "--remote-control-session-name-prefix",
       "claude-box",
+      "--spawn",
+      "same-dir",
+    ]);
+  });
+
+  test("uses worktree spawn when a repo is mounted", () => {
+    const l = planLaunch(["--remote-serve", "--repo", "."], EMPTY);
+    expect(remoteServeArgs(l)).toEqual([
+      "remote-control",
+      "--remote-control-session-name-prefix",
+      "claude-box",
+      "--spawn",
+      "worktree",
     ]);
   });
 

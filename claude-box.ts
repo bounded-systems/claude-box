@@ -15,7 +15,7 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { existsSync, mkdirSync, statSync, rmSync, mkdtempSync, readFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, rmSync, mkdtempSync, readFileSync, openSync, closeSync, writeSync } from "node:fs";
 import { dirname, resolve, relative, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
@@ -42,6 +42,11 @@ import {
 } from "./guest-room/mod.ts";
 import { DEFAULT_ALLOW } from "./netd/netd.ts";
 import { loadOrCreateBoxKey, issuerKeysPath } from "./lib/box-keys.ts";
+import {
+  type RemoteControlFlags,
+  CLAUDE_BOX_DEFAULT_FLAGS,
+  renderRemoteControlArgs,
+} from "./lib/remote-control-flags.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 
@@ -145,7 +150,12 @@ export const RC_NETD_ALLOW = ["statsig.anthropic.com", "claude.ai", "platform.cl
 
 
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
- *  Set DOORS_TCP=1 or run `doors serve` to enable TCP mode. */
+ *  Pure/env-driven only (no ambient process.platform read) so every caller —
+ *  including tests, which build their own synthetic envs — stays fully
+ *  deterministic regardless of which OS is actually running them. The
+ *  platform-based default (automatic on macOS) is applied once, at the real
+ *  CLI entrypoint, by defaulting process.env.DOORS_TCP before main() reads
+ *  anything — see main()'s own comment. */
 function isTcpMode(env: Env): boolean {
   return env.DOORS_TCP === "1" || env.DOORS_TCP === "true";
 }
@@ -509,6 +519,9 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   claude-box check-in         throwaway login for authd's ephemeral store —
                               nothing persists; prints the credential JSON
                               to stdout for piping into 'authd serve'.
+  claude-box authd-up         one-shot: check-in, then start authd DETACHED
+                              (survives this terminal closing), seeded with
+                              that credential. No-op if authd's already up.
   claude-box auth-keys-path   path to claude-box's grant-signing public key —
                               feed to authd: AUTHD_ISSUER_KEYS_PATH=$(claude-box
                               auth-keys-path) authd serve --port 3003
@@ -935,17 +948,21 @@ export function rcEgressAllow(launch: Launch): string[] {
 /** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
  *  entrypoint is `claude`, so prepending these args boots it as
  *  `claude remote-control` — a headless RC server the app attaches to,
- *  instead of an interactive session. Sets `--remote-control-session-name-prefix`
- *  to stable "claude-box" so spawned sessions are clearly tied to this bastion
- *  and appear as distinct named sessions. Without it, spawned sessions are
- *  prefixed with the CONTAINER's own hostname (a random hex podman assigns
- *  each run — e.g. "de7792ab763e"), which is meaningless and changes every
- *  launch. Empty for any non-serve launch, so the interactive entrypoint is
+ *  instead of an interactive session. Flags come from
+ *  lib/remote-control-flags.ts (see schemas/remote-control-flags.schema.json
+ *  for the full rationale) — one definition instead of ad hoc argv pushes.
+ *  `--spawn worktree` needs an actual git repo, and --remote-serve can run
+ *  with none mounted at all, so it only applies when `launch.repo` is set;
+ *  otherwise same-dir (claude's own default) is the only option that works.
+ *  Empty for any non-serve launch, so the interactive entrypoint is
  *  byte-for-byte unchanged. */
 function remoteServeArgs(launch: Launch): string[] {
-  return launch.remoteServe
-    ? ["remote-control", "--remote-control-session-name-prefix", "claude-box"]
-    : [];
+  if (!launch.remoteServe) return [];
+  const flags: RemoteControlFlags = {
+    ...CLAUDE_BOX_DEFAULT_FLAGS,
+    spawn: launch.repo ? CLAUDE_BOX_DEFAULT_FLAGS.spawn : "same-dir",
+  };
+  return ["remote-control", ...renderRemoteControlArgs(flags)];
 }
 
 /** Mint a signed grant for the "auth" door using claude-box's own local
@@ -974,11 +991,21 @@ function mintAuthGrant(authDoor: DoorGrant, audience: string): SignedGrant {
  *  Bun.connect: this script has no source tree mounted to import from, so it
  *  has to be self-contained, and node:net is available in any bun runtime.
  *  `grant` (mintAuthGrant's output) rides along in the request — authd's tcp
- *  gate always requires one, no opt-out. Whether claude itself notices a
- *  rewritten .credentials.json mid-session (vs. only reading it at process
- *  start) is the still-open AUTHD.md "continuity across expiry" question —
- *  this only guarantees the FILE is always current; a re-lease loop wraps
- *  this for a long-lived bastion (see run()). */
+ *  gate always requires one, no opt-out.
+ *
+ *  Also merges the leased `oauthAccount` (org/subscription identity, carried
+ *  by authd alongside the credential — see schemas/claude-json.schema.json)
+ *  into .claude.json: `claude remote-control`'s org-eligibility check reads
+ *  THAT, not .credentials.json, and fails ("Unable to determine your
+ *  organization") without it even with a fully valid access token (confirmed
+ *  live, 2026-07-04) — this file never ran its own `claude auth login`, which
+ *  is normally what populates it.
+ *
+ *  Whether claude itself notices a rewritten .credentials.json mid-session
+ *  (vs. only reading it at process start) is the still-open AUTHD.md
+ *  "continuity across expiry" question — this only guarantees the FILE is
+ *  always current; a re-lease loop wraps this for a long-lived bastion (see
+ *  run()). */
 function authLeaseCmd(grant?: SignedGrant): string {
   const req: Record<string, unknown> = { id: "1", method: "lease", params: {} };
   if (grant) req.grant = grant;
@@ -988,14 +1015,16 @@ function authLeaseCmd(grant?: SignedGrant): string {
   const wireLine = JSON.stringify(JSON.stringify(req) + "\n");
   return (
     `bun -e '` +
-    `const net=require("net"),fs=require("fs");` +
+    `const net=require("net"),fs=require("fs"),d=process.env.CLAUDE_CONFIG_DIR;` +
     `const raw=process.env.AUTHD_SOCK;` +
     `const opts=raw.startsWith("tcp:")?(()=>{const r=raw.slice(4),i=r.lastIndexOf(":");return{host:r.slice(0,i),port:Number(r.slice(i+1))};})():{path:raw};` +
     `const s=net.createConnection(opts,()=>{s.write(${wireLine})});` +
     `let buf="";` +
-    `s.on("data",d=>{buf+=d.toString();if(buf.indexOf("\\n")>=0){s.end();const resp=JSON.parse(buf.split("\\n")[0]);` +
+    `s.on("data",d2=>{buf+=d2.toString();if(buf.indexOf("\\n")>=0){s.end();const resp=JSON.parse(buf.split("\\n")[0]);` +
     `if(!resp.ok){console.error("authd lease failed: "+(resp.error&&resp.error.message));process.exit(1)}` +
-    `fs.writeFileSync(process.env.CLAUDE_CONFIG_DIR+"/.credentials.json",JSON.stringify(resp.result))}});` +
+    `fs.writeFileSync(d+"/.credentials.json",JSON.stringify({claudeAiOauth:resp.result.claudeAiOauth}));` +
+    `if(resp.result.oauthAccount){const cp=d+"/.claude.json";let cj={};try{cj=JSON.parse(fs.readFileSync(cp,"utf8"))}catch{};cj.oauthAccount=resp.result.oauthAccount;fs.writeFileSync(cp,JSON.stringify(cj))}` +
+    `}});` +
     `s.on("error",e=>{console.error("authd connect failed: "+e.message);process.exit(1)});` +
     `'`
   );
@@ -1592,7 +1621,7 @@ async function run(
   if (repoOrigin && !netOpen) {
     if (!tcpMode) {
       console.error(
-        "claude-box: --repo-origin needs TCP mode for its scoped git-pull door — set DOORS_TCP=1.",
+        "claude-box: --repo-origin needs TCP mode for its scoped git-pull door — automatic on macOS; on Linux set DOORS_TCP=1.",
       );
       process.exit(2);
     }
@@ -1615,7 +1644,7 @@ async function run(
   if (rcAllow.length > 0 && !netOpen) {
     if (!tcpMode) {
       console.error(
-        "claude-box: --remote-control needs TCP mode for its scoped egress door — set DOORS_TCP=1.",
+        "claude-box: --remote-control needs TCP mode for its scoped egress door — automatic on macOS; on Linux set DOORS_TCP=1.",
       );
       process.exit(2);
     }
@@ -2297,7 +2326,7 @@ async function cmdDoctor(): Promise<number> {
       `commit or stash any in-box work first):\n\n` +
       `  podman stop ${ids}\n` +
       `  podman rm   ${ids}\n` +
-      `  # then relaunch, e.g.:  DOORS_TCP=1 claude-box --room dev --repo .`,
+      `  # then relaunch, e.g.:  claude-box`,
   );
   // Non-zero so scripts/CI can gate on drift.
   return 1;
@@ -2388,20 +2417,20 @@ Usage:
 
 Services: ${DOOR_SERVICES.join(", ")}
 
-TCP Mode (macOS):
+TCP Mode (automatic on macOS):
   'doors serve' runs daemons on TCP ports (not Unix sockets) because virtiofs
-  can't share sockets between macOS and the podman machine VM. Containers reach
-  daemons via host.containers.internal:PORT. To launch a box in TCP mode:
-
-    DOORS_TCP=1 claude-box --room dev --repo .
+  can't share sockets between macOS and the podman machine VM. claude-box
+  detects macOS and uses TCP mode automatically — nothing to set. Containers
+  reach daemons via host.containers.internal:PORT. On Linux (no VM, plain
+  unix sockets work) set DOORS_TCP=1 to force it on anyway if ever needed.
 
   TCP ports: keeperd=${TCP_PORTS.keeperd}, netd=${TCP_PORTS.netd}, scoutd=${TCP_PORTS.scoutd}
 
 Examples:
-  claude-box doors serve             run daemons on TCP (Ctrl+C to stop)
-  DOORS_TCP=1 claude-box --room dev  launch box with TCP doors
-  claude-box doors init              first-time setup (containerized, for Linux)
-  claude-box doors status            status of all doors`);
+  claude-box doors serve      run daemons on TCP (Ctrl+C to stop)
+  claude-box --room dev       launch box with TCP doors (macOS: automatic)
+  claude-box doors init       first-time setup (containerized, for Linux)
+  claude-box doors status     status of all doors`);
     return subcmd === "-h" || subcmd === "--help" ? 0 : 1;
   }
 
@@ -2616,7 +2645,7 @@ Examples:
         const status = result.ok ? "active" : result.stdout || "inactive";
         console.log(`  ${svc.padEnd(10)} ${status}`);
       }
-      console.log("\nRun 'claude-box --room dev --repo .' to launch with all doors.");
+      console.log("\nRun 'claude-box' to launch.");
       return 0;
     }
     case "serve": {
@@ -2682,8 +2711,8 @@ Examples:
       }
 
       console.log("\nAll daemons running on TCP. Press Ctrl+C to stop.");
-      console.log("\nTo launch a box with TCP mode, set DOORS_TCP=1:");
-      console.log("  DOORS_TCP=1 claude-box --room dev --repo .\n");
+      console.log("\nLaunch a box (TCP mode is automatic on macOS):");
+      console.log("  claude-box\n");
 
       // Handle SIGINT to clean up
       process.on("SIGINT", () => {
@@ -2779,7 +2808,12 @@ async function cmdLogin(args: string[]): Promise<number> {
  *  --rm'd container is deleted immediately after, whether or not the read
  *  succeeded — this session's authd door is `check-out`: no persistence,
  *  no lingering plaintext, one guest-room per stay. */
-async function cmdCheckIn(): Promise<number> {
+/** Runs the throwaway login guest-room and returns the resulting credential
+ *  JSON line — or undefined if the login didn't succeed. Never prints it;
+ *  callers decide whether it goes to stdout (cmdCheckIn) or straight into
+ *  another process's stdin (cmdAuthdUp). See cmdCheckIn's doc comment for
+ *  the full rationale (throwaway tmpfs, /dev/tty, oauthAccount bundling). */
+async function runCheckIn(): Promise<string | undefined> {
   const guestPreset = knownGuests().claude!;
   const outDir = mkdtempSync(join(boxTempBase(), "check-in-"));
   try {
@@ -2794,7 +2828,14 @@ async function cmdCheckIn(): Promise<number> {
       "-v", `${outDir}:/check-in-out`,
       "--entrypoint", "sh", guestPreset.image,
       "-c",
-      `claude auth login && cp "$CLAUDE_CONFIG_DIR/.credentials.json" /check-in-out/cred.json`,
+      // `claude auth status` after login forces the org/profile lookup that
+      // populates .claude.json's oauthAccount — `claude remote-control`'s
+      // eligibility check reads THAT, not anything in .credentials.json, and
+      // fails ("Unable to determine your organization") without it even with
+      // an otherwise-valid credential (confirmed live). Bundle both into one
+      // JSON blob matching authd's ClaudeCredentials shape (see
+      // schemas/claude-credentials.schema.json, schemas/claude-json.schema.json).
+      `claude auth login && (claude auth status --json >/dev/null 2>&1 || true) && bun -e 'const fs=require("fs"),d=process.env.CLAUDE_CONFIG_DIR;const creds=JSON.parse(fs.readFileSync(d+"/.credentials.json","utf8"));let cj={};try{cj=JSON.parse(fs.readFileSync(d+"/.claude.json","utf8"))}catch{};fs.writeFileSync("/check-in-out/cred.json",JSON.stringify({claudeAiOauth:creds.claudeAiOauth,oauthAccount:cj.oauthAccount??null}))'`,
     ];
     console.error("claude-box: check-in — a throwaway guest-room, nothing persists. Complete the login, then exit.");
     // The interactive login (URL, paste prompt) must always render on the
@@ -2819,20 +2860,116 @@ async function cmdCheckIn(): Promise<number> {
     });
     const code = await proc.exited;
     if (tty !== undefined) closeSync(tty);
-    if (code !== 0) return code;
+    if (code !== 0) return undefined;
     const credPath = join(outDir, "cred.json");
     if (!existsSync(credPath)) {
       console.error("claude-box: check-in — login exited 0 but no credential was produced");
-      return 1;
+      return undefined;
     }
-    console.log(readFileSync(credPath, "utf-8").trim());
-    return 0;
+    return readFileSync(credPath, "utf-8").trim();
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 }
 
+async function cmdCheckIn(): Promise<number> {
+  const cred = await runCheckIn();
+  if (cred === undefined) return 1;
+  console.log(cred);
+  return 0;
+}
+
+/** `claude-box authd-up` — the one-command version of the check-in → seed →
+ *  serve dance this session did by hand across several terminals: runs
+ *  check-in interactively, then starts `authd serve` DETACHED (nohup'd,
+ *  survives this terminal closing) seeded with that credential, and returns
+ *  once it's listening. No-op if authd is already reachable.
+ *
+ *  The credential never touches disk, an argv, or an env var (all three are
+ *  inspectable via `ps`/`/proc` by other processes on this machine) — it's
+ *  fed through a named pipe (the same technique used earlier this session
+ *  for driving a backgrounded podman login's stdin), opened read-write so
+ *  neither side blocks on open order. */
+async function cmdAuthdUp(): Promise<number> {
+  const port = TCP_PORTS.authd;
+  if (await tcpReachable("127.0.0.1", port)) {
+    console.log(`claude-box: authd already reachable at 127.0.0.1:${port} — nothing to do.`);
+    return 0;
+  }
+
+  const cred = await runCheckIn();
+  if (cred === undefined) {
+    console.error("claude-box: authd-up — check-in did not produce a credential, aborting.");
+    return 1;
+  }
+
+  const key = loadOrCreateBoxKey();
+  const stateDir = `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/claude-box`;
+  mkdirSync(stateDir, { recursive: true });
+  const logPath = join(stateDir, "authd.log");
+  const runDir = mkdtempSync(join(boxTempBase(), "authd-up-"));
+  const fifoPath = join(runDir, "cred.fifo");
+  try {
+    Bun.spawnSync(["mkfifo", fifoPath]);
+
+    const scriptPath = `${dirname(Bun.main)}/authd.ts`;
+    const env = {
+      ROOM_ID: bastionName(),
+      AUTHD_ISSUER_KEYS_PATH: issuerKeysPath(),
+      AUTHD_REFRESH_LIVE: "1",
+    };
+    const envAssign = Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
+    // nohup ignores SIGHUP so this survives the launching terminal closing;
+    // `disown`ing it from THIS shell (not the launching one) is redundant —
+    // nohup + backgrounding is what actually matters here. `< fifo` in the
+    // backgrounded job's own redirection blocks THAT job's open, not this
+    // sh -c, so `echo $!` returns immediately with the real pid.
+    const startCmd = `nohup env ${envAssign} ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} serve --port ${port} < ${JSON.stringify(fifoPath)} > ${JSON.stringify(logPath)} 2>&1 & disown; echo $!`;
+    const started = Bun.spawnSync(["sh", "-c", startCmd], { stdout: "pipe", stderr: "pipe" });
+    const pid = started.stdout.toString().trim();
+    if (started.exitCode !== 0 || !pid) {
+      console.error(`claude-box: authd-up — failed to start authd: ${started.stderr.toString().trim()}`);
+      return 1;
+    }
+
+    // Feed the credential through the fifo (read-write open avoids blocking
+    // on open order against authd's own read-only open in the command above).
+    const fifoFd = openSync(fifoPath, "r+");
+    writeSync(fifoFd, `${cred}\n`);
+    closeSync(fifoFd);
+
+    // Confirm it actually came up before declaring success.
+    let up = false;
+    for (let i = 0; i < 20; i++) {
+      if (await tcpReachable("127.0.0.1", port)) {
+        up = true;
+        break;
+      }
+      await Bun.sleep(250);
+    }
+    if (!up) {
+      console.error(`claude-box: authd-up — started (pid ${pid}) but never became reachable; check ${logPath}`);
+      return 1;
+    }
+    console.log(`claude-box: authd is up (pid ${pid}), listening on 127.0.0.1:${port}, logs: ${logPath}`);
+    console.log(`claude-box: grant-signing key: ${issuerKeysPath()} (keyId ${key.keyId})`);
+    return 0;
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<number> {
+  // TCP mode is automatic on macOS (podman there always runs through a VM;
+  // virtiofs can't share unix sockets across that boundary) — nothing to
+  // remember to set. An explicit DOORS_TCP (from the shell or the env this
+  // process was launched with) always wins; this only fills in the default
+  // when it's truly unset. isTcpMode() itself stays pure/env-driven so tests
+  // are unaffected by whatever OS actually runs them.
+  if (process.env.DOORS_TCP === undefined && process.platform === "darwin") {
+    process.env.DOORS_TCP = "1";
+  }
+
   const [first, ...rest] = Bun.argv.slice(2);
 
   switch (first) {
@@ -2850,6 +2987,8 @@ async function main(): Promise<number> {
       return cmdLogin(rest);
     case "check-in":
       return cmdCheckIn();
+    case "authd-up":
+      return cmdAuthdUp();
     case "auth-keys-path":
       // Prints the path to claude-box's own grant-signing public key (see
       // lib/box-keys.ts) — feed it to authd so it can verify grants a

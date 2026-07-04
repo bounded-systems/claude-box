@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://claude-box/schemas/remote-control-flags.schema.json",
+  "title": "RemoteControlFlags",
+  "description": "CLI flags for `claude remote-control` (server mode), as documented at code.claude.com/docs/en/remote-control. claude-box's --remote-serve uses this shape (see lib/remote-control-flags.ts's renderRemoteControlArgs) to build its entrypoint args — one definition instead of ad hoc argv pushes, so the flags actually passed can't silently drift from what's documented/decided. This describes claude's OWN CLI, not anything claude-box invents.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "--name: custom session title visible in the session list at claude.ai/code."
+    },
+    "sessionNamePrefix": {
+      "type": "string",
+      "description": "--remote-control-session-name-prefix: prefix for auto-generated session names when no explicit name is set (default: machine hostname). claude-box always sets this to \"claude-box\" so auto-generated names are identifiable, instead of the meaningless random per-container hostname."
+    },
+    "resume": {
+      "description": "Mutually exclusive with spawn/capacity/createSessionInDir (claude itself rejects the combination) — modeled as a separate shape below, not just a comment.",
+      "oneOf": [
+        { "type": "object", "properties": { "continue": { "const": true } }, "required": ["continue"], "additionalProperties": false },
+        { "type": "object", "properties": { "sessionId": { "type": "string" } }, "required": ["sessionId"], "additionalProperties": false }
+      ]
+    },
+    "spawn": {
+      "type": "string",
+      "enum": ["same-dir", "worktree", "session"],
+      "default": "same-dir",
+      "description": "same-dir: sessions share one cwd (can conflict). worktree: each on-demand session gets its own git worktree (requires a git repo) — claude-box's default, matching its own --repo-ephemeral isolation philosophy. session: single-session mode, rejects additional connections; cannot combine with capacity."
+    },
+    "capacity": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 32,
+      "description": "Max concurrent sessions. Not usable with spawn=session."
+    },
+    "createSessionInDir": {
+      "type": "boolean",
+      "default": true,
+      "description": "Pre-create one session in the current directory at startup."
+    },
+    "verbose": { "type": "boolean", "default": false },
+    "sandbox": {
+      "type": "boolean",
+      "default": false,
+      "description": "claude's OWN filesystem/network sandboxing. claude-box leaves this false (the default) — podman is already the real isolation boundary here; turning claude's own sandbox on top of that is redundant at best and could conflict with claude-box's own doors/mounts at worst."
+    }
+  },
+  "additionalProperties": false,
+  "not": {
+    "description": "spawn=session can never combine with an explicit capacity.",
+    "properties": { "spawn": { "const": "session" }, "capacity": {} },
+    "required": ["spawn", "capacity"]
+  }
+}

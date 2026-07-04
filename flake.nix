@@ -197,18 +197,29 @@
             # gone, the box has no tool that can establish push rights; writes go
             # only through the keeper door, and external READS go through the scout
             # door (see SCOUT.md), not an ambient CLI holding creds + network.
-            ripgrep
-            fd
+            # NB: ripgrep and fd are deliberately ABSENT. claude-code vendors its
+            # OWN per-platform ripgrep binary (vendor/ripgrep/<platform>/rg) for
+            # its Grep tool and does its own globbing for Glob — a separate
+            # system ripgrep/fd would be dead weight, not a dependency.
+            # gnused/gawk/less are ALSO absent — no evidence anything (this
+            # repo's own scripts, or a real ad-hoc Bash pipeline) needs them.
+            # gnugrep is a DIFFERENT case: it was cut in an earlier pass on
+            # the same "no evidence" reasoning, but that was wrong — plain
+            # `grep` in an ad-hoc shell pipe (e.g. `ls ... | grep -v ...`) is
+            # baseline shell vocabulary, not a search-tool alternative to
+            # claude-code's own Grep tool, and removing it broke a real,
+            # pre-existing test (tests/ocap.test.ts's ssh-agent-absence
+            # check pipes `ls` through `grep -v`) — confirmed live by booting
+            # the trimmed image. Restored.
+            gnugrep
             bun                # agent/runtime (also what prx is built with)
             openssh            # git-over-ssh transport (no keys shipped; agent not forwarded)
             socat              # netd-door relay (loopback proxy → /run/netd.sock)
             cacert             # TLS roots
-            coreutils
-            gnugrep
-            gnused
-            gawk
-            less
-            bashInteractive
+            coreutils          # mkdir -p/sleep/dirname/cat/echo — used by claude-box's own
+                               # generated boot scripts (see run()'s remote-serve/login scripts)
+            bashInteractive    # provides /bin/sh itself — every guest entrypoint execs
+                               # `--entrypoint sh`; this is the interpreter, not an extra
           ];
 
           # buildEnv gives a single /bin (+ /etc, /share) tree so PATH=/bin works.
@@ -261,13 +272,54 @@
           recordAuthoredPath = "/opt/gitai/record-authored.ts";
           gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
           recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
+          credentialGuardPath = "/opt/security/credential-guard.ts";
+          credentialGuardCmd = "bun ${credentialGuardPath}";
           cmdHook = command: { type = "command"; inherit command; };
+          # permissions: a hard deny on the leased credential file. The
+          # classifier already refuses credential extraction (see #193 on
+          # claude-box, verified live 2026-07-04), but that's a soft,
+          # prompt-dependent guardrail with no claude-box-side backstop if it
+          # ever changes upstream — this is that backstop.
+          #
+          # NB: there is NO defaultMode value that means "deny anything not
+          # explicitly allow-listed" — verified against the actual installed
+          # claude-code binary's own embedded validator strings (this shipped
+          # version's real defaultMode enum is default/acceptEdits/plan/
+          # bypassPermissions — an overall interaction mode, not a per-tool
+          # allow/deny default). An earlier attempt set defaultMode="deny",
+          # which isn't a valid enum member; managed-settings validation is
+          # strict (unlike user-settings), so the ENTIRE permissions object —
+          # including this deny rule — was silently discarded ("Failed schema
+          # validation. This field was ignored"), confirmed live by booting
+          # the built image. Do not reintroduce defaultMode here without
+          # re-verifying against the actual running binary first — the public
+          # docs (or a summary of them) are not reliable ground truth for
+          # this specific enum.
+          # allowedMcpServers = [] is a full MCP lockdown: no MCP server loads
+          # by default (managed, so user/project .mcp.json can't override it)
+          # until a future managed entry explicitly opts one in.
+          credentialsPath = "${home}/.config/claude/.credentials.json";
           gitAiManagedSettings = (pkgs.formats.json { }).generate "managed-settings.json" {
             disableClaudeAiConnectors = true;
             disableBundledSkills = true;
             strictPluginOnlyCustomization = [ "skills" ];
+            allowedMcpServers = [ ];
+            permissions = {
+              deny = [
+                "Read(${credentialsPath})"
+                "Bash(cat ${credentialsPath}*)"
+              ];
+            };
             hooks = {
-              PreToolUse = [{ matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }];
+              PreToolUse = [
+                { matcher = "Edit|Write"; hooks = [ (cmdHook gitAiHookCmd) ]; }
+                # credential-guard: a second, dynamic layer alongside the
+                # static permissions.deny above — inspects the actual
+                # command/path string, catching variants a fixed pattern
+                # misses (see scripts/credential-guard.ts). Deliberately no
+                # `|| true` — this hook's exit code IS the block signal.
+                { matcher = "Bash|Read"; hooks = [ (cmdHook credentialGuardCmd) ]; }
+              ];
               PostToolUse = [{
                 matcher = "Edit|Write";
                 hooks = [ (cmdHook gitAiHookCmd) (cmdHook recordAuthoredCmd) ];
@@ -333,6 +385,9 @@
               # PostToolUse hook above).
               mkdir -p opt/gitai
               cp ${./scripts/record-authored.ts} opt/gitai/record-authored.ts
+              # The credential-guard PreToolUse hook script (see gitAiManagedSettings).
+              mkdir -p opt/security
+              cp ${./scripts/credential-guard.ts} opt/security/credential-guard.ts
               # git-ai config: baked at the user home so git-ai picks it up on
               # first run without any interactive setup. git_path points to the
               # nix-managed git binary in /bin; telemetry and version-check noise

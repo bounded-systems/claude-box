@@ -42,6 +42,11 @@ import {
 } from "./guest-room/mod.ts";
 import { DEFAULT_ALLOW } from "./netd/netd.ts";
 import { loadOrCreateBoxKey, issuerKeysPath } from "./lib/box-keys.ts";
+import {
+  type RemoteControlFlags,
+  CLAUDE_BOX_DEFAULT_FLAGS,
+  renderRemoteControlArgs,
+} from "./lib/remote-control-flags.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
 
@@ -943,17 +948,21 @@ export function rcEgressAllow(launch: Launch): string[] {
 /** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
  *  entrypoint is `claude`, so prepending these args boots it as
  *  `claude remote-control` — a headless RC server the app attaches to,
- *  instead of an interactive session. Sets `--remote-control-session-name-prefix`
- *  to stable "claude-box" so spawned sessions are clearly tied to this bastion
- *  and appear as distinct named sessions. Without it, spawned sessions are
- *  prefixed with the CONTAINER's own hostname (a random hex podman assigns
- *  each run — e.g. "de7792ab763e"), which is meaningless and changes every
- *  launch. Empty for any non-serve launch, so the interactive entrypoint is
+ *  instead of an interactive session. Flags come from
+ *  lib/remote-control-flags.ts (see schemas/remote-control-flags.schema.json
+ *  for the full rationale) — one definition instead of ad hoc argv pushes.
+ *  `--spawn worktree` needs an actual git repo, and --remote-serve can run
+ *  with none mounted at all, so it only applies when `launch.repo` is set;
+ *  otherwise same-dir (claude's own default) is the only option that works.
+ *  Empty for any non-serve launch, so the interactive entrypoint is
  *  byte-for-byte unchanged. */
 function remoteServeArgs(launch: Launch): string[] {
-  return launch.remoteServe
-    ? ["remote-control", "--remote-control-session-name-prefix", "claude-box"]
-    : [];
+  if (!launch.remoteServe) return [];
+  const flags: RemoteControlFlags = {
+    ...CLAUDE_BOX_DEFAULT_FLAGS,
+    spawn: launch.repo ? CLAUDE_BOX_DEFAULT_FLAGS.spawn : "same-dir",
+  };
+  return ["remote-control", ...renderRemoteControlArgs(flags)];
 }
 
 /** Mint a signed grant for the "auth" door using claude-box's own local

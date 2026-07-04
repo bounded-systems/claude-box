@@ -197,18 +197,23 @@
             # gone, the box has no tool that can establish push rights; writes go
             # only through the keeper door, and external READS go through the scout
             # door (see SCOUT.md), not an ambient CLI holding creds + network.
-            ripgrep
-            fd
+            # NB: ripgrep and fd are deliberately ABSENT. claude-code vendors its
+            # OWN per-platform ripgrep binary (vendor/ripgrep/<platform>/rg) for
+            # its Grep tool and does its own globbing for Glob — a separate
+            # system ripgrep/fd would be dead weight, not a dependency. Likewise
+            # gnugrep/gnused/gawk/less: nothing in this repo's own generated
+            # boot scripts (grep for `mkdir -p`/`sleep`/`dirname`/`cat`/`echo`
+            # below) shells out to any of them — "the agent might want it in an
+            # ad hoc pipeline" is exactly the unbounded justification this list
+            # is meant to reject.
             bun                # agent/runtime (also what prx is built with)
             openssh            # git-over-ssh transport (no keys shipped; agent not forwarded)
             socat              # netd-door relay (loopback proxy → /run/netd.sock)
             cacert             # TLS roots
-            coreutils
-            gnugrep
-            gnused
-            gawk
-            less
-            bashInteractive
+            coreutils          # mkdir -p/sleep/dirname/cat/echo — used by claude-box's own
+                               # generated boot scripts (see run()'s remote-serve/login scripts)
+            bashInteractive    # provides /bin/sh itself — every guest entrypoint execs
+                               # `--entrypoint sh`; this is the interpreter, not an extra
           ];
 
           # buildEnv gives a single /bin (+ /etc, /share) tree so PATH=/bin works.

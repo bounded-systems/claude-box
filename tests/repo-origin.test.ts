@@ -41,7 +41,7 @@ test("rejects non-URLs / shell-injection attempts (fail closed)", () => {
 });
 
 test("manifest surface reports the origin (json + in-box rulebook)", () => {
-  const m = buildManifest("personal", planLaunch(["--repo-origin", URL, "--net"], ENV), ENV);
+  const m = buildManifest(planLaunch(["--repo-origin", URL, "--net"], ENV), ENV);
   expect(JSON.parse(capabilityJson(m)).granted.repoOrigin).toBe(URL);
   const prompt = capabilityPrompt(m);
   expect(prompt).toContain("FRESH CLONE FROM ORIGIN");
@@ -58,7 +58,7 @@ test("originHostOf derives the egress host for the scoped door", () => {
 });
 
 test("no --repo-origin ⇒ surface reports null (not an origin-clone launch)", () => {
-  const m = buildManifest("personal", planLaunch(["--repo", "."], ENV), ENV);
+  const m = buildManifest(planLaunch(["--repo", "."], ENV), ENV);
   expect(JSON.parse(capabilityJson(m)).granted.repoOrigin).toBeNull();
   expect(capabilityPrompt(m)).not.toContain("FRESH CLONE FROM ORIGIN");
 });

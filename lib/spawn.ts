@@ -24,8 +24,6 @@ const connect = Bun.connect;
 
 /** Options for spawning a sub-box via launcherd. */
 export type SpawnOptions = {
-  /** Account name (default: "personal") */
-  account?: string;
   /** Room preset (e.g., "dev", "readonly") */
   room?: string;
   /** Repo path to mount (host path) */
@@ -47,7 +45,6 @@ export type SpawnResult = {
   launchId: string;
   pid: number;
   manifest: {
-    account: string;
     repo?: string;
     doors: string[];
     denied: string[];
@@ -81,7 +78,6 @@ export type LauncherdStatus = {
 /** Information about a running or exited box. */
 export type BoxInfo = {
   launchId: string;
-  account: string;
   pid: number;
   startedAt: string;
   doors: string[];
@@ -216,7 +212,6 @@ export async function spawn(options: SpawnOptions = {}): Promise<SpawnResult> {
   const currentDepth = getCurrentDepth();
 
   const params: Record<string, unknown> = {
-    account: options.account ?? "personal",
     room: options.room,
     repo: options.repo,
     repoRw: options.repoRw ?? false,
@@ -235,8 +230,8 @@ export async function status(): Promise<LauncherdStatus> {
 }
 
 /** List running boxes. */
-export async function list(account?: string): Promise<{ launches: BoxInfo[] }> {
-  return request<{ launches: BoxInfo[] }>("list", account ? { account } : {});
+export async function list(): Promise<{ launches: BoxInfo[] }> {
+  return request<{ launches: BoxInfo[] }>("list");
 }
 
 /** Kill a running box. */
@@ -288,9 +283,9 @@ async function main(): Promise<number> {
       if (result.launches.length === 0) {
         console.log("no running boxes");
       } else {
-        console.log("LAUNCH ID                    ACCOUNT     DEPTH  STATUS");
+        console.log("LAUNCH ID                    DEPTH  STATUS");
         for (const l of result.launches) {
-          console.log(`${l.launchId.padEnd(28)} ${l.account.padEnd(11)} ${String(l.depth).padEnd(6)} ${l.status}`);
+          console.log(`${l.launchId.padEnd(28)} ${String(l.depth).padEnd(6)} ${l.status}`);
         }
       }
       return 0;

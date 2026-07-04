@@ -18,7 +18,6 @@ import {
 describe("lib/spawn types", () => {
   test("SpawnOptions has expected shape", () => {
     const opts: SpawnOptions = {
-      account: "personal",
       room: "dev",
       repo: "/work",
       repoRw: false,
@@ -28,7 +27,6 @@ describe("lib/spawn types", () => {
       depth: 1,
     };
 
-    expect(opts.account).toBe("personal");
     expect(opts.room).toBe("dev");
     expect(opts.doors).toEqual(["keeper", "net"]);
   });
@@ -38,7 +36,6 @@ describe("lib/spawn types", () => {
       launchId: "box-123",
       pid: 12345,
       manifest: {
-        account: "personal",
         repo: "/work",
         doors: ["keeper"],
         denied: ["beads"],
@@ -56,7 +53,6 @@ describe("lib/spawn types", () => {
       launchId: "box-456",
       pid: 67890,
       manifest: {
-        account: "test",
         doors: [],
         denied: [],
         netOpen: false,
@@ -104,7 +100,6 @@ describe("lib/spawn types", () => {
   test("BoxInfo has expected shape", () => {
     const box: BoxInfo = {
       launchId: "box-test",
-      account: "personal",
       pid: 1234,
       startedAt: "2024-01-01T00:00:00Z",
       doors: ["keeper"],
@@ -131,12 +126,12 @@ describe("getCurrentDepth", () => {
   });
 
   test("returns 0 when the manifest omits depth (back-compat)", () => {
-    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ account: "personal" });
+    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ guest: "claude" });
     expect(getCurrentDepth()).toBe(0);
   });
 
   test("reads the real depth emitted by capabilityJson", () => {
-    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ account: "personal", depth: 2 });
+    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ guest: "claude", depth: 2 });
     expect(getCurrentDepth()).toBe(2);
   });
 
@@ -173,7 +168,7 @@ describe("spawn depth accumulation (nested spawns)", () => {
             const resp = {
               id: req.id,
               ok: true,
-              result: { launchId: "box-test", pid: 4242, manifest: { account: "personal", doors: [], denied: [], netOpen: false } },
+              result: { launchId: "box-test", pid: 4242, manifest: { doors: [], denied: [], netOpen: false } },
             };
             sock.write(JSON.stringify(resp) + "\n");
             sock.end();
@@ -189,9 +184,9 @@ describe("spawn depth accumulation (nested spawns)", () => {
     const received = mockLauncherd(sockPath);
     process.env.LAUNCHERD_SOCK = sockPath;
     // Simulate the in-box manifest: this box was launched at depth 2.
-    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ account: "personal", depth: 2 });
+    process.env.CLAUDE_BOX_CAPABILITIES = JSON.stringify({ guest: "claude", depth: 2 });
 
-    await spawn({ account: "personal" });
+    await spawn({});
     const params = await received;
     expect(params.depth).toBe(3); // 2 (current) + 1, NOT 0 + 1
   });
@@ -202,7 +197,7 @@ describe("spawn depth accumulation (nested spawns)", () => {
     process.env.LAUNCHERD_SOCK = sockPath;
     delete process.env.CLAUDE_BOX_CAPABILITIES;
 
-    await spawn({ account: "personal" });
+    await spawn({});
     const params = await received;
     expect(params.depth).toBe(1);
   });

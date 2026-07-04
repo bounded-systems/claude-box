@@ -35,7 +35,7 @@ test("preset door: --scout resolves to the canonical scoutd read door", () => {
 });
 
 test("--scout grants the scout read door (content, not credential)", () => {
-  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--scout"], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).toContain("scout");
   // a box can read external artifacts AND still have no network (scout ≠ netd)
   expect(JSON.parse(capabilityJson(m)).network).toBe("none");
@@ -81,7 +81,7 @@ test("--room dev expands to its door bundle (keeper + net + scout)", () => {
 });
 
 test("--room read is reads-only: scout door, still no network", () => {
-  const m = buildManifest("work", planLaunch(["--room", "read"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--room", "read"], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).toEqual(["scout"]);
   expect(JSON.parse(capabilityJson(m)).network).toBe("none"); // scout ≠ a NIC
 });
@@ -94,13 +94,13 @@ test("flags compose over a room (add a door, dedup the overlap)", () => {
 
 // ── spawn depth: threaded through the manifest so the maxDepth ceiling holds ──
 test("capabilityJson defaults depth to 0 for a root launch", () => {
-  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--scout"], EMPTY), EMPTY);
   expect(m.depth).toBe(0);
   expect(JSON.parse(capabilityJson(m)).depth).toBe(0);
 });
 
 test("capabilityJson emits the launch depth (so getCurrentDepth reads the real value)", () => {
-  const m = buildManifest("work", planLaunch(["--scout"], EMPTY), EMPTY, 2);
+  const m = buildManifest(planLaunch(["--scout"], EMPTY), EMPTY, 2);
   expect(m.depth).toBe(2);
   expect(JSON.parse(capabilityJson(m)).depth).toBe(2);
 });
@@ -118,13 +118,13 @@ test("an unknown room is refused (fail closed, not a silent empty launch)", () =
 
 // ── --repo is safe-by-default: .git read-only (writes via keeper); --repo-rw escapes ──
 test("--repo defaults to read-only .git; --repo-rw is the unsafe escape", () => {
-  const ro = buildManifest("work", planLaunch(["--repo", "."], EMPTY), EMPTY);
+  const ro = buildManifest(planLaunch(["--repo", "."], EMPTY), EMPTY);
   expect(ro.repo).toBe(".");
   expect(ro.repoRw).toBe(false);
   expect(JSON.parse(capabilityJson(ro)).granted.repoGit).toBe("ro");
   expect(capabilityPrompt(ro)).toMatch(/\.git is READ-ONLY/);
 
-  const rw = buildManifest("work", planLaunch(["--repo-rw", "."], EMPTY), EMPTY);
+  const rw = buildManifest(planLaunch(["--repo-rw", "."], EMPTY), EMPTY);
   expect(rw.repo).toBe(".");
   expect(rw.repoRw).toBe(true);
   expect(JSON.parse(capabilityJson(rw)).granted.repoGit).toBe("rw");
@@ -132,13 +132,13 @@ test("--repo defaults to read-only .git; --repo-rw is the unsafe escape", () => 
 
 // ── the honest surface: granted AND denied, from the actual grants ──
 test("manifest is honest about what is denied, not just granted", () => {
-  const m = buildManifest("work", planLaunch(["--keeper"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--keeper"], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).toEqual(["keeper"]);
   expect(m.denied.map((d) => d.name)).toContain("beads"); // not granted ⇒ explicitly denied
 });
 
 test("a no-grant box still names its denials (knows what it cannot do)", () => {
-  const m = buildManifest("personal", planLaunch([], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
   expect(m.denied.map((d) => d.name).sort()).toEqual(["auth", "beads", "keeper", "launcher", "net", "scout"]);
 });
@@ -152,17 +152,17 @@ test("preset door: --net resolves to the canonical netd door", () => {
 });
 
 test("--net grants the net door; default posture is no network", () => {
-  const granted = buildManifest("work", planLaunch(["--net"], EMPTY), EMPTY);
+  const granted = buildManifest(planLaunch(["--net"], EMPTY), EMPTY);
   expect(granted.doors.map((d) => d.name)).toContain("net");
   expect(JSON.parse(capabilityJson(granted)).network).toBe("policed");
 
-  const none = buildManifest("work", planLaunch([], EMPTY), EMPTY);
+  const none = buildManifest(planLaunch([], EMPTY), EMPTY);
   expect(JSON.parse(capabilityJson(none)).network).toBe("none");
   expect(none.denied.map((d) => d.name)).toContain("net"); // honest: no network
 });
 
 test("--net-open opens egress WITHOUT a door, and the manifest says so", () => {
-  const m = buildManifest("work", planLaunch(["--net-open"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--net-open"], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).not.toContain("net"); // no door granted
   expect(m.denied.map((d) => d.name)).not.toContain("net"); // but NOT denied — network is open
   expect(JSON.parse(capabilityJson(m)).network).toBe("open");
@@ -170,7 +170,7 @@ test("--net-open opens egress WITHOUT a door, and the manifest says so", () => {
 });
 
 test("injected prompt states authority is EXACTLY the granted set", () => {
-  const prompt = capabilityPrompt(buildManifest("work", planLaunch(["--keeper"], EMPTY), EMPTY));
+  const prompt = capabilityPrompt(buildManifest(planLaunch(["--keeper"], EMPTY), EMPTY));
   expect(prompt).toContain("EXACTLY");
   expect(prompt).toContain("GRANTED:");
   expect(prompt).toMatch(/keeper:.*keeperd/); // how to translate this symbol
@@ -178,7 +178,7 @@ test("injected prompt states authority is EXACTLY the granted set", () => {
 });
 
 test("machine-readable surface (for prx tool-gating) reflects the grants", () => {
-  const json = JSON.parse(capabilityJson(buildManifest("work", planLaunch(["--keeper", "--repo", "."], EMPTY), EMPTY)));
+  const json = JSON.parse(capabilityJson(buildManifest(planLaunch(["--keeper", "--repo", "."], EMPTY), EMPTY)));
   expect(json.workcell).toBe("claude-box");
   expect(json.granted.repo).toBe(".");
   expect(json.granted.doors[0]).toMatchObject({ name: "keeper", socket: "/run/doors/keeperd.sock", env: "KEEPERD_SOCK" });
@@ -194,14 +194,14 @@ test("preset door: --launcher resolves to the canonical launcherd door", () => {
 });
 
 test("--launcher grants spawn authority and is reflected in manifest", () => {
-  const m = buildManifest("work", planLaunch(["--launcher"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--launcher"], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).toContain("launcher");
   expect(m.denied.map((d) => d.name)).not.toContain("launcher");
   expect(capabilityPrompt(m)).toMatch(/launcher:.*spawn sub-boxes/i);
 });
 
 test("without --launcher, spawn is explicitly denied", () => {
-  const m = buildManifest("work", planLaunch([], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch([], EMPTY), EMPTY);
   expect(m.doors.map((d) => d.name)).not.toContain("launcher");
   expect(m.denied.map((d) => d.name)).toContain("launcher");
   expect(capabilityPrompt(m)).toMatch(/launcher:.*No spawn authority/i);
@@ -216,7 +216,7 @@ test("--repo-ephemeral sets the repoEphemeral flag", () => {
 });
 
 test("--repo-ephemeral manifest reflects ephemeral mode", () => {
-  const m = buildManifest("work", planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY);
   expect(m.repo).toBe(".");
   expect(m.repoEphemeral).toBe(true);
   expect(m.repoRw).toBe(false);
@@ -226,7 +226,7 @@ test("--repo-ephemeral manifest reflects ephemeral mode", () => {
 });
 
 test("--repo-ephemeral prompt describes isolated copy", () => {
-  const prompt = capabilityPrompt(buildManifest("work", planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY));
+  const prompt = capabilityPrompt(buildManifest(planLaunch(["--repo-ephemeral", "."], EMPTY), EMPTY));
   expect(prompt).toMatch(/EPHEMERAL worktree/);
   expect(prompt).toMatch(/isolated copy/);
   expect(prompt).toMatch(/\.git is READ-ONLY/);
@@ -236,7 +236,7 @@ test("regular --repo does not set repoEphemeral", () => {
   const l = planLaunch(["--repo", "."], EMPTY);
   expect(l.repo).toBe(".");
   expect(l.repoEphemeral).toBe(false);
-  const m = buildManifest("work", l, EMPTY);
+  const m = buildManifest(l, EMPTY);
   expect(JSON.parse(capabilityJson(m)).granted.repoEphemeral).toBe(false);
 });
 
@@ -262,19 +262,19 @@ test("--door with caveats AND socket parses NAME:CAVEAT@SOCK syntax", () => {
 });
 
 test("caveats appear in the manifest's machine-readable output", () => {
-  const m = buildManifest("work", planLaunch(["--door", "net:host=github.com:host=.npmjs.org"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--door", "net:host=github.com:host=.npmjs.org"], EMPTY), EMPTY);
   const json = JSON.parse(capabilityJson(m));
   const net = json.granted.doors.find((d: { name: string }) => d.name === "net");
   expect(net.caveats).toEqual(["host=github.com", "host=.npmjs.org"]);
 });
 
 test("caveats appear in the capability prompt as RESTRICTED", () => {
-  const prompt = capabilityPrompt(buildManifest("work", planLaunch(["--door", "net:host=github.com"], EMPTY), EMPTY));
+  const prompt = capabilityPrompt(buildManifest(planLaunch(["--door", "net:host=github.com"], EMPTY), EMPTY));
   expect(prompt).toMatch(/RESTRICTED.*host=github\.com/);
 });
 
 test("uncaveated door has empty caveats array in json", () => {
-  const m = buildManifest("work", planLaunch(["--net"], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--net"], EMPTY), EMPTY);
   const json = JSON.parse(capabilityJson(m));
   const net = json.granted.doors.find((d: { name: string }) => d.name === "net");
   expect(net.caveats).toEqual([]);
@@ -316,7 +316,7 @@ test("explicit door flags override guest's defaultRoom", () => {
 });
 
 test("manifest includes guest in json", () => {
-  const m = buildManifest("work", planLaunch(["--guest", "bun", "--repo", "."], EMPTY), EMPTY);
+  const m = buildManifest(planLaunch(["--guest", "bun", "--repo", "."], EMPTY), EMPTY);
   const json = JSON.parse(capabilityJson(m));
   expect(json.guest).toBe("bun");
 });

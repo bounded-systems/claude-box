@@ -3,7 +3,7 @@
  * launcher. They assert the opt-in profile relaxes exactly two box defaults, and
  * ONLY for this launch:
  *   1. omits the inference-only CLAUDE_CODE_OAUTH_TOKEN (so a full-scope in-box
- *      `claude auth login`, persisted in the account volume, drives Remote
+ *      `claude auth login`, persisted in the config volume, drives Remote
  *      Control — RC rejects inference-only tokens, and the env token would
  *      otherwise win per the auth precedence table), and
  *   2. unsets the image-baked CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC
@@ -109,7 +109,7 @@ describe("authEnvArgs: default posture is unchanged", () => {
 
 describe("--remote-control: manifest still reflects policed egress", () => {
   test("network posture is policed (net door), not open", () => {
-    const m = buildManifest("personal", planLaunch(["--remote-control"], EMPTY), EMPTY);
+    const m = buildManifest(planLaunch(["--remote-control"], EMPTY), EMPTY);
     expect(m.doors.map((d) => d.name)).toContain("net");
     expect(m.netOpen).toBe(false);
   });
@@ -196,31 +196,24 @@ describe("--remote-serve: shares the remote-control auth posture", () => {
 });
 
 describe("remoteServeArgs: the server-mode entrypoint prefix", () => {
-  test("boots `claude remote-control --name <account>` for a serve launch", () => {
+  test("boots `claude remote-control` for a serve launch", () => {
     const l = planLaunch(["--remote-serve"], EMPTY);
-    expect(remoteServeArgs(l, "work")).toEqual([
+    expect(remoteServeArgs(l)).toEqual([
       "remote-control",
-      "--name",
-      "work",
       "--remote-control-session-name-prefix",
-      "claude-box-work",
+      "claude-box",
     ]);
   });
 
   test("is empty for a non-serve launch (interactive entrypoint unchanged)", () => {
-    expect(remoteServeArgs(planLaunch([], EMPTY), "personal")).toEqual([]);
-    expect(remoteServeArgs(planLaunch(["--remote-control"], EMPTY), "personal")).toEqual([]);
+    expect(remoteServeArgs(planLaunch([], EMPTY))).toEqual([]);
+    expect(remoteServeArgs(planLaunch(["--remote-control"], EMPTY))).toEqual([]);
   });
 });
 
-describe("bastionName: the one-bastion-per-account guard", () => {
-  test("is a stable, deterministic name per account (not podman's random default)", () => {
-    expect(bastionName("personal")).toBe("claude-box-personal-remote-serve");
-    expect(bastionName("work")).toBe("claude-box-work-remote-serve");
-  });
-
-  test("different accounts never collide", () => {
-    expect(bastionName("personal")).not.toBe(bastionName("work"));
+describe("bastionName: the one-persistent-bastion-per-machine guard", () => {
+  test("is a stable, fixed name (not podman's random default)", () => {
+    expect(bastionName()).toBe("claude-box-remote-serve");
   });
 });
 
@@ -228,8 +221,8 @@ describe("bastionAlreadyRunning: real podman liveness (skips without podman)", (
   const PODMAN_READY = Bun.spawnSync(["sh", "-c", "command -v podman >/dev/null 2>&1"]).exitCode === 0;
   const podmanTest = test.skipIf(!PODMAN_READY);
 
-  podmanTest("returns undefined when no bastion is running for this account", () => {
-    // A nonsense account name that can never match a real running container.
-    expect(bastionAlreadyRunning("no-such-account-ever")).toBeUndefined();
+  podmanTest("returns undefined or the running bastion's name", () => {
+    const result = bastionAlreadyRunning();
+    expect(result === undefined || typeof result === "string").toBe(true);
   });
 });

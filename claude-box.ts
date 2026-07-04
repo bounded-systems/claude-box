@@ -1,24 +1,21 @@
 #!/usr/bin/env bun
 /**
- * claude-box [account] [claude args…] — a pinned, isolated Claude, one account per volume.
+ * claude-box [claude args…] — a pinned, isolated Claude runtime.
  *
- * One image (localhost/claude-personal:dev) + one podman volume per account
- * (claude-<account>-config) holding THAT account's auth/history/projects. The
- * volume is the isolation boundary; `:U` keeps it writable by the in-image
- * `claude` user so `/login` persists. First run of a new account → `/login`
- * once, and it sticks in that account's volume.
+ * One image (localhost/claude-personal:dev) + one podman volume (claude-config)
+ * holding auth/history/projects. The volume is the isolation boundary; `:U`
+ * keeps it writable by the in-image `claude` user so `/login` persists.
+ * First run → `/login` once, and it sticks in the volume.
  *
- *   claude-box                  personal account
- *   claude-box work             'work' account — own auth/history
- *   claude-box work --resume    flags pass through to claude
- *   claude-box ls               list accounts (+ descriptions)
- *   claude-box name work "Acme, Inc. — billing@acme"   label an account
+ *   claude-box                  claude runtime
+ *   claude-box --resume         flags pass through to claude
+ *   claude-box --repo .         mount the worktree at /work
  *
  * Built from prx.git/claude-runtime:nix/claude-container (ADR
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { existsSync, mkdirSync, statSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, rmSync, mkdtempSync, readFileSync, openSync, closeSync } from "node:fs";
 import { dirname, resolve, relative, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
@@ -30,6 +27,7 @@ import {
   type DoorCatalog,
   type RoomCatalog,
   type DoorTransport,
+  type SignedGrant,
   resolveDoor as resolveDoorIn,
   expandRoom,
   deniedDoors,
@@ -40,11 +38,12 @@ import {
   unix,
   tcp,
   attenuate,
+  signGrant,
 } from "./guest-room/mod.ts";
 import { DEFAULT_ALLOW } from "./netd/netd.ts";
+import { loadOrCreateBoxKey, issuerKeysPath } from "./lib/box-keys.ts";
 
 const IMAGE = "localhost/claude-personal:dev";
-const VOLUME_RE = /^claude-(.*)-config$/;
 
 // ── TCP mode ports (for macOS ↔ podman machine) ──────────────────────────────
 // When daemons run on the macOS host with --port, containers reach them via
@@ -66,7 +65,7 @@ type GuestPreset = {
   image: string;
   entrypoint?: string[];  // override image entrypoint
   defaultRoom?: string;   // room to apply if none specified
-  needsConfig?: boolean;  // mount the account's config volume (default: true for claude)
+  needsConfig?: boolean;  // mount the config volume (default: true for claude)
 };
 
 /** claude-box's guest catalog. Tool guests default to the "tool" room (read-only
@@ -104,8 +103,7 @@ function knownGuests(): Record<string, GuestPreset> {
     },
   };
 }
-const META_PATH = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/claude-box/accounts.json`;
-// The in-box config dir = the account volume's mount point, where claude keeps
+// The in-box config dir = the volume's mount point, where claude keeps
 // auth/settings/history (incl. `claude auth login`). It MUST equal the image's
 // CLAUDE_CONFIG_DIR / $XDG_CONFIG_HOME/claude (flake.nix). One path, both sides;
 // tests/xdg.test.ts pins this against flake.nix so they can't drift.
@@ -114,8 +112,11 @@ const BOX_CONFIG_DIR = "/home/claude/.config/claude";
 // workspace-trust acceptance for a home-directory workspace (it re-prompts
 // "Workspace not trusted" every launch — confirmed live). This dir is
 // ephemeral (container rootfs), recreated each launch; trust is pre-seeded
-// for it in .claude.json (the persistent config volume) instead.
-const RC_WORKSPACE = "/home/claude/workspace";
+// for it in .claude.json (the persistent config volume) instead. Named
+// "claude-box" (not "workspace") because the pre-created RC session's
+// display name is this directory's basename — a generic "workspace" name
+// was indistinguishable from any other tool's bastion in the RC list.
+const RC_WORKSPACE = "/home/claude/claude-box";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -131,7 +132,7 @@ const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
 // --net-open. [Spike S1] enumerates any further hosts via netd's DENY log.
 //
 // claude.ai + platform.claude.com added 2026-07-03: the `/login` OAuth flow
-// (needed the FIRST time an account does a full-scope `claude auth login`
+// (needed the FIRST time the box does a full-scope `claude auth login`
 // for RC, since RC rejects the inference-only setup-token — see
 // authEnvArgs) hits both hosts, not just *.anthropic.com — both are on
 // Anthropic's own documented required-domains list (code.claude.com/docs/en/
@@ -150,17 +151,6 @@ function isTcpMode(env: Env): boolean {
 }
 
 type Env = Record<string, string | undefined>;
-
-/** Account names land in a volume name and a `-v` mount spec, so a stray `:` or
- *  `/` could malform or redirect the mount. Keep them boring. */
-function assertAccount(account: string): void {
-  if (!/^[A-Za-z0-9._-]+$/.test(account)) {
-    console.error(
-      `claude-box: invalid account name ${JSON.stringify(account)} — use [A-Za-z0-9._-]`,
-    );
-    process.exit(2);
-  }
-}
 
 /** Get the runtime directory for door sockets, auto-creating on macOS. */
 function getRunDir(env: Env): string {
@@ -470,13 +460,12 @@ function resolveDoor(name: string, host: string | undefined, env: Env = process.
   return base;
 }
 
-const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, isolated workloads
+const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated workloads
 
   # Claude (default guest)
-  claude-box                  personal account, claude guest
-  claude-box work             'work' account (own auth/history)
-  claude-box work --resume    flags pass through to claude
-  claude-box work --repo .    mount the worktree at /work (.git read-only; commits via --keeper)
+  claude-box                  claude runtime
+  claude-box --resume         flags pass through to claude
+  claude-box --repo .         mount the worktree at /work (.git read-only; commits via --keeper)
 
   # Tool guests (sandboxed tool execution)
   claude-box --guest bun --repo . -- test           run bun test in a box
@@ -501,10 +490,8 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
                       (implies --net; uses a full-scope in-box 'claude auth login'
                       instead of the inference-only token; first run: log in once)
   --remote-serve      boot straight into RC SERVER mode: entrypoint becomes
-                      'claude remote-control --name <account>', so the box is a
-                      headless RC server (no manual /remote-control). Same posture
-                      as --remote-control. Run one per ACCOUNT for concurrent
-                      named sessions (cbox personal --remote-serve; cbox work …)
+                      'claude remote-control', so the box is a headless RC server
+                      (no manual /remote-control). Same posture as --remote-control.
   --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
@@ -514,14 +501,17 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   --door NAME[:CAV...][@SOCK]  attach door with optional caveats
 
   # Management
-  claude-box login [a] --scope full|inference
-                              auth-only box for account <a> (no repo): run the
-                              login flow, persist to the account volume, exit.
-                              full = full-scope 'claude auth login' (needed for
-                              Remote Control); inference = the inference-only
-                              setup-token posture. --scope is required.
-  claude-box ls               list accounts
-  claude-box name <a> <desc>  label an account
+  claude-box login            auth-only box (no repo): run the login flow,
+                              persist to the config volume, exit. Always a
+                              full-scope 'claude auth login' — the one scope
+                              claude-box runs, since it covers both plain
+                              inference and Remote Control.
+  claude-box check-in         throwaway login for authd's ephemeral store —
+                              nothing persists; prints the credential JSON
+                              to stdout for piping into 'authd serve'.
+  claude-box auth-keys-path   path to claude-box's grant-signing public key —
+                              feed to authd: AUTHD_ISSUER_KEYS_PATH=$(claude-box
+                              auth-keys-path) authd serve --port 3003
   claude-box doors init       one-shot setup (build images, install units)
   claude-box doors status     show door service status
   claude-box status           show launcherd status
@@ -529,57 +519,6 @@ const HELP = `claude-box [account] [flags…] [-- guest-args…] — pinned, iso
   claude-box doctor           flag boxes pinned to a stale image (after a rebuild)
   claude-box kill <id>        terminate a running box`;
 
-type Meta = Record<string, { desc?: string }>;
-
-async function loadMeta(): Promise<Meta> {
-  try {
-    return (await Bun.file(META_PATH).json()) as Meta;
-  } catch {
-    return {};
-  }
-}
-
-async function saveMeta(meta: Meta): Promise<void> {
-  await Bun.write(META_PATH, `${JSON.stringify(meta, null, 2)}\n`);
-}
-
-/** Accounts that have a podman volume (claude-<name>-config). */
-async function volumeAccounts(): Promise<string[]> {
-  const proc = Bun.spawn(["podman", "volume", "ls", "--format", "{{.Name}}"], {
-    stdout: "pipe",
-    stderr: "inherit",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out
-    .split("\n")
-    .map((l) => l.match(VOLUME_RE)?.[1])
-    .filter((x): x is string => Boolean(x));
-}
-
-async function listAccounts(): Promise<number> {
-  const meta = await loadMeta();
-  const names = [
-    ...new Set([...(await volumeAccounts()), ...Object.keys(meta)]),
-  ].sort();
-  for (const name of names) {
-    const desc = meta[name]?.desc;
-    console.log(desc ? `${name}  —  ${desc}` : name);
-  }
-  return 0;
-}
-
-async function setName(account: string, desc: string): Promise<number> {
-  if (!account) {
-    console.error("usage: claude-box name <account> <description…>");
-    return 1;
-  }
-  const meta = await loadMeta();
-  meta[account] = { ...meta[account], desc };
-  await saveMeta(meta);
-  console.log(`${account}  —  ${desc}`);
-  return 0;
-}
 
 /** The real git dir (a worktree's lives in a bare repo OUTSIDE the worktree). */
 async function gitCommonDir(repo: string): Promise<string | undefined> {
@@ -701,20 +640,20 @@ type Launch = {
   /** --remote-control: opt-in profile to drive THIS boxed session from the Claude
    *  app / mobile (`claude remote-control`). Relaxes two box defaults, scoped to
    *  this launch only: (1) does NOT forward the inference-only setup-token (so a
-   *  full-scope in-box `claude auth login`, persisted in the account volume, wins
+   *  full-scope in-box `claude auth login`, persisted in the config volume, wins
    *  — RC rejects inference-only tokens), and (2) unsets the image's
    *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate can
    *  evaluate. Implies the net door (RC needs egress). See prx-9s14. */
   remoteControl: boolean;
   /** --remote-serve: like --remote-control (same auth/egress posture), but the
    *  box boots STRAIGHT INTO Remote Control SERVER mode — the claude entrypoint
-   *  becomes `claude remote-control --name <account>` instead of an interactive
-   *  session, so the box IS a persistent, headless RC server you attach to from
-   *  the app (no manual `/remote-control` step). The `--name` is the account, so
-   *  several `cbox <acct> --remote-serve` show up as distinct named sessions.
+   *  becomes `claude remote-control` instead of an interactive session, so the
+   *  box IS a persistent, headless RC server you attach to from the app (no
+   *  manual `/remote-control` step).
    *
-   *  Multiplicity is PER-ACCOUNT, not per-box-on-one-login: each account volume
-   *  has its own full-scope login, and two servers sharing ONE login fight over
+   *  ONE persistent bastion per machine, not per-box-on-one-login: a second
+   *  --remote-serve launch refuses to start while one is already running
+   *  (bastionAlreadyRunning), since two servers sharing ONE login fight over
    *  the single-use refresh-token rotation (prx-qba1 spike). Because the server
    *  is long-lived, the AUTHD.md "continuity across expiry" risk applies — does
    *  claude re-read an authd-refreshed credential mid-session — resolve with
@@ -843,9 +782,13 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--remote-serve") {
       // Boot straight into RC server mode (see Launch.remoteServe). Same egress
-      // need as --remote-control, so imply the net door (Map dedupes).
+      // need as --remote-control, so imply the net door (Map dedupes). Also
+      // imply the auth door: a long-lived bastion leases its RC credential
+      // from authd (ephemeral, access-token-only) instead of holding a
+      // persisted refresh token in a volume — see the lease step in run().
       remoteServe = true;
       add(resolveDoor("net", undefined, env));
+      add(resolveDoor("auth", undefined, env));
       continue;
     }
     if (t === "--keeper") {
@@ -941,7 +884,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
  *  --remote-control posture: do NOT forward the token (it is inference-only and
  *  CANNOT establish Remote Control; and as env it would override, per the auth
  *  precedence table, the full-scope `claude auth login` credential the user
- *  persists in the account volume). Also unset the image-baked
+ *  persists in the config volume). Also unset the image-baked
  *  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC so the RC feature-flag gate
  *  (tengu_ccr_bridge, delivered via GrowthBook) can evaluate.
  *
@@ -991,67 +934,98 @@ export function rcEgressAllow(launch: Launch): string[] {
 
 /** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
  *  entrypoint is `claude`, so prepending these args boots it as
- *  `claude remote-control --name <account>` — a headless RC server the app
- *  attaches to, instead of an interactive session. `--name` is the account, so
- *  concurrent servers (`cbox personal --remote-serve`, `cbox work --remote-serve`)
- *  appear as distinct named sessions. Also sets
- *  `--remote-control-session-name-prefix`: without it, spawned sessions are
+ *  `claude remote-control` — a headless RC server the app attaches to,
+ *  instead of an interactive session. Sets `--remote-control-session-name-prefix`
+ *  to stable "claude-box" so spawned sessions are clearly tied to this bastion
+ *  and appear as distinct named sessions. Without it, spawned sessions are
  *  prefixed with the CONTAINER's own hostname (a random hex podman assigns
  *  each run — e.g. "de7792ab763e"), which is meaningless and changes every
- *  launch; the account name is stable and identifies the box. Empty for any
- *  non-serve launch, so the interactive entrypoint is byte-for-byte
- *  unchanged. */
-function remoteServeArgs(launch: Launch, account: string): string[] {
+ *  launch. Empty for any non-serve launch, so the interactive entrypoint is
+ *  byte-for-byte unchanged. */
+function remoteServeArgs(launch: Launch): string[] {
   return launch.remoteServe
-    ? ["remote-control", "--name", account, "--remote-control-session-name-prefix", `claude-box-${account}`]
+    ? ["remote-control", "--remote-control-session-name-prefix", "claude-box"]
     : [];
 }
 
-/** Pure planner for `claude-box login` — the auth front door. Resolves the
- *  account + required `--scope`, and synthesizes a repo-less Launch whose only
- *  job is to host the login flow against the account's config volume:
+/** Mint a signed grant for the "auth" door using claude-box's own local
+ *  signing key (lib/box-keys.ts) — the deliberately simple stand-in for a
+ *  concierge round-trip (see box-keys.ts's doc comment): authd's tcp gate
+ *  ALWAYS requires a grant, no opt-out, so a direct CLI launch has to mint
+ *  one itself. Generous expiry (24h): the SAME grant is reused by every
+ *  re-lease call in the bastion's background loop (see run()), since the box
+ *  itself holds no signing key to mint a fresh one — a bastion outliving this
+ *  needs a restart. Real per-launch/short-lived issuance is future hardening. */
+function mintAuthGrant(authDoor: DoorGrant, audience: string): SignedGrant {
+  const key = loadOrCreateBoxKey();
+  return signGrant(
+    authDoor,
+    { audience, exp: Date.now() + 24 * 60 * 60 * 1000, nonce: crypto.randomUUID(), keyId: key.keyId },
+    key.sign,
+  );
+}
+
+/** In-box `bun -e` one-liner: lease an access-token-only credential from authd
+ *  over $AUTHD_SOCK (unix path, or "tcp:host:port" in TCP mode — the same
+ *  format the "auth" door's env carries) and write it to
+ *  $CLAUDE_CONFIG_DIR/.credentials.json. This is a --remote-serve bastion's
+ *  ONLY source of credentials — it never runs its own `claude auth login`
+ *  (see run()'s tmpfs config mount for remoteServe). Node's `net`, not
+ *  Bun.connect: this script has no source tree mounted to import from, so it
+ *  has to be self-contained, and node:net is available in any bun runtime.
+ *  `grant` (mintAuthGrant's output) rides along in the request — authd's tcp
+ *  gate always requires one, no opt-out. Whether claude itself notices a
+ *  rewritten .credentials.json mid-session (vs. only reading it at process
+ *  start) is the still-open AUTHD.md "continuity across expiry" question —
+ *  this only guarantees the FILE is always current; a re-lease loop wraps
+ *  this for a long-lived bastion (see run()). */
+function authLeaseCmd(grant?: SignedGrant): string {
+  const req: Record<string, unknown> = { id: "1", method: "lease", params: {} };
+  if (grant) req.grant = grant;
+  // A JS string literal (via JSON.stringify) whose value IS the exact NDJSON
+  // line to write — computed here so the inner script never has to
+  // re-serialize the grant itself.
+  const wireLine = JSON.stringify(JSON.stringify(req) + "\n");
+  return (
+    `bun -e '` +
+    `const net=require("net"),fs=require("fs");` +
+    `const raw=process.env.AUTHD_SOCK;` +
+    `const opts=raw.startsWith("tcp:")?(()=>{const r=raw.slice(4),i=r.lastIndexOf(":");return{host:r.slice(0,i),port:Number(r.slice(i+1))};})():{path:raw};` +
+    `const s=net.createConnection(opts,()=>{s.write(${wireLine})});` +
+    `let buf="";` +
+    `s.on("data",d=>{buf+=d.toString();if(buf.indexOf("\\n")>=0){s.end();const resp=JSON.parse(buf.split("\\n")[0]);` +
+    `if(!resp.ok){console.error("authd lease failed: "+(resp.error&&resp.error.message));process.exit(1)}` +
+    `fs.writeFileSync(process.env.CLAUDE_CONFIG_DIR+"/.credentials.json",JSON.stringify(resp.result))}});` +
+    `s.on("error",e=>{console.error("authd connect failed: "+e.message);process.exit(1)});` +
+    `'`
+  );
+}
+
+/** Pure planner for `claude-box login` — the auth front door. Synthesizes a
+ *  repo-less Launch whose only job is to host the login flow against the
+ *  config volume: the --remote-control auth posture (OMIT the inference-only
+ *  setup-token so a full-scope in-box `claude auth login` is what persists) +
+ *  the net door, since OAuth needs egress.
  *
- *    full      → the --remote-control auth posture (OMIT the inference-only
- *                setup-token so a full-scope in-box `claude auth login` is what
- *                persists) + the net door, since OAuth needs egress.
- *    inference → just the net door; the default posture forwards the
- *                inference-only setup-token.
- *
- *  No repo, no room — authority here is the credential, not a worktree. `--scope`
- *  is REQUIRED (no implicit default): minting a credential is an explicit choice,
- *  and a full-scope token is far more powerful than an inference-only one, so the
- *  caller says which on purpose. Throws on a missing/!known scope (fail closed).
+ *  There is only ONE scope: full. An inference-only posture used to be a
+ *  separate `--scope inference` choice, but a full-scope credential is a
+ *  strict superset (it drives ordinary inference AND Remote Control) and
+ *  configuration should come from what's actually leased at runtime (see
+ *  authd), not from a CLI-time fork in what kind of box this is. No repo, no
+ *  room — authority here is the credential, not a worktree.
  *  Eventually this login moves behind authd (see AUTHD.md); today it is box-local. */
 function planLogin(
   args: string[],
   env: Env = process.env,
-): { account: string; scope: "full" | "inference"; launch: Launch } {
-  let account: string | undefined;
-  let scope: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === "--scope") {
-      scope = args[++i];
-      continue;
-    }
-    if (!a.startsWith("-") && account === undefined) {
-      account = a;
-      continue;
-    }
+): { launch: Launch } {
+  for (const a of args) {
     throw new Error(`claude-box login: unexpected argument "${a}"`);
   }
-  if (scope === undefined) {
-    throw new Error("claude-box login: --scope is required (full | inference)");
-  }
-  if (scope !== "full" && scope !== "inference") {
-    throw new Error(`claude-box login: unknown --scope "${scope}" (expected: full | inference)`);
-  }
-  const launch = planLaunch(scope === "full" ? ["--remote-control"] : ["--net"], env);
-  return { account: account ?? "personal", scope, launch };
+  const launch = planLaunch(["--remote-control"], env);
+  return { launch };
 }
 
 type Manifest = {
-  account: string;
   guest: string;
   repo?: string;
   repoRw: boolean;
@@ -1072,7 +1046,6 @@ type Manifest = {
  *  ambient egress WITHOUT the net door, so it suppresses the "net" denial — the
  *  manifest must not claim there's no network when there is. */
 function buildManifest(
-  account: string,
   launch: Launch,
   env: Env = process.env,
   depth = 0,
@@ -1082,7 +1055,7 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { account, guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied, depth };
+  return { guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied, depth };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
@@ -1091,7 +1064,6 @@ function capabilityJson(m: Manifest): string {
   const netDoor = m.doors.some((d) => d.name === "net");
   return JSON.stringify({
     workcell: "claude-box",
-    account: m.account,
     guest: m.guest,
     // Spawn depth of this box (0 = root). lib/spawn.ts reads this to increment
     // the child's depth so launcherd's maxDepth ceiling holds across nesting.
@@ -1135,7 +1107,7 @@ function capabilityPrompt(m: Manifest): string {
     ...capabilityPreamble("claude-box"),
     "",
     "GRANTED:",
-    "- config: your own account's auth/history (a private volume).",
+    "- config: your auth/history (a private volume).",
   ];
   if (m.repoOrigin) {
     lines.push(
@@ -1306,7 +1278,7 @@ async function startScopedNetd(
  * default door window). v1: net egress only; `--repo-origin` (clone-in-box) or
  * no repo. Host-mount `--repo` in a pod is a follow-up.
  */
-async function runPod(account: string, launch: Launch): Promise<number> {
+async function runPod(launch: Launch): Promise<number> {
   const { guest, repo, repoOrigin, repoDoor, repoDoorRef, guestArgs } = launch;
   if (repo) {
     console.error(
@@ -1315,7 +1287,7 @@ async function runPod(account: string, launch: Launch): Promise<number> {
     process.exit(2);
   }
   const guestPreset = knownGuests()[guest]!;
-  const manifest = buildManifest(account, launch);
+  const manifest = buildManifest(launch);
 
   // The pod's netd door: anthropic egress + (if cloning in-box) the origin host.
   // --repo-door needs NO egress at all (repod's clone is same-machine, no
@@ -1324,7 +1296,7 @@ async function runPod(account: string, launch: Launch): Promise<number> {
   if (repoOrigin) allow.push(originHostOf(repoOrigin));
 
   const id = crypto.randomUUID().slice(0, 8);
-  const podName = `claude-box-${account}-${id}`;
+  const podName = `claude-box-${id}`;
   const netdName = `${podName}-netd`;
   const netdSharedVolume = `${podName}-netd-shared`;
   const repodName = `${podName}-repod`;
@@ -1437,7 +1409,7 @@ async function runPod(account: string, launch: Launch): Promise<number> {
       "-v", `${netdSharedVolume}:/shared-netd`,
     ];
     if (guestPreset.needsConfig) {
-      argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
+      argv.push("-v", `claude-config:${BOX_CONFIG_DIR}:U`);
     }
     // Auth: inference-only setup-token by default; --remote-control omits it for
     // a full-scope in-box login (see authEnvArgs).
@@ -1508,19 +1480,19 @@ async function runPod(account: string, launch: Launch): Promise<number> {
   }
 }
 
-/** The stable name a --remote-serve bastion for this account runs under.
+/** The stable name a --remote-serve bastion runs under.
  *  Every OTHER launch mode leaves podman to assign a random name (they're
  *  one-shot and torn down with the session) — a bastion is meant to be the
- *  ONE long-running box per account, so it gets a name worth checking for. */
-function bastionName(account: string): string {
-  return `claude-box-${account}-remote-serve`;
+ *  ONE long-running box, so it gets a name worth checking for. */
+function bastionName(): string {
+  return "claude-box-remote-serve";
 }
 
-/** Is a bastion for this account already running? Real liveness, not just a
- *  stale name — `podman ps` (not `ps -a`) only lists running containers. */
-function bastionAlreadyRunning(account: string): string | undefined {
+/** Is a bastion already running? Real liveness, not just a stale name —
+ *  `podman ps` (not `ps -a`) only lists running containers. */
+function bastionAlreadyRunning(): string | undefined {
   const p = Bun.spawnSync(
-    ["podman", "ps", "--filter", `name=^${bastionName(account)}$`, "--format", "{{.Names}}"],
+    ["podman", "ps", "--filter", `name=^${bastionName()}$`, "--format", "{{.Names}}"],
     { stdout: "pipe", stderr: "pipe" },
   );
   const name = p.stdout.toString().trim();
@@ -1528,23 +1500,21 @@ function bastionAlreadyRunning(account: string): string | undefined {
 }
 
 async function run(
-  account: string,
   launch: Launch,
   env: Env = process.env,
 ): Promise<number> {
-  assertAccount(account);
   // --pod: the box and its doors live in their own pod, off the host (POD.md).
-  if (launch.pod) return runPod(account, launch);
-  // --remote-serve is meant to be the ONE persistent bastion per account —
+  if (launch.pod) return runPod(launch);
+  // --remote-serve is meant to be the ONE persistent bastion per machine —
   // launching a second one silently (no --name, a random podman name) is
   // exactly how this session ended up with 3+ orphaned duplicate sessions.
   // Refuse rather than pile on another one; the existing session is still
   // reachable at its own claude.ai/code URL.
   if (launch.remoteServe) {
-    const existing = bastionAlreadyRunning(account);
+    const existing = bastionAlreadyRunning();
     if (existing) {
       console.error(
-        `claude-box: a --remote-serve bastion for account '${account}' is already running (container "${existing}"). ` +
+        `claude-box: a --remote-serve bastion is already running (container "${existing}"). ` +
           `Attach to it from claude.ai/code or the Claude app instead of launching another — ` +
           `or stop it first with: podman kill ${existing}`,
       );
@@ -1553,7 +1523,7 @@ async function run(
   }
   const { guest, repo, repoRw, repoEphemeral, repoClone, repoOrigin, writable, doors, netOpen, guestArgs } = launch;
   const guestPreset = knownGuests()[guest]!;
-  const manifest = buildManifest(account, launch, env);
+  const manifest = buildManifest(launch, env);
   const argv = [
     "podman",
     "run",
@@ -1570,18 +1540,34 @@ async function run(
     "2048",
   ];
   if (launch.remoteServe) {
-    argv.push("--name", bastionName(account));
+    argv.push("--name", bastionName());
   }
-  // Only mount the account's config volume for guests that need it (claude).
-  // Tool guests don't need or want claude's auth/history.
+  // Only mount config for guests that need it (claude). Tool guests don't
+  // need or want claude's auth/history. --remote-serve is the one exception:
+  // its credential is LEASED from authd at boot (and re-leased periodically —
+  // see the lease step below), never a persisted refresh token, so it gets a
+  // throwaway tmpfs instead of the shared volume — nothing about a bastion's
+  // identity lives at rest anywhere.
   if (guestPreset.needsConfig) {
-    argv.push("-v", `claude-${account}-config:${BOX_CONFIG_DIR}:U`);
+    if (launch.remoteServe) {
+      // mode=1777 (world-writable + sticky, like /tmp): podman's --tmpfs has
+      // no uid/gid option (confirmed: "invalid mount option"), and a bare
+      // tmpfs defaults to root:root ownership — the in-image `claude` user
+      // (uid 1000) could write during login but couldn't read it back
+      // afterward. 1777 lets claude create+own its own files in a
+      // root-owned dir; the sticky bit still stops other users in this
+      // single-user throwaway container from deleting/renaming them.
+      argv.push("--tmpfs", `${BOX_CONFIG_DIR}:rw,mode=1777`);
+    } else {
+      argv.push("-v", `claude-config:${BOX_CONFIG_DIR}:U`);
+    }
   }
   // Auth: by default forward a pre-minted, inference-only `claude setup-token`
-  // (no in-box browser flow). --remote-control instead omits the token so a
-  // full-scope in-box `claude auth login` (paste-code flow — works in
-  // containers per the auth docs, persisted in the account volume) can drive
-  // Remote Control. See authEnvArgs.
+  // (no in-box browser flow). --remote-control omits the token so a full-scope
+  // in-box `claude auth login` (paste-code flow, persisted in the config
+  // volume) can drive Remote Control. --remote-serve ALSO omits it, but never
+  // does its own login — its credential comes from authd (see the lease step
+  // below), not a paste-code flow in this box. See authEnvArgs.
   argv.push(...authEnvArgs(launch, env));
   // Network posture: TCP mode vs Unix socket mode
   //
@@ -1794,12 +1780,12 @@ async function run(
   // the checkout. The URL is passed POSITIONALLY ($1), never interpolated into
   // the script, so it can't inject shell. Egress is the net door (netd must
   // allow the origin host). These podman opts must precede the image.
-  // remoteServeArgs() prepends "remote-control --name <account>" when
-  // --remote-serve is set — account is pre-validated (assertAccount's
-  // [A-Za-z0-9._-]+ regex) so it's safe to splice into the shell script below.
+  // remoteServeArgs() prepends "remote-control" when --remote-serve is set —
+  // a fixed, known-safe literal, so it's safe to splice into the shell script
+  // below.
   const guestCmd = [
     guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh"),
-    ...remoteServeArgs(launch, account),
+    ...remoteServeArgs(launch),
   ].join(" ");
   if (repoOrigin) {
     argv.push("--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh");
@@ -1849,24 +1835,34 @@ async function run(
     // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
     // don't need or parse system prompts — they just run their command.
     // --remote-serve prepends the RC server-mode subcommand so the box boots as
-    // `claude remote-control --name <account>` (see remoteServeArgs); empty
-    // otherwise, leaving the interactive entrypoint untouched.
+    // `claude remote-control` (see remoteServeArgs); empty otherwise, leaving
+    // the interactive entrypoint untouched.
     if (guest === "claude" && launch.remoteServe) {
       console.error(
-        `claude-box: --remote-serve — booting account '${account}' as a headless Remote Control server (attach from the Claude app/mobile as session '${account}')`,
+        "claude-box: --remote-serve — booting as a headless Remote Control server (attach from the Claude app/mobile)",
       );
       // If a repo is mounted, RC runs THERE (/work, already the podman -w) —
       // not the synthetic no-repo workspace. Either way the workspace still
       // needs its trust pre-seeded (see RC_WORKSPACE above); /work doesn't
       // need mkdir since planRepoMount already bind-mounted it.
       const rcCwd = repo ? "/work" : RC_WORKSPACE;
+      // Lease the RC credential from authd BEFORE claude ever starts (the tmpfs
+      // config mount above starts with no .credentials.json at all), then keep
+      // it fresh with a backgrounded re-lease every 10 minutes for as long as
+      // this bastion stays up — see authLeaseCmd's doc comment for the one
+      // open question (does claude re-read it mid-session). authd's tcp gate
+      // always requires a grant (no opt-out — see mintAuthGrant); audience is
+      // the fixed bastion name, since there's only ever ONE per machine.
+      const authDoor = doors.find((d) => d.name === "auth");
+      const grant = authDoor ? mintAuthGrant(authDoor, bastionName()) : undefined;
+      const leaseCmd = authLeaseCmd(grant);
       // sh -c '<script>' claude-box <remoteServeArgs…> : "$@" is exactly the
       // remote-control invocation (remoteServeArgs), never string-interpolated.
       argv.push(
         "-c",
-        `${repo ? "" : `mkdir -p ${rcCwd}; `}cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`,
+        `${repo ? "" : `mkdir -p ${rcCwd}; `}${leaseCmd}; (while true; do sleep 600; ${leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`,
         "claude-box",
-        ...remoteServeArgs(launch, account),
+        ...remoteServeArgs(launch),
       );
     } else {
       if (guest === "claude") {
@@ -1884,6 +1880,32 @@ async function run(
     stdout: "inherit",
     stderr: "inherit",
   });
+  // --remote-serve: the RC session list shows a hex string under the display
+  // name (claude.ai/code reads it from the container's own id, likely via
+  // $HOSTNAME) — that hex is otherwise only discoverable by hunting through
+  // `podman ps` after the fact, which is exactly how this session ended up
+  // needing several rounds of manual correlation to find stale entries.
+  // Surface it up front instead: poll (the container needs a moment to
+  // exist) without blocking the interactive attach above.
+  if (launch.remoteServe) {
+    void (async () => {
+      const name = bastionName();
+      for (let i = 0; i < 20; i++) {
+        const p = Bun.spawnSync(["podman", "inspect", name, "--format", "{{.Id}}"], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const id = p.stdout.toString().trim();
+        if (p.exitCode === 0 && id) {
+          console.error(
+            `claude-box: this bastion's container id is ${id.slice(0, 12)} — the hex string shown under its name in the Remote Control list`,
+          );
+          return;
+        }
+        await Bun.sleep(250);
+      }
+    })();
+  }
   const exitCode = await proc.exited;
 
   // Clean up ephemeral worktree on exit
@@ -2120,7 +2142,6 @@ async function cmdPs(): Promise<number> {
     const result = (await launcherdRequest("list")) as {
       launches: Array<{
         launchId: string;
-        account: string;
         pid: number;
         startedAt: string;
         doors: string[];
@@ -2135,13 +2156,13 @@ async function cmdPs(): Promise<number> {
     }
 
     console.log(
-      "LAUNCH ID                    ACCOUNT     PID    DOORS              REPO",
+      "LAUNCH ID                    PID    DOORS              REPO",
     );
     for (const l of result.launches) {
       const doors = l.doors.join(",") || "-";
       const repo = l.repo ?? "-";
       console.log(
-        `${l.launchId.padEnd(28)} ${l.account.padEnd(11)} ${String(l.pid).padEnd(6)} ${doors.padEnd(18)} ${repo}`,
+        `${l.launchId.padEnd(28)} ${String(l.pid).padEnd(6)} ${doors.padEnd(18)} ${repo}`,
       );
     }
     return 0;
@@ -2720,43 +2741,101 @@ async function cmdAttach(launchId: string): Promise<number> {
   }
 }
 
-/** `claude-box login [account] --scope full|inference` — launch a minimal,
- *  repo-less box bound to the account's config volume so you can authenticate
- *  once and persist it. For `--scope full` you log in inside (`/login`), the
- *  full-scope credential lands in `claude-<account>-config`, and it is then the
- *  front door for `--remote-control`. See planLogin. */
+/** `claude-box login` — launch a minimal, repo-less box bound to the config
+ *  volume so you can authenticate once and persist it. Log in inside
+ *  (`/login`); the full-scope credential lands in `claude-config`, and it is
+ *  then the front door for `--remote-control`. See planLogin. */
 async function cmdLogin(args: string[]): Promise<number> {
   let plan;
   try {
     plan = planLogin(args);
   } catch (e) {
     console.error((e as Error).message);
-    console.error("usage: claude-box login [account] --scope full|inference");
+    console.error("usage: claude-box login");
     return 1;
   }
-  const { account, scope, launch } = plan;
-  assertAccount(account);
+  const { launch } = plan;
   console.error(
-    `claude-box: login box for '${account}' (scope: ${scope}, no repo). ` +
-      (scope === "full"
-        ? "Run /login inside to do a full-scope login, then exit — it persists in " +
-          `claude-${account}-config.`
-        : "Inference-only posture; exit when done."),
+    "claude-box: login box (no repo). Run /login inside to do a full-scope " +
+      "login, then exit — it persists in claude-config.",
   );
-  return run(account, launch);
+  return run(launch);
+}
+
+/** `claude-box check-in` — the human-backed login authd's ephemeral store
+ *  needs, run as a real guest-room: the SAME sandbox floor every other box
+ *  gets (uid 1000, no-new-privileges, cap-drop all), a THROWAWAY tmpfs config
+ *  dir (nothing persists in any long-lived volume — a fresh check-in every
+ *  time, no shared `claude-config` volume involved at all), and a real
+ *  interactive TTY so the human does the OAuth browser/paste flow themselves
+ *  (`claude auth login`), exactly like every other guest-room interaction —
+ *  this was previously an ad hoc host-side script; this is that same flow as
+ *  an actual claude-box launch mode.
+ *
+ *  On success, prints the resulting ClaudeCredentials JSON to stdout — one
+ *  line, meant to be piped straight into authd's stdin:
+ *    claude-box check-in | authd serve
+ *  The short-lived host tmpdir used to ferry the credential out of the
+ *  --rm'd container is deleted immediately after, whether or not the read
+ *  succeeded — this session's authd door is `check-out`: no persistence,
+ *  no lingering plaintext, one guest-room per stay. */
+async function cmdCheckIn(): Promise<number> {
+  const guestPreset = knownGuests().claude!;
+  const outDir = mkdtempSync(join(boxTempBase(), "check-in-"));
+  try {
+    const argv = [
+      "podman", "run", "-it", "--rm",
+      "--security-opt", "no-new-privileges", "--cap-drop", "all", "--pids-limit", "2048",
+      // mode=1777 (world-writable + sticky, like /tmp): podman's --tmpfs has
+      // no uid/gid option, and a bare tmpfs defaults to root:root ownership —
+      // the in-image `claude` user (uid 1000) could write during login but
+      // couldn't read its own file back afterward without this.
+      "--tmpfs", `${BOX_CONFIG_DIR}:rw,mode=1777`,
+      "-v", `${outDir}:/check-in-out`,
+      "--entrypoint", "sh", guestPreset.image,
+      "-c",
+      `claude auth login && cp "$CLAUDE_CONFIG_DIR/.credentials.json" /check-in-out/cred.json`,
+    ];
+    console.error("claude-box: check-in — a throwaway guest-room, nothing persists. Complete the login, then exit.");
+    // The interactive login (URL, paste prompt) must always render on the
+    // REAL terminal, even when this command's own stdout is piped/redirected
+    // elsewhere (`check-in | authd serve`) — "inherit" would otherwise send
+    // that interactive output down the same pipe, silently starving both the
+    // user (no visible prompt) and authd (which blocks reading stdin until
+    // EOF). /dev/tty bypasses the outer process's stdio entirely.
+    // A single read-write fd (not two separate opens) so a real terminal's
+    // stdin/stdout/stderr all reference the SAME tty device, as they would
+    // for an ordinary interactive process.
+    let tty: number | undefined;
+    try {
+      tty = openSync("/dev/tty", "r+");
+    } catch {
+      // No controlling terminal (e.g. a non-interactive CI run) — best effort.
+    }
+    const proc = Bun.spawn(argv, {
+      stdin: tty ?? "inherit",
+      stdout: tty ?? "inherit",
+      stderr: tty ?? "inherit",
+    });
+    const code = await proc.exited;
+    if (tty !== undefined) closeSync(tty);
+    if (code !== 0) return code;
+    const credPath = join(outDir, "cred.json");
+    if (!existsSync(credPath)) {
+      console.error("claude-box: check-in — login exited 0 but no credential was produced");
+      return 1;
+    }
+    console.log(readFileSync(credPath, "utf-8").trim());
+    return 0;
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
 }
 
 async function main(): Promise<number> {
   const [first, ...rest] = Bun.argv.slice(2);
 
   switch (first) {
-    case "ls":
-    case "list":
-    case "--list":
-      return listAccounts();
-    case "name":
-    case "label":
-      return setName(rest[0] ?? "", rest.slice(1).join(" "));
     case "status":
       return cmdStatus();
     case "ps":
@@ -2769,6 +2848,17 @@ async function main(): Promise<number> {
       return cmdAttach(rest[0] ?? "");
     case "login":
       return cmdLogin(rest);
+    case "check-in":
+      return cmdCheckIn();
+    case "auth-keys-path":
+      // Prints the path to claude-box's own grant-signing public key (see
+      // lib/box-keys.ts) — feed it to authd so it can verify grants a
+      // --remote-serve launch mints: `AUTHD_ISSUER_KEYS_PATH=$(claude-box
+      // auth-keys-path) authd serve --port 3003`. Generates the keypair on
+      // first call if it doesn't exist yet.
+      loadOrCreateBoxKey();
+      console.log(issuerKeysPath());
+      return 0;
     case "doors":
       return cmdDoors(rest[0] ?? "", rest.slice(1));
     case "keeper-status":
@@ -2781,14 +2871,12 @@ async function main(): Promise<number> {
       return 0;
   }
 
-  // A leading non-flag token is the account; otherwise default to `personal` and
-  // treat everything as claude args (so `claude-box --resume` works too).
-  const named = first !== undefined && !first.startsWith("-");
-  const account = named ? first : "personal";
-  const tail = named ? rest : first !== undefined ? [first, ...rest] : [];
+  // Everything else is claude args passed straight through (so
+  // `claude-box --resume` works, same as `claude --resume`).
+  const tail = first !== undefined ? [first, ...rest] : [];
 
   const launch = planLaunch(tail);
-  return run(account, launch);
+  return run(launch);
 }
 
 // Importable by tests (planLaunch / resolveDoor / buildManifest / capability*),

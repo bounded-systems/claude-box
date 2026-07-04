@@ -33,7 +33,6 @@ const door = (name: string, hostPath: string): DoorGrant => ({
 const seed = (over: Record<string, unknown> = {}) => {
   const rec = {
     launchId: "L-parent",
-    account: "personal",
     pid: 4242,
     startedAt: new Date(),
     doors: [door("scout", "/run/scoutd.sock")],
@@ -57,8 +56,7 @@ describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", ()
     seed({ launchId: "L-a", containerId: "CIDA", doors: [door("scout", "/run/scoutd.sock")], depth: 1 });
     __setCallerContainerId("CIDA"); // caller resolves to L-a via its cgroup
     const resp = await launch({
-      account: "personal",
-      doors: ["keeper"], // L-a doesn't hold keeper
+        doors: ["keeper"], // L-a doesn't hold keeper
       depth: 0, // ignored — depth comes from the record
       _parentDoors: ["keeper", "scout"], // ignored — no client-trusted fallback anymore
       _caller: { uid: 1000, pid: 1 },
@@ -71,8 +69,7 @@ describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", ()
     seed({ launchId: "L-b", containerId: "CIDB", doors: [door("scout", "/run/scoutd.sock")], depth: 3 });
     __setCallerContainerId("CIDB");
     const resp = await launch({
-      account: "personal",
-      doors: ["scout"],
+        doors: ["scout"],
       depth: 0, // lie — would pass if trusted
       _caller: { uid: 1000, pid: 1 },
     });
@@ -83,8 +80,7 @@ describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", ()
   test("a container caller launcherd did NOT launch is refused (fail closed)", async () => {
     __setCallerContainerId("CID-NOT-OURS");
     const resp = await launch({
-      account: "personal",
-      doors: ["scout"],
+        doors: ["scout"],
       _caller: { uid: 1000, pid: 1 },
     });
     expect(resp.ok).toBe(false);
@@ -94,8 +90,7 @@ describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", ()
   test("a non-container caller is the root mint — resolved globally, no attenuation/deny", async () => {
     __setCallerContainerId(undefined); // host operator: cgroup is not a libpod scope
     const resp = await launch({
-      account: "personal",
-      doors: ["scout"],
+        doors: ["scout"],
       _caller: { uid: 501, pid: 1 },
     });
     // not denied for attenuation or unknown-caller — it's the mint; it only fails
@@ -107,7 +102,7 @@ describe("caller classification — cgroup-anchored, fail-closed (prx-e232)", ()
 
 describe("resolveLaunchDoors — reference-passing", () => {
   const parent = (doors: DoorGrant[]) =>
-    ({ launchId: "P", account: "personal", pid: 9, startedAt: new Date(), doors, depth: 1 }) as unknown as Parameters<typeof __seedLaunch>[0];
+    ({ launchId: "P", pid: 9, startedAt: new Date(), doors, depth: 1 }) as unknown as Parameters<typeof __seedLaunch>[0];
 
   test("a child gets the PARENT's actual socket, not a global default", () => {
     const out = resolveLaunchDoors(["scout"], parent([door("scout", "/custom/scoutd.sock")]));
@@ -159,7 +154,7 @@ describe("cgroup correlation — caller pid → container (prx-p4vb)", () => {
 
   test("findLaunchByContainerId matches the recorded container — the real-box correlation", () => {
     __seedLaunch({
-      launchId: "L-c", account: "personal", pid: 11, containerId: CID,
+      launchId: "L-c", pid: 11, containerId: CID,
       startedAt: new Date(), doors: [door("scout", "/run/scoutd.sock")], depth: 1,
     } as unknown as Parameters<typeof __seedLaunch>[0]);
     expect(findLaunchByContainerId(CID)?.launchId).toBe("L-c");

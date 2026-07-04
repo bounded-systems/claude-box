@@ -24,12 +24,18 @@ export type RemoteControlFlags = {
   sandbox?: boolean;
 };
 
-/** claude-box's own default posture for a --remote-serve bastion: worktree
- *  spawn (isolated per on-demand session, matching --repo-ephemeral), no
- *  sandbox (podman is already the boundary), identifiable session prefix. */
+/** claude-box's own default posture for a --remote-serve bastion: single-
+ *  session spawn (this bastion is meant to be attached to by exactly ONE
+ *  Claude app session at a time — `claude` itself refuses a second
+ *  concurrent attach, reinforcing claude-box's own app-level
+ *  bastionAlreadyRunning() guard rather than replacing it), no sandbox
+ *  (podman is already the boundary), identifiable session prefix. Any
+ *  further parallelism happens one level down, via the dispatch door
+ *  (see DOORS.md / launcherd.ts's dispatch RPC) — not via claude's own
+ *  --spawn modes. */
 export const CLAUDE_BOX_DEFAULT_FLAGS: RemoteControlFlags = {
   sessionNamePrefix: "claude-box",
-  spawn: "worktree",
+  spawn: "session",
 };
 
 /** Render flags to the argv fragment `claude remote-control` (already

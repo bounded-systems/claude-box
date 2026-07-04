@@ -1,0 +1,85 @@
+# remote-serve.container — the singleton RC dispatcher bastion
+#
+# UNLIKE keeperd/netd/scoutd/launcherd, this unit has ONE unresolved piece:
+# `claude-box --remote-serve`'s CLI path mints a FRESH, freshly-signed authd
+# grant at invocation time (mintAuthGrant, claude-box.ts) and bakes it
+# directly into the boot script (buildRemoteServeScript's leaseCmd). A
+# systemd-started container has no such invocation moment — there is no CLI
+# process running to mint that grant before this unit's ExecStart fires.
+# Minting must stay host-side (the signing key never enters any box, by
+# design — see lib/box-keys.ts), so the real fix is a small NEW host-only
+# CLI verb (e.g. `claude-box internal-mint-auth-grant --audience
+# claude-box-remote-serve`) invoked from `ExecStartPre=`, writing the grant
+# to a file consumed via `EnvironmentFile=` — NOT implemented here. Treat
+# this unit as correct for everything BUT the auth lease until that lands;
+# don't `systemctl enable --now` it expecting a working RC session yet.
+#
+# Install:
+#   cp *.volume *.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now remote-serve
+#
+# Logs:
+#   journalctl --user -u remote-serve -f
+#
+# Attaching locally (the Claude app is the normal way in — this is only for
+# local debugging): `podman attach claude-box-remote-serve`. No `-it` here
+# (see below), so there's no local tty by default the way the manual
+# `claude-box --remote-serve` CLI entrypoint still has.
+
+[Unit]
+Description=remote-serve — the singleton claude-box RC dispatcher bastion
+Requires=claude-doors-volume.service launcherd.service
+After=claude-doors-volume.service launcherd.service
+
+[Container]
+Image=localhost/claude-personal:dev
+ContainerName=claude-box-remote-serve
+
+# Same shared socket dir as every door — this box holds net+auth+dispatch
+# (see claude-box.ts's --remote-serve block in planLaunch).
+Volume=%h/.claude-box/run:/run/doors
+
+# RC needs egress (leasing the credential from authd, then ordinary
+# inference/tool traffic) — default podman network, same posture as netd.
+# No Network=none here.
+
+# The credential is LEASED from authd, never a persisted refresh token (see
+# claude-box.ts's run() comment on this exact point) — a throwaway tmpfs
+# config dir, never the shared claude-config volume, so nothing about this
+# bastion's identity lives at rest. Mirrors run()'s own
+# `--tmpfs BOX_CONFIG_DIR:rw,mode=1777`.
+Tmpfs=/home/claude/.config/claude:rw,mode=1777
+
+# --entrypoint sh (the RC bootstrap wrapper — see claude-box.ts's
+# buildRemoteServeScript) and the actual remote-control argv are both
+# invocation-time constructs today, not something a static Quadlet Exec= can
+# reproduce byte for byte — this is the SAME "two constructions of one
+# argv" tradeoff already accepted for keeperd/netd/scoutd's doors-serve vs.
+# .container split, not a new problem this unit introduces. Fill in once
+# the ExecStartPre auth-grant mechanism above exists:
+# Entrypoint=sh
+# Exec=-c "<buildRemoteServeScript output>" claude-box remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session
+
+# Deliberately NO "-it" here: the Claude app attaches over claude.ai/code,
+# never a local tty, so a Quadlet-managed bastion runs detached like every
+# other unit in this directory. The manual `claude-box --remote-serve` CLI
+# entrypoint is unaffected and keeps -it for local interactive use — the
+# same dev-vs-prod split keeperd/scoutd already have between `doors serve`
+# and their own .container units.
+
+# Security hardening
+NoNewPrivileges=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=2048
+Memory=1g
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

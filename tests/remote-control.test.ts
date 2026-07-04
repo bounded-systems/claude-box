@@ -149,6 +149,20 @@ describe("--remote-serve: planLaunch", () => {
     expect(l.doors.map((d) => d.name)).toContain("net");
   });
 
+  test("implies the dispatch door, but never the launcher door", () => {
+    const l = planLaunch(["--remote-serve"], EMPTY);
+    const names = l.doors.map((d) => d.name);
+    expect(names).toContain("dispatch");
+    expect(names).not.toContain("launcher");
+  });
+
+  test("composes with an explicit --launcher without doubling dispatch or dropping launcher", () => {
+    const l = planLaunch(["--remote-serve", "--launcher"], EMPTY);
+    const names = l.doors.map((d) => d.name);
+    expect(names.filter((n) => n === "dispatch").length).toBe(1);
+    expect(names).toContain("launcher");
+  });
+
   test("composes with an explicit --net without doubling the door", () => {
     const l = planLaunch(["--remote-serve", "--net"], EMPTY);
     expect(l.doors.filter((d) => d.name === "net").length).toBe(1);
@@ -196,25 +210,29 @@ describe("--remote-serve: shares the remote-control auth posture", () => {
 });
 
 describe("remoteServeArgs: the server-mode entrypoint prefix", () => {
-  test("boots `claude remote-control` for a serve launch (no repo → same-dir spawn)", () => {
+  test("boots `claude remote-control` in --spawn session mode, named 'dispatch' (no repo)", () => {
     const l = planLaunch(["--remote-serve"], EMPTY);
     expect(remoteServeArgs(l)).toEqual([
       "remote-control",
+      "--name",
+      "dispatch",
       "--remote-control-session-name-prefix",
       "claude-box",
       "--spawn",
-      "same-dir",
+      "session",
     ]);
   });
 
-  test("uses worktree spawn when a repo is mounted", () => {
+  test("still uses --spawn session even with a repo mounted (no more worktree/same-dir split)", () => {
     const l = planLaunch(["--remote-serve", "--repo", "."], EMPTY);
     expect(remoteServeArgs(l)).toEqual([
       "remote-control",
+      "--name",
+      "dispatch",
       "--remote-control-session-name-prefix",
       "claude-box",
       "--spawn",
-      "worktree",
+      "session",
     ]);
   });
 

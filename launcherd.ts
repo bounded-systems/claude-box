@@ -24,6 +24,11 @@ import {
   capabilityPrompt,
   transportString,
   unixPath,
+  mintAuthGrant,
+  authLeaseCmd,
+  buildRemoteServeScript,
+  RC_WORKSPACE,
+  BOX_CONFIG_DIR,
   type DoorGrant,
   type Manifest,
   type Launch,
@@ -33,6 +38,10 @@ import {
   frontDoorsWithInterposers,
   teardownInterposers,
 } from "./door-interpose.ts";
+import {
+  CLAUDE_BOX_DEFAULT_FLAGS,
+  renderRemoteControlArgs,
+} from "./lib/remote-control-flags.ts";
 import {
   defaultSocketPath as runtimeSocketPath,
   prepareSocket,
@@ -65,6 +74,10 @@ const log = createLogger("launcherd");
 
 function defaultSocketPath(): string {
   return runtimeSocketPath("launcherd");
+}
+
+function defaultDispatchSocketPath(): string {
+  return runtimeSocketPath("dispatch");
 }
 
 function defaultKeyPath(): string {
@@ -103,6 +116,17 @@ type Policy = {
     window: number;         // Time window in seconds
     max: number;            // Max launches in window
   };
+  // dispatch has its OWN limits, independent of the ones above — see
+  // checkDispatchRateLimit/checkDispatchConcurrentLimit. Unlike `launch`'s
+  // limits (no-op until an operator opts in with a policy file), dispatch's
+  // limits are non-permissive BY DEFAULT (see DEFAULT_* below): the caller
+  // is, by design, an always-on box with no other authority, so "no policy
+  // file = unlimited spawns" is not an acceptable default here.
+  maxConcurrentDispatched?: number;
+  dispatchRateLimit?: {
+    window: number;
+    max: number;
+  };
   rules: PolicyRule[];
 };
 
@@ -110,6 +134,15 @@ let policy: Policy | null = null;
 
 // Rate limiting state
 const launchTimes: number[] = [];  // Timestamps of recent launches
+
+// Dispatch has no LaunchRecord bookkeeping (see handleDispatch's doc comment
+// — deliberately no ongoing relationship to what gets dispatched), so its
+// concurrency count is a plain incr/decr counter rather than something
+// derived from the `launches` map the way checkConcurrentLimit works.
+const dispatchTimes: number[] = [];
+let activeDispatchCount = 0;
+const DEFAULT_MAX_CONCURRENT_DISPATCHED = 5;
+const DEFAULT_DISPATCH_RATE_LIMIT = { window: 3600, max: 20 };
 
 function loadPolicy(path: string): Policy | null {
   try {
@@ -226,6 +259,64 @@ function checkDepthLimit(requestedDepth: number): { allowed: boolean; reason?: s
   }
 
   return { allowed: true };
+}
+
+/** Rate-limit dispatch requests. UNLIKE checkRateLimit (opt-in via
+ *  policy.rateLimit, unlimited by default), this is non-permissive out of
+ *  the box: DEFAULT_DISPATCH_RATE_LIMIT applies whether or not a policy file
+ *  exists, overridable via policy.dispatchRateLimit. */
+function checkDispatchRateLimit(): { allowed: boolean; reason?: string } {
+  const limit = policy?.dispatchRateLimit ?? DEFAULT_DISPATCH_RATE_LIMIT;
+  const now = Date.now();
+  const windowMs = limit.window * 1000;
+  const cutoff = now - windowMs;
+
+  while (dispatchTimes.length > 0 && dispatchTimes[0]! < cutoff) {
+    dispatchTimes.shift();
+  }
+
+  if (dispatchTimes.length >= limit.max) {
+    const oldest = dispatchTimes[0]!;
+    const waitSec = Math.ceil((oldest + windowMs - now) / 1000);
+    return {
+      allowed: false,
+      reason: `dispatch rate limit exceeded (${limit.max} per ${limit.window}s). Try again in ${waitSec}s`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+function recordDispatch(): void {
+  dispatchTimes.push(Date.now());
+}
+
+/** Concurrency ceiling for dispatch. UNLIKE checkConcurrentLimit (opt-in via
+ *  policy.maxConcurrent, unlimited by default), this is non-permissive out
+ *  of the box: DEFAULT_MAX_CONCURRENT_DISPATCHED applies whether or not a
+ *  policy file exists, overridable via policy.maxConcurrentDispatched. */
+function checkDispatchConcurrentLimit(): { allowed: boolean; reason?: string } {
+  const max = policy?.maxConcurrentDispatched ?? DEFAULT_MAX_CONCURRENT_DISPATCHED;
+  if (activeDispatchCount >= max) {
+    return {
+      allowed: false,
+      reason: `dispatch concurrent limit exceeded (max ${max} boxes)`,
+    };
+  }
+  return { allowed: true };
+}
+
+// For testing: reset dispatch rate/concurrency state between test cases.
+function __resetDispatchLimits(): void {
+  dispatchTimes.length = 0;
+  activeDispatchCount = 0;
+}
+
+// For testing: simulate N in-flight dispatched boxes without actually
+// spawning any (handleDispatch only increments this after a real podman
+// spawn succeeds, which unit tests can't drive without podman).
+function __seedActiveDispatchCount(n: number): void {
+  activeDispatchCount = n;
 }
 
 // child ⊆ parent is now enforced at the REFERENCE level by resolveLaunchDoors
@@ -429,12 +520,19 @@ type Room = {
   doors: string[];
   netOpen?: boolean;
   description: string;
+  /** May this room be requested over the doors-blind `dispatch` socket
+   *  (see handleDispatch)? Deliberately opt-in and separate from ordinary
+   *  attenuated `launch` access — a room is only safe to expose there if it
+   *  can never itself hold "launcher" (no re-dispatch) and never opens
+   *  ambient egress (no `netOpen`). */
+  dispatchable?: boolean;
 };
 
 const ROOMS: Record<string, Room> = {
   dev: {
     doors: ["keeper", "net", "scout"],
     description: "full dev: signed commits, policed egress, external reads",
+    dispatchable: true,
   },
   "dev-spawn": {
     doors: ["keeper", "net", "scout", "launcher"],
@@ -443,10 +541,12 @@ const ROOMS: Record<string, Room> = {
   readonly: {
     doors: ["net", "scout"],
     description: "read-only research: egress + reads, no writes",
+    dispatchable: true,
   },
   offline: {
     doors: [],
     description: "air-gapped: no network, no external access",
+    dispatchable: true,
   },
   bootstrap: {
     doors: [],
@@ -564,8 +664,30 @@ function resolveLaunchDoors(doorSpecs: string[], callerRecord: LaunchRecord | un
   });
 }
 
-function generateLaunchId(): string {
-  return `box-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+/** Sanitize a caller-supplied label to podman's container-name charset
+ *  (lowercase alphanumeric plus `_.-`), trimmed of leading/trailing
+ *  punctuation and capped at 40 chars. Returns undefined for an empty/
+ *  all-punctuation input. Used both for the podman container name
+ *  (generateLaunchId) and, unchanged, as the human-facing RC session title
+ *  (handleDispatch) — one cleaned value, not two independent ones that could
+ *  drift apart. */
+function sanitizeLabel(label: string | undefined): string | undefined {
+  const clean = label
+    ?.toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[-._]+|[-._]+$/g, "")
+    .slice(0, 40);
+  return clean || undefined;
+}
+
+/** `label`, if given (already sanitized — see sanitizeLabel), is spliced in
+ *  as a human-readable prefix — the random suffix is ALWAYS appended
+ *  regardless, so two concurrent requests for the same label never collide
+ *  on podman's own name-uniqueness constraint. No label falls back to the
+ *  plain `box-<rand>` shape, unchanged from before labels existed. */
+function generateLaunchId(label?: string): string {
+  const rand = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return label ? `box-${label}-${rand}` : `box-${rand}`;
 }
 
 // ── Door checking ────────────────────────────────────────────────────────────
@@ -906,7 +1028,20 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   };
 }
 
-async function buildPodmanArgv(launch: Launch, manifest: Manifest, launchId: string): Promise<string[]> {
+/** `rcServe`, when present, boots this box as its own real `claude
+ *  remote-control` session instead of an ordinary interactive launch — used
+ *  ONLY by handleDispatch. Mirrors claude-box.ts's own --remote-serve
+ *  bastion posture exactly: a throwaway tmpfs config dir (never the shared
+ *  persistent volume, since the credential is LEASED from authd, not a
+ *  persisted refresh token) and an `--entrypoint sh` wrapper running
+ *  buildRemoteServeScript before exec'ing claude. Omitted (undefined) for
+ *  every ordinary `launch` call — behavior there is unchanged. */
+async function buildPodmanArgv(
+  launch: Launch,
+  manifest: Manifest,
+  launchId: string,
+  rcServe?: { leaseCmd: string; remoteControlArgs: string[] },
+): Promise<string[]> {
   const { repo, repoRw, doors, netOpen, guestArgs } = launch;
 
   const argv = [
@@ -915,8 +1050,12 @@ async function buildPodmanArgv(launch: Launch, manifest: Manifest, launchId: str
     "--security-opt", "no-new-privileges",
     "--cap-drop", "all",
     "--pids-limit", "2048",
-    "-v", "claude-config:/home/claude/.config/claude:U",
   ];
+  if (rcServe) {
+    argv.push("--tmpfs", `${BOX_CONFIG_DIR}:rw,mode=1777`);
+  } else {
+    argv.push("-v", `claude-config:${BOX_CONFIG_DIR}:U`);
+  }
 
   // Network handling
   const netDoor = doors.find((d) => d.name === "net");
@@ -964,7 +1103,19 @@ async function buildPodmanArgv(launch: Launch, manifest: Manifest, launchId: str
   }
 
   // Image + guest args
-  argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...guestArgs);
+  if (rcServe) {
+    // sh -c '<script>' claude-box <remoteControlArgs…> — "$@" inside the
+    // script is exactly remoteControlArgs, never string-interpolated. Same
+    // shape as claude-box.ts's own --remote-serve invocation.
+    argv.push(
+      "--entrypoint", "sh", IMAGE, "-c",
+      buildRemoteServeScript({ rcWorkspace: RC_WORKSPACE, leaseCmd: rcServe.leaseCmd }),
+      "claude-box",
+      ...rcServe.remoteControlArgs,
+    );
+  } else {
+    argv.push(IMAGE, "--append-system-prompt", capabilityPrompt(manifest), ...guestArgs);
+  }
 
   return argv;
 }
@@ -990,6 +1141,123 @@ async function handleRooms(_params: Record<string, unknown>): Promise<unknown> {
   };
 }
 
+// ── Dispatch — a doors-blind, allow-listed request lane ─────────────────────
+//
+// Unlike `launch`, `dispatch` never inspects the caller at all: no cgroup
+// lookup, no LaunchRecord, no attenuation. The security boundary here is
+// "can you reach dispatch.sock," not "what do you hold" — a box wired with
+// ONLY the "dispatch" door (claude-box.ts's own preset, mounting nothing
+// else) can send {room, label} and nothing more; there is no way to request
+// a door, a repo, or an escape flag. If the named room is dispatchable,
+// launcherd resolves its doors GLOBALLY (the same root-mint path `launch`
+// uses when there's no caller record — see resolveLaunchDoors) and boots an
+// entirely independent, separately-attachable `claude remote-control
+// --spawn session` box of its own. There is no ongoing relationship
+// afterward: no LaunchRecord, no attach/kill/list entry for it — it is "not
+// really even a child in the true sense," just another sibling bastion that
+// happens to have been requested rather than started by hand.
+async function handleDispatch(params: Record<string, unknown>): Promise<unknown> {
+  const roomName = params.room as string | undefined;
+  const label = sanitizeLabel(params.label as string | undefined);
+
+  if (!roomName) {
+    throw { code: "INVALID_REQUEST", message: "dispatch requires a room name" };
+  }
+  const room = ROOMS[roomName];
+  if (!room || !room.dispatchable) {
+    const available = Object.entries(ROOMS)
+      .filter(([, r]) => r.dispatchable)
+      .map(([name]) => name)
+      .join(", ");
+    throw {
+      code: "ROOM_NOT_DISPATCHABLE",
+      message: `room '${roomName}' is not dispatchable. Available: ${available}`,
+    };
+  }
+
+  // These limits are independent of (and, unlike) checkRateLimit/
+  // checkConcurrentLimit — see their doc comments: non-permissive by
+  // default, not opt-in via a policy file, since dispatch's caller is an
+  // always-on box with no other authority.
+  const dispatchRateCheck = checkDispatchRateLimit();
+  if (!dispatchRateCheck.allowed) {
+    throw { code: "RATE_LIMITED", message: dispatchRateCheck.reason };
+  }
+  const dispatchConcurrentCheck = checkDispatchConcurrentLimit();
+  if (!dispatchConcurrentCheck.allowed) {
+    throw { code: "CONCURRENT_LIMIT", message: dispatchConcurrentCheck.reason };
+  }
+
+  // Every dispatched box runs its own RC server, so it always needs net+auth
+  // on top of whatever the room itself grants — mirroring how --remote-serve
+  // already implies those two doors for the bastion (claude-box.ts's
+  // planLaunch, --remote-serve block).
+  const doorSpecs = Array.from(new Set([...room.doors, "net", "auth"]));
+
+  // Root-resolved: dispatch has no caller record to attenuate against, and by
+  // construction never will — this handler doesn't classify callers at all.
+  const doors = resolveLaunchDoors(doorSpecs, undefined);
+
+  const doorChecks = await checkDoors(doors);
+  const unreachable = doorChecks.filter((d) => !d.reachable);
+  if (unreachable.length > 0) {
+    throw {
+      code: "DOORS_UNREACHABLE",
+      message: `doors not reachable: ${unreachable.map((d) => d.name).join(", ")}. Start the daemons first.`,
+    };
+  }
+
+  const launchId = generateLaunchId(label);
+  const { doors: mountDoors, interposers } = frontDoorsWithInterposers(doors, launchId);
+
+  const launch: Launch = {
+    guest: "claude",
+    repo: undefined,
+    repoRw: false,
+    repoEphemeral: false,
+    repoClone: false,
+    repoDoorRef: "main",
+    pod: false,
+    writable: [],
+    doors: mountDoors,
+    netOpen: room.netOpen ?? false,
+    remoteControl: false,
+    remoteServe: true,
+    guestArgs: [],
+  };
+  const manifest = buildManifest(launch, process.env, 0);
+
+  // Lease this box's OWN RC credential from authd, exactly like the bastion
+  // does for itself (claude-box.ts's run()) — a fresh, independent lease
+  // scoped to this box's own launchId as the audience, not the bastion's.
+  const authDoor = mountDoors.find((d) => d.name === "auth");
+  const grant = authDoor ? mintAuthGrant(authDoor, launchId) : undefined;
+  const leaseCmd = authLeaseCmd(grant);
+  const remoteControlArgs = [
+    "remote-control",
+    ...renderRemoteControlArgs({ ...CLAUDE_BOX_DEFAULT_FLAGS, spawn: "session", name: label }),
+  ];
+
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    const argv = await buildPodmanArgv(launch, manifest, launchId, { leaseCmd, remoteControlArgs });
+    proc = Bun.spawn(argv, { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+  } catch (e) {
+    teardownInterposers(interposers);
+    throw e;
+  }
+  recordDispatch();
+  activeDispatchCount++;
+  proc.exited.then(() => {
+    activeDispatchCount--;
+    teardownInterposers(interposers);
+  });
+
+  log("INFO", `dispatched ${launchId} (room ${roomName}${label ? `, label ${label}` : ""})`);
+
+  return { dispatched: true, name: launchId };
+}
+
 const METHODS: Record<string, MethodHandler> = {
   status: handleStatus,
   list: handleList,
@@ -999,9 +1267,20 @@ const METHODS: Record<string, MethodHandler> = {
   rooms: handleRooms,
 };
 
+// `dispatch` lives on its OWN socket (see serveDispatchSocket in main()), not
+// this table — a box holding only the "dispatch" door mounts a socket that
+// speaks nothing but this one method, so it structurally cannot reach
+// launch/kill/list/attach/status/rooms even if it wanted to.
+const DISPATCH_METHODS: Record<string, MethodHandler> = {
+  dispatch: handleDispatch,
+};
+
 // ── Socket server ────────────────────────────────────────────────────────────
 
-async function handleRequest(line: string): Promise<ResponseEnvelope> {
+async function handleRequest(
+  line: string,
+  methods: Record<string, MethodHandler> = METHODS,
+): Promise<ResponseEnvelope> {
   let req: RequestEnvelope;
   try {
     req = JSON.parse(line);
@@ -1014,7 +1293,7 @@ async function handleRequest(line: string): Promise<ResponseEnvelope> {
     return err(id ?? "", "INVALID_REQUEST", "id and method required");
   }
 
-  const handler = METHODS[method];
+  const handler = methods[method];
   if (!handler) {
     return err(id, "UNKNOWN_METHOD", `unknown method: ${method}`);
   }
@@ -1043,12 +1322,15 @@ function assertSocketDir(sock: string): void {
   }
 }
 
-async function serve(socketPath: string): Promise<void> {
+function listen(
+  socketPath: string,
+  methods: Record<string, MethodHandler>,
+): UnixSocketListener<{ buffer: string }> {
   assertSocketDir(socketPath);
   prepareSocket(socketPath);
-  log("INFO", `listening on ${socketPath}`);
+  log("INFO", `listening on ${socketPath} (${Object.keys(methods).join(", ")})`);
 
-  const server = Bun.listen<{ buffer: string }>({
+  return Bun.listen<{ buffer: string }>({
     unix: socketPath,
     socket: {
       open(socket) {
@@ -1061,7 +1343,7 @@ async function serve(socketPath: string): Promise<void> {
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          const response = await handleRequest(line);
+          const response = await handleRequest(line, methods);
           socket.write(JSON.stringify(response) + "\n");
         }
       },
@@ -1071,17 +1353,25 @@ async function serve(socketPath: string): Promise<void> {
       },
     },
   });
+}
 
-  // Handle shutdown
-  process.on("SIGINT", () => {
+/** Listens on BOTH the general launcherd socket (launch/kill/list/attach/
+ *  status/rooms) and a separate, narrower dispatch socket (dispatch only —
+ *  see DISPATCH_METHODS) so a box holding just the "dispatch" door mounts a
+ *  socket that structurally cannot reach anything else. */
+async function serve(socketPath: string, dispatchSocketPath: string): Promise<void> {
+  const servers = [
+    listen(socketPath, METHODS),
+    listen(dispatchSocketPath, DISPATCH_METHODS),
+  ];
+
+  const shutdown = () => {
     log("INFO", "shutting down...");
-    server.stop();
+    for (const server of servers) server.stop();
     process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    server.stop();
-    process.exit(0);
-  });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   // Keep alive
   await new Promise(() => {});
@@ -1099,11 +1389,12 @@ Usage:
   launcherd serve --no-sign           disable L2 attestation signing
 
 Options:
-  --socket PATH    socket path (default: $XDG_RUNTIME_DIR/launcherd.sock)
-  --key PATH       signing key (default: ~/.claude-box/launcherd.key)
-  --policy PATH    policy file (default: ~/.claude-box/policy.json)
-  --no-sign        skip key loading, disable attestation
-  -h, --help       show this help
+  --socket PATH           socket path (default: $XDG_RUNTIME_DIR/launcherd.sock)
+  --dispatch-socket PATH  dispatch-only socket path (default: $XDG_RUNTIME_DIR/dispatch.sock)
+  --key PATH              signing key (default: ~/.claude-box/launcherd.key)
+  --policy PATH           policy file (default: ~/.claude-box/policy.json)
+  --no-sign               skip key loading, disable attestation
+  -h, --help              show this help
 
 Policy file format (JSON):
   {
@@ -1132,6 +1423,12 @@ async function main(): Promise<number> {
   const sockIdx = args.indexOf("--socket");
   if (sockIdx >= 0 && args[sockIdx + 1]) {
     socketPath = args[sockIdx + 1]!;
+  }
+
+  let dispatchSocketPath = defaultDispatchSocketPath();
+  const dispatchSockIdx = args.indexOf("--dispatch-socket");
+  if (dispatchSockIdx >= 0 && args[dispatchSockIdx + 1]) {
+    dispatchSocketPath = args[dispatchSockIdx + 1]!;
   }
 
   // Key loading
@@ -1166,7 +1463,7 @@ async function main(): Promise<number> {
     log("INFO", "no policy file (all rooms permitted)");
   }
 
-  await serve(socketPath);
+  await serve(socketPath, dispatchSocketPath);
   return 0;
 }
 
@@ -1179,6 +1476,10 @@ function setPolicy(p: Policy | null): void {
 export {
   ROOMS,
   handleRequest,
+  handleDispatch,
+  DISPATCH_METHODS,
+  sanitizeLabel,
+  buildPodmanArgv,
   checkDoorReachable,
   generateLaunchId,
   sha256,
@@ -1191,6 +1492,9 @@ export {
   checkRateLimit,
   checkConcurrentLimit,
   checkDepthLimit,
+  checkDispatchRateLimit,
+  checkDispatchConcurrentLimit,
+  recordDispatch,
   recordLaunch,
   findCallerRecord,
   findLaunchByContainerId,
@@ -1199,6 +1503,8 @@ export {
   __seedLaunch,
   __setCallerContainerId,
   __clearCallerContainerId,
+  __resetDispatchLimits,
+  __seedActiveDispatchCount,
 };
 export type { RequestEnvelope, ResponseEnvelope, LaunchRecord, Room, L2Attestation, SigningKey, Policy, PolicyRule, CallerInfo };
 

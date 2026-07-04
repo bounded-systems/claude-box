@@ -1,4 +1,4 @@
-# ADR — launcherd is a control plane; door socket paths live in one namespace
+# ADR — launcherd is a control plane; reimplement it in Rust, VM-native, one path namespace
 
 > Status: **accepted** (2026-07-04). Tracking: refines `ADR-ORCHESTRATION.md`
 > (Quadlet for doors) for the one daemon that ADR's uniform rule doesn't fit.
@@ -6,6 +6,12 @@
 > stacked, runtime-only bugs (see Context). This ADR is the contract those
 > bugs violated — written before the fix, so the fix conforms to it rather
 > than the contract being reverse-engineered from whatever the patch did.
+> Amended same-day (still pre-implementation): the accepted "VM-native" decision
+> collided with a substrate constraint found during setup — the VM (Fedora
+> CoreOS) has no JS runtime and the nix bun can't run there — so "VM-native"
+> is realized as a **static Rust binary** (Option 3), not a bun bundle. The
+> path-namespace contract is unchanged; only launcherd's implementation language
+> and runtime shape are. No conforming code was written before this amendment.
 
 ## Context
 
@@ -100,15 +106,59 @@ the podman socket at its real path and native visibility of the doors dir.
   (`PidsLimit`, `Memory`). Mitigation: systemd unit-level `MemoryMax=`/`TasksMax=`
   on the service provide the equivalent without a container.
 
+### 3. VM-native, but reimplemented in Rust (a static native binary)
+The same as Option 2 — launcherd runs directly on the VM host — but it stops
+being a bun program. Discovered during implementation (2026-07-04): Option 2 as
+literally written is **not achievable with the current runtime**. The VM is
+Fedora CoreOS with no bun and no node, and the nix-built bun cannot run on it —
+its ELF interpreter is `/nix/store/…/ld-linux-aarch64.so.1`, which CoreOS does
+not have (`"cannot execute: required file not found"`). Every door is
+containerized *precisely* to carry the bun runtime the VM lacks. So "drop the
+container and run the bun bundle on the host" is a contradiction: removing the
+container removes the only runtime.
+
+A Rust launcherd compiled to a **static binary** (musl target, no dynamic
+loader) has **zero runtime dependency** — it runs natively on CoreOS with no
+container, no bun, no nix loader. That is what makes true VM-native actually
+reachable, not just asserted.
+
+- **Pro:** genuinely achieves Option 2's single-namespace collapse — the
+  runtime problem that blocked it disappears.
+- **Pro:** launcherd is the **most security-critical door** (it holds podman —
+  the one host-control surface in the system). Reimplementing *it* in a language
+  whose type system can encode the path-namespace contract directly — `HostPath`
+  vs `InBoxPath` as distinct types, so a wrong-namespace bind-mount source is a
+  **compile error, not a runtime surprise** — puts the strongest guarantees
+  exactly where the blast radius is largest. This is the concrete, scoped form
+  of the standing "the code isn't a good enough contract" concern.
+- **Pro:** not greenfield — `peercred/` is already a Rust crate that exists
+  *only* to serve launcherd (SO_PEERCRED caller-UID injection, same NDJSON
+  protocol). The toolchain (`rustPlatform.buildRustPackage`), the nix build
+  pattern, and launcherd's own sidecar are already Rust. A Rust launcherd
+  absorbs peercred rather than starting from nothing.
+- **Con:** it is a **reimplementation**, not a config change — materially more
+  work than Options 1/2, and it must reach behavior parity with `launcherd.ts`
+  (dispatch + launch RPCs, door resolution, podman argv, rate/concurrency
+  limits, grant handling). Mitigated by doing it contract-first and
+  incrementally (dispatch path first — the narrow, highest-value lane), with the
+  TS launcherd staying in place until parity is proven.
+
 ## Decision
 
-**Adopt Option 2.** launcherd runs VM-native. The other four door daemons stay
-containerized. The distinction is a *contract about what each daemon is*:
+**Adopt Option 3: reimplement launcherd in Rust as a static (musl) binary,
+running VM-native.** The other four door daemons stay containerized. The
+distinction is a *contract about what each daemon is*:
 
 > A daemon may be containerized **iff** it is a pure socket daemon with no
 > host-runtime-control surface. launcherd controls the host runtime; therefore
 > it is a control-plane process and runs on the host, not in a sandbox that
 > would have to hand the host back to it anyway.
+
+Option 3 over Option 2 because the VM has no JS runtime and the nix bun can't run
+there (see above); a static Rust binary is the *only* form of "VM-native" that
+actually runs. Option 3 over Options 1 (path-matched container) because that
+keeps the isolation theater and the bun/HOME workarounds, spending complexity to
+*simulate* a single namespace inside a boundary that provides no isolation.
 
 With one namespace, the path contract becomes trivial and enforceable:
 
@@ -124,40 +174,46 @@ single `CLAUDE_BOX_DOORS_DIR`), never inferred from ambient `$HOME`.
 
 ## Consequences
 
-Conforming changes (small, and each *enforces* the contract rather than just
-obeying it):
+Because Option 3 is a reimplementation, it lands **contract-first and
+incrementally** — the TS launcherd (`launcherd.ts`, containerized, now with the
+`HOME=/tmp` fix from #207) stays the live daemon until the Rust one proves parity
+and cuts over. Sequence:
 
-1. **Drop `quadlet/launcherd.container`**; add a `systemd --user` service unit
-   for launcherd in the VM with native podman access and `MemoryMax=`/`TasksMax=`.
-2. **Door resolution stops following `$HOME`.** launcherd resolves `<doors-dir>`
-   from an explicit source. `getRunDir()`'s `$HOME/.claude-box/run` fallback is a
-   dev-CLI convenience, not something a daemon should inherit silently.
-3. **`buildPodmanArgv`'s bind-mount source is unchanged** (`unixPath(d.host)`) —
-   it becomes correct the moment `d.host` is a real host path.
-4. **Enforce the invariant at boot, loudly** (this is the "code isn't a good
-   enough contract" fix): on startup, and again before each spawn, launcherd
-   asserts that every door path it will pass as a `-v` **source** actually
-   exists on the host filesystem it can `stat()`. If a future change reintroduces
-   a namespace split, launcherd fails *at boot with a named error*, not silently
-   at dispatch time. The assertion IS the contract, executable.
-5. **PR #207 (the `HOME=/tmp` correction) still lands first** — it deletes a
-   false "unresolved security decision" from the code and is correct for as long
-   as launcherd remains a container. When Option 2 lands, `launcherd.container`
-   is removed and the `HOME` line goes with it; the *finding* it recorded (it was
-   never a security wall) stays true in history.
+1. **Write the wire + path contract first** (before Rust code): the NDJSON RPC
+   surface (`dispatch`, `launch`, `list`, `attach`, `kill`, `status`) and the
+   path-namespace types. `peercred/` already fixes the NDJSON framing and the
+   `_caller` injection shape — the contract extends that, it doesn't invent it.
+2. **Path-namespace as types, not comments.** `HostPath` vs `InBoxPath` are
+   *distinct Rust types*. `podman run -v SRC:DST` takes `SRC: HostPath`,
+   `DST: InBoxPath`; passing an `InBoxPath` as a source **does not compile**. Bug
+   #3 becomes structurally impossible rather than assertion-caught. (The runtime
+   `stat()` boot-assertion from Option 2 still ships as defense-in-depth for the
+   one thing types can't see: whether the path exists on *this* host right now.)
+3. **`<doors-dir>` is an explicit input**, never inferred from ambient `$HOME` —
+   a required config/flag, so a daemon can't silently resolve doors from the
+   wrong place the way the TS `getRunDir()` `$HOME` fallback allowed.
+4. **Build + ship as a static binary.** Extend the existing `peercred`
+   `rustPlatform.buildRustPackage` pattern with a musl target so the output has
+   no dynamic loader and runs on CoreOS. Absorb `peercred` into the launcherd
+   crate (it's already launcherd's sidecar).
+5. **Run VM-native**: a `systemd --user` service on the VM (native podman socket,
+   `MemoryMax=`/`TasksMax=` for the resource caps a container would have given),
+   replacing `quadlet/launcherd.container`.
+6. **Cut over only on proven parity**: dispatch lane first (`{room,label}` →
+   independent RC box, verified end-to-end), then launch/list/attach/kill, then
+   retire `launcherd.ts` + `launcherd.container` + the `launcherd-image`.
 
-### Follow-up: a path-namespace type (optional, higher-assurance)
-The root cause is that `DoorTransport.host` is a bare path string with an unstated
-namespace. A branded type — `HostPath` vs `InBoxPath` — would make bug #3 a
-**compile error** and would let `buildPodmanArgv` refuse, at the type level, to
-use an `InBoxPath` as a bind-mount source. Not required by this ADR, but it is
-the TypeScript-today version of the "move to Rust for stronger contracts" idea:
-make the currently-implicit namespace explicit and checkable at the boundary.
+Increment order is deliberate: **dispatch first** — it is the narrowest surface
+(two params, allow-listed rooms, no attenuation) and the highest user value (it
+is what "talk to the dispatcher and have it spawn a box" needs). launch/attach/
+kill follow once the spawn substrate is proven.
 
 ## Provenance chain
 - Motivating diagnosis: live testing on 2026-07-04 (podman `version`/`ps`/`run`
   succeed from inside launcherd with `HOME=/tmp`; `DOORS_UNREACHABLE` traced to
   `getRunDir()` following `$HOME`; bind-mount source confirmed at
-  `launcherd.ts:1078`).
+  `launcherd.ts:1078`; nix bun confirmed non-runnable on CoreOS — interpreter
+  `/nix/store/…/ld-linux-aarch64.so.1` absent).
 - Related: `ADR-ORCHESTRATION.md` (the uniform Quadlet rule this refines),
-  `LAUNCHERD.md` (why launch is a door at all), `ADR-CAPABILITY-TRANSPORT.md`.
+  `LAUNCHERD.md` (why launch is a door at all), `ADR-CAPABILITY-TRANSPORT.md`,
+  `peercred/` (the existing Rust sidecar this absorbs).

@@ -388,6 +388,12 @@
               # The credential-guard PreToolUse hook script (see gitAiManagedSettings).
               mkdir -p opt/security
               cp ${./scripts/credential-guard.ts} opt/security/credential-guard.ts
+              # check-ocap: a local (--plugin-dir) plugin providing a skill that
+              # packages claude-box's own capability-boundary verification steps
+              # (see claude-box.ts's CHECK_OCAP_PLUGIN_DIR). Plugin-sourced skills
+              # are exempt from strictPluginOnlyCustomization=["skills"] above.
+              mkdir -p opt/plugins/check-ocap
+              cp -r ${./plugins/check-ocap}/. opt/plugins/check-ocap/
               # git-ai config: baked at the user home so git-ai picks it up on
               # first run without any interactive setup. git_path points to the
               # nix-managed git binary in /bin; telemetry and version-check noise

@@ -4,12 +4,23 @@
  *
  * A box with `--remote-control` needs the user's full-scope claude.ai OAuth login
  * to drive a Remote Control session, but must NOT *hold* it. authd owns the
- * refresh token host-side (from op via AUTHD_OP_REF) and lends the box only a
- * short-lived, ACCESS-TOKEN-ONLY credential — never the refresh token. It is a
- * keeperd sibling: the box proves who it is the same way it does at every other
- * door — a concierge-minted SIGNED GRANT, here scoped to door="auth" (the
- * door-model identity unification, prx-6194). authd→Anthropic is OAuth2
- * refresh_token (the broker holds the one standing secret).
+ * refresh token host-side and lends the box only a short-lived, ACCESS-TOKEN-
+ * ONLY credential — never the refresh token. It is a keeperd sibling: the box
+ * proves who it is the same way it does at every other door — a
+ * concierge-minted SIGNED GRANT, here scoped to door="auth" (the door-model
+ * identity unification, prx-6194). authd→Anthropic is OAuth2 refresh_token
+ * (the broker holds the one standing secret).
+ *
+ * The refresh token's storage is EPHEMERAL, in-memory only — seeded from a
+ * JSON credential line piped on stdin at boot — like an OIDC session:
+ * nothing ever touches disk, gone the instant this process exits, portable to
+ * any OS. A --remote-serve bastion refreshes normally for as long as it stays
+ * up; only a RESTART needs a fresh login. (A Keychain-backed store and an op
+ * fallback were both tried and dropped: Keychain is macOS-only, so it didn't
+ * port to a Linux server, and op required a Touch ID prompt per lease;
+ * ephemeral covers the actual need — refresh within a boot's lifetime — with
+ * a strictly stronger, OS-agnostic security posture and no external
+ * dependency at all.)
  *
  *   authd serve                  # unix socket (mount = authority)
  *   authd serve --port 3003      # tcp (host→VM relay; signed-grant gated)
@@ -17,12 +28,12 @@
  * SCAFFOLD STATUS (Phase 1): the live OAuth refresh is GUARDED behind
  * AUTHD_REFRESH_LIVE=1 — AUTHD.md Phase 0 must confirm the refresh spec + the
  * continuity behaviour first-hand before it goes live (a live rotation is
- * single-use and would invalidate the in-use token). This module is the door +
- * identity + lease scaffold; it does NOT yet make the box credential-free
- * (AUTHD.md: that is Phase 2).
+ * single-use and would invalidate the in-use token). Verified live
+ * end-to-end, 2026-07-03: a dedicated claude-box login → ephemeral store →
+ * lease → real access token → rotated refresh token → write-back confirmed.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { verify, createPublicKey } from "node:crypto";
 import type { Socket } from "bun";
@@ -134,93 +145,36 @@ export async function refreshAccessToken(
   return { creds, rotatedRefreshToken: r.refresh_token };
 }
 
-/** The two shapes AUTHD_KEYCHAIN_SERVICE might name: the native `claude` CLI's
- *  own macOS Keychain item (service "Claude Code-credentials"), which stores
- *  the FULL ClaudeCredentials JSON blob — same shape as this file's own
- *  ClaudeCredentials type, because it's the same client — or a bare refresh
- *  token string, for a Keychain item set up purpose-built for authd. Either
- *  way, `readFromKeychain` returns just the refresh token; the full parsed
- *  blob (when it's the native shape) is also returned so a caller can
- *  preserve every OTHER field when writing the rotated credential back. */
-function keychainName(): { service: string; account: string } {
-  const service = process.env.AUTHD_KEYCHAIN_SERVICE;
-  if (!service) throw { code: "NO_KEYCHAIN_SERVICE", message: "AUTHD_KEYCHAIN_SERVICE unset" };
-  const account = process.env.AUTHD_KEYCHAIN_ACCOUNT ?? process.env.USER ?? "claude-box";
-  return { service, account };
-}
+// ── Ephemeral credential store — the ONLY source authd reads from: like an
+// OIDC session, the refresh token lives ONLY in this process's memory,
+// seeded once at boot from a single JSON line on stdin (stdin, never a CLI
+// arg — an argv value shows up in `ps`, stdin doesn't), and is gone the
+// instant this process exits. Nothing at rest, ever, on any OS. Within the
+// process's life it refreshes and rotates normally, so a long-running
+// --remote-serve bastion keeps working for as long as it stays up; only a
+// RESTART requires a fresh login (see bellhop's login flow).
+let ephemeralCred: ClaudeCredentials | null = null;
 
-/** Read the host-owned refresh token from the macOS Keychain
- *  (AUTHD_KEYCHAIN_SERVICE / AUTHD_KEYCHAIN_ACCOUNT). Once the item is stored
- *  (`security add-generic-password`), this is a non-interactive local read —
- *  unlike `op read`, which blocks on a 1Password Touch ID/biometric prompt on
- *  every single lease. The item name is config, never a host path in code
- *  (AUTHD.md §Config). */
-async function readFromKeychain(): Promise<{ refreshToken: string; nativeBlob: ClaudeCredentials | null }> {
-  const { service, account } = keychainName();
-  const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-a", account, "-w"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  const out = (await new Response(proc.stdout).text()).trim();
-  await proc.exited;
-  if (proc.exitCode !== 0 || !out) {
-    throw { code: "KEYCHAIN_READ_FAILED", message: `security find-generic-password -s ${service} -a ${account} failed` };
+function readEphemeral(): { refreshToken: string; nativeBlob: ClaudeCredentials } {
+  if (!ephemeralCred?.claudeAiOauth?.refreshToken) {
+    throw { code: "EPHEMERAL_NOT_SEEDED", message: "authd was never seeded a credential on stdin at boot" };
   }
-  try {
-    const parsed = JSON.parse(out) as ClaudeCredentials;
-    if (!parsed.claudeAiOauth?.refreshToken) {
-      throw { code: "KEYCHAIN_NO_REFRESH_TOKEN", message: "Keychain item parsed as JSON but has no claudeAiOauth.refreshToken" };
-    }
-    return { refreshToken: parsed.claudeAiOauth.refreshToken, nativeBlob: parsed };
-  } catch (e) {
-    if ((e as { code?: string }).code) throw e; // our own thrown error above
-    // Not JSON — a purpose-built item holding a bare refresh token string.
-    return { refreshToken: out, nativeBlob: null };
+  return { refreshToken: ephemeralCred.claudeAiOauth.refreshToken, nativeBlob: ephemeralCred };
+}
+
+function writeEphemeral(creds: ClaudeCredentials): void {
+  ephemeralCred = creds;
+}
+
+/** Parse and seed the store from a raw JSON credential blob (the shape
+ *  `bellhop`'s throwaway-login-container flow produces). Exported so the
+ *  CLI's stdin-read and tests share one entry point. */
+export function seedEphemeral(rawJson: string): void {
+  const parsed = JSON.parse(rawJson) as ClaudeCredentials;
+  if (!parsed.claudeAiOauth?.refreshToken) {
+    throw { code: "SEED_NO_REFRESH_TOKEN", message: "seeded credential has no claudeAiOauth.refreshToken" };
   }
-}
-
-/** Write a rotated refresh token back to the SAME Keychain item, so a live
- *  refresh doesn't strand the host's login (AUTHD.md's Phase 2 write-back —
- *  a live refresh's rotation is single-use; skipping this step invalidates
- *  the OLD refresh token server-side with nowhere for the NEW one to land).
- *  When the item was the native `claude` CLI blob, every other field
- *  (accessToken/expiresAt/scopes/subscriptionType/rateLimitTier) is updated
- *  too, so the native CLI keeps working seamlessly off the same item — this
- *  is a real login refresh for it, not just bookkeeping for authd.
- *  `-U` updates an existing item in place (same service+account), so this
- *  never creates a second, competing Keychain entry. */
-async function writeToKeychain(creds: ClaudeCredentials): Promise<void> {
-  const { service, account } = keychainName();
-  const blob = JSON.stringify(creds);
-  const proc = Bun.spawnSync(
-    ["security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", blob],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  if (proc.exitCode !== 0) {
-    throw { code: "KEYCHAIN_WRITE_FAILED", message: `security add-generic-password failed: ${proc.stderr.toString().trim()}` };
-  }
-}
-
-/** Read the host-owned refresh token from op (AUTHD_OP_REF = op://vault/item/field). */
-async function readFromOp(): Promise<string> {
-  const ref = process.env.AUTHD_OP_REF;
-  if (!ref) throw { code: "NO_OP_REF", message: "AUTHD_OP_REF unset (expected op://vault/item/field)" };
-  const proc = Bun.spawn(["op", "read", ref], { stdout: "pipe", stderr: "ignore" });
-  const out = (await new Response(proc.stdout).text()).trim();
-  await proc.exited;
-  if (proc.exitCode !== 0 || !out) throw { code: "OP_READ_FAILED", message: `op read ${ref} failed` };
-  return out;
-}
-
-/** Read the host-owned refresh token. Prefers the Keychain (non-interactive,
- *  no per-lease biometric prompt) when AUTHD_KEYCHAIN_SERVICE is configured;
- *  falls back to op otherwise. Exactly one source is consulted per call — no
- *  silent double-prompt. The Keychain path also returns the native blob (if
- *  the item was the real `claude` CLI's own credential shape), so a rotation
- *  can write every field back, not just the refresh token in isolation. */
-async function readRefreshToken(): Promise<{ refreshToken: string; nativeBlob: ClaudeCredentials | null }> {
-  if (process.env.AUTHD_KEYCHAIN_SERVICE) return readFromKeychain();
-  return { refreshToken: await readFromOp(), nativeBlob: null };
+  writeEphemeral(parsed);
 }
 
 // ── Ops ──────────────────────────────────────────────────────────────────────
@@ -228,27 +182,37 @@ async function handleStatus(): Promise<unknown> {
   return { status: "ok", version: VERSION, since: startedAt.toISOString(), refreshLive: process.env.AUTHD_REFRESH_LIVE === "1" };
 }
 
-/** lease: refresh the access token (rotating the host-side refresh token) and
- *  return an ACCESS-TOKEN-ONLY credential for the box.
+/** How much slack before expiresAt still counts as "fresh enough to reuse
+ *  without a live refresh." Generous on purpose: every live refresh ROTATES
+ *  the refresh token server-side, so each one is a chance for the write-back
+ *  to fail and strand the source item — a lease should only pay that cost
+ *  when the current access token is actually running out, not on every call. */
+const STALE_BUFFER_MS = 5 * 60 * 1000;
+
+/** Pure: does this credential's access token still have enough life left to
+ *  hand out as-is, no refresh needed? */
+export function isStillFresh(creds: ClaudeCredentials, now: number = Date.now()): boolean {
+  return creds.claudeAiOauth.expiresAt - now > STALE_BUFFER_MS;
+}
+
+/** lease: return a fresh ACCESS-TOKEN-ONLY credential for the box — reusing
+ *  the current access token as-is when it still has life left (e.g. right
+ *  after a login, or shortly after a prior lease), only paying for a live
+ *  OAuth refresh (which ROTATES the host-side refresh token) when it's
+ *  actually stale.
  *
- *  Write-back (AUTHD.md Phase 2, now built): a live OAuth refresh ROTATES the
- *  refresh token server-side — the old one stops working the instant this
- *  succeeds. If the source was the native `claude` CLI's own Keychain item,
- *  the rotated credential is written straight back to that SAME item, so the
- *  host's own `claude` CLI keeps working off the new token — this refresh
- *  serves double duty as a real login refresh for it, not just an authd
- *  bookkeeping step. A bare-string Keychain item (no nativeBlob) or an op-
- *  sourced token has no write-back target yet (op's sole-writer rotation
- *  chain is still unbuilt) — those sources are left as they were before this
- *  call; only their in-memory rotated value is used for THIS lease. */
+ *  Write-back: a live refresh's rotation invalidates the OLD refresh token
+ *  the instant it succeeds. The rotated credential replaces the in-memory
+ *  ephemeral copy, so this process keeps refreshing off the new token for
+ *  the rest of its life — gone the moment it exits; only a restart needs a
+ *  fresh login. */
 async function handleLease(): Promise<unknown> {
-  const { refreshToken, nativeBlob } = await readRefreshToken();
-  const { creds, rotatedRefreshToken } = await refreshAccessToken(refreshToken);
-  if (nativeBlob && process.env.AUTHD_KEYCHAIN_SERVICE) {
-    await writeToKeychain({
-      claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: rotatedRefreshToken },
-    });
+  const { refreshToken, nativeBlob } = readEphemeral();
+  if (isStillFresh(nativeBlob)) {
+    return toAccessTokenOnly(nativeBlob);
   }
+  const { creds, rotatedRefreshToken } = await refreshAccessToken(refreshToken);
+  writeEphemeral({ claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: rotatedRefreshToken } });
   return toAccessTokenOnly(creds);
 }
 
@@ -272,8 +236,20 @@ function conciergeSocket(): string {
 }
 
 let issuerKeys: IssuerKeys | null = null;
+/** Grant verification needs the issuer's public key. The concierge model
+ *  (register-room + fetch-published-keys) isn't wired into claude-box.ts's
+ *  direct CLI launch path yet, so AUTHD_ISSUER_KEYS_PATH is the deliberately
+ *  simple stand-in: a static IssuerKeys JSON file on disk (see
+ *  lib/box-keys.ts), read directly — no daemon round-trip, no rotation.
+ *  Falls back to the concierge socket when that env var isn't set, so a
+ *  future concierge-backed deployment needs no change here. */
 async function fetchIssuerKeys(force = false): Promise<IssuerKeys> {
   if (issuerKeys && !force) return issuerKeys;
+  const localPath = process.env.AUTHD_ISSUER_KEYS_PATH;
+  if (localPath) {
+    issuerKeys = JSON.parse(readFileSync(localPath, "utf-8")) as IssuerKeys;
+    return issuerKeys;
+  }
   issuerKeys = await call<IssuerKeys>(conciergeSocket(), "keys");
   return issuerKeys;
 }
@@ -362,6 +338,16 @@ async function main(): Promise<number> {
       if (args[i] === "--socket" || args[i] === "-s") socketPath = args[++i]!;
       else if (args[i] === "--port" || args[i] === "-p") port = Number(args[++i]);
     }
+    // Seed from a single JSON credential line on stdin BEFORE listening — a
+    // lease requested before this resolves would otherwise race an unseeded
+    // store. stdin, never an argv value: an argv value shows up in `ps`.
+    const line = (await new Response(Bun.stdin.stream()).text()).split("\n")[0]?.trim();
+    if (!line) {
+      log("ERR", "no credential JSON was piped on stdin (see bellhop's login flow)");
+      return 1;
+    }
+    seedEphemeral(line);
+    log("INFO", "credential store seeded from stdin (in-memory only, nothing written to disk)");
     if (port) await serveTcp(port);
     else await serveUnix(socketPath);
     return 0;
@@ -370,8 +356,27 @@ async function main(): Promise<number> {
 
 Usage:
   authd serve                start daemon (foreground, unix socket)
-  authd serve --port PORT    listen on TCP (host→VM relay; signed-grant gated)
+  authd serve --port PORT    listen on TCP (host→VM relay; signed-grant gated,
+                             ALWAYS — see AUTHD_ISSUER_KEYS_PATH below)
   authd serve --socket PATH  custom socket path
+
+A single JSON credential line (the ClaudeCredentials shape, from
+\`claude-box check-in\`) must be piped on stdin at boot — the refresh token
+lives ONLY in this process's memory from then on, gone the instant it exits.
+Nothing ever touches disk. A restart requires a fresh login. Portable to any OS.
+
+ROOM_ID=name                 the audience a presented grant must match (the
+                              gate checks grant.binding.audience === ROOM_ID).
+                              For a direct \`claude-box --remote-serve\` launch
+                              (no concierge, no real rooms), this must be the
+                              fixed bastion name: ROOM_ID=claude-box-remote-serve.
+
+AUTHD_ISSUER_KEYS_PATH=path   verify tcp grants against a static local
+                              IssuerKeys JSON file (see claude-box's
+                              lib/box-keys.ts / \`claude-box auth-keys-path\`)
+                              instead of a concierge round-trip. Required for
+                              a direct \`claude-box --remote-serve\` launch,
+                              which isn't concierge-mediated.
 
 Ops (NDJSON): status, lease (access-token-only credential; refresh GUARDED
 until AUTHD.md Phase 0 — set AUTHD_REFRESH_LIVE=1). Box identity = signed grant
@@ -386,6 +391,9 @@ export function __setGrantRequired(v: boolean): void {
 }
 export function __setIssuerKeys(k: IssuerKeys | null): void {
   issuerKeys = k;
+}
+export function __resetEphemeral(): void {
+  ephemeralCred = null;
 }
 export type { RequestEnvelope, ResponseEnvelope };
 

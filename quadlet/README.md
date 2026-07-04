@@ -11,6 +11,7 @@ quadlet/
 ├── scout-netd.container   # scoutd's egress door (a netd instance: GitHub allowlist)
 ├── scoutd.container       # external reads — runs --network=none, egress via scout-netd
 ├── launcherd.container    # launch + dispatch doors — image builds and runs; host-podman-socket access still unresolved, see its header comment
+├── authd.container        # Remote Control auth door — ephemeral credential, human check-in step required per restart, see its header comment
 └── remote-serve.container # the singleton RC dispatcher bastion — unvalidated against a real host, see its header comment
 ```
 

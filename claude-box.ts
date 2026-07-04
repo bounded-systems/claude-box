@@ -556,6 +556,14 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
                               (env-sourced grant, not baked in) — written to
                               a file by ExecStartPre=, bind-mounted in, so
                               the unit's Exec= never embeds it directly.
+  claude-box remote-serve-status
+                              is the singleton RC bastion running, which
+                              container backs it, since when, and has it been
+                              crash-looping recently — wraps the systemctl/
+                              podman/journalctl checks into one command. Does
+                              NOT confirm which app-visible RC session it
+                              corresponds to (that id is Anthropic-assigned,
+                              not derived from this container).
   claude-box doors init       one-shot setup (build images, install units)
   claude-box doors status     show door service status
   claude-box status           show launcherd status
@@ -1118,9 +1126,21 @@ export function buildRemoteServeScript(opts: {
   repo?: string;
   rcWorkspace: string;
   leaseCmd: string;
+  /** In unix-socket mode (no TCP relay to a host-exposed port), the box's
+   *  own HTTPS_PROXY=http://127.0.0.1:3128 points at nothing unless
+   *  SOMETHING bridges that loopback port to the mounted netd unix socket
+   *  — normally an in-box `socat` relay run()'s own pod/repo-origin
+   *  branches already start (see netdRelayCmd), but NOT this script's own
+   *  callers until now. Confirmed live: without this, the feature-flag
+   *  check `claude remote-control` does at boot fails ("the feature-flag
+   *  service was unreachable"). Omit when the caller doesn't hold/need the
+   *  net door, or is in TCP mode (where NETD_SOCK already points at a real
+   *  host-reachable address and no relay is needed). */
+  netdRelay?: string;
 }): string {
   const rcCwd = opts.repo ? "/work" : opts.rcWorkspace;
-  return `${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
+  const relay = opts.netdRelay ? `${opts.netdRelay} ` : "";
+  return `${relay}${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
 }
 
 /** Pure planner for `claude-box login` — the auth front door. Synthesizes a
@@ -2457,6 +2477,24 @@ async function hasPodmanMachine(): Promise<boolean> {
   return stdout.trim().length > 0;
 }
 
+/** Run a one-shot, output-capturing command against wherever systemd/journald
+ *  actually live: inside the podman machine VM (macOS — routed through
+ *  podmanMachineExec) or directly (Linux, no VM in the way). Plain `podman`
+ *  commands (ps/inspect/...) never need this — the podman CLI itself already
+ *  proxies to the machine's remote API on its own; this is only for the
+ *  VM-side OS commands (systemctl, journalctl) that podman doesn't proxy. */
+async function runOnDoorHost(
+  useMachine: boolean,
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  if (useMachine) return podmanMachineExec(args);
+  const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+  return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
 /** Get the quadlet directory (relative to this script). */
 function getQuadletDir(): string {
   return `${import.meta.dir}/quadlet`;
@@ -2529,22 +2567,8 @@ Examples:
 
   const useMachine = await hasPodmanMachine();
 
-  const runSystemctl = async (
-    args: string[],
-  ): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
-    if (useMachine) {
-      return podmanMachineExec(["systemctl", "--user", ...args]);
-    } else {
-      const proc = Bun.spawn(["systemctl", "--user", ...args], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
-      const code = await proc.exited;
-      return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() };
-    }
-  };
+  const runSystemctl = (args: string[]) =>
+    runOnDoorHost(useMachine, ["systemctl", "--user", ...args]);
 
   const targets =
     services.length > 0
@@ -3019,9 +3043,78 @@ function cmdPrintRcBootScript(): number {
     buildRemoteServeScript({
       rcWorkspace: RC_WORKSPACE,
       leaseCmd: authLeaseFromEnvCmd("CLAUDE_BOX_RC_GRANT"),
+      // A Quadlet-managed bastion is always unix-socket mode (never TCP —
+      // that's the macOS/virtiofs-only accommodation), so HTTPS_PROXY=
+      // http://127.0.0.1:3128 needs this relay bridging to the mounted
+      // /run/doors/netd.sock, the same way run()'s pod/repo-origin
+      // branches already bridge it for their own launch shapes.
+      netdRelay: "socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/doors/netd.sock & sleep 0.3;",
     }),
   );
   return 0;
+}
+
+const REMOTE_SERVE_CONTAINER = "claude-box-remote-serve";
+const REMOTE_SERVE_SERVICE = "remote-serve";
+
+/** `claude-box remote-serve-status` — wraps the ad hoc `podman ps` /
+ *  `systemctl --user status` / `journalctl` dance used to sanity-check the
+ *  singleton RC bastion into one command, run either directly (Linux) or
+ *  routed into the podman machine VM (macOS — see runOnDoorHost).
+ *
+ *  IMPORTANT scope limit, spelled out here so it isn't assumed away by a
+ *  future reader: the identifier the Claude app's Remote Control picker
+ *  shows next to a session (a short hex string) is assigned by Anthropic's
+ *  backend when `claude remote-control` registers the session — it is NOT
+ *  derived from, or guaranteed to match, this container's own id/hostname.
+ *  This command can tell you "is the bastion running, which container backs
+ *  it, since when" — it cannot tell you "is THIS the session the app is
+ *  showing," short of restarting the bastion and watching whether the app's
+ *  entry changes to a new identifier right after (a real but disruptive
+ *  test, deliberately not automated here — it kills whatever's attached). */
+async function cmdRemoteServeStatus(): Promise<number> {
+  const useMachine = await hasPodmanMachine();
+
+  const svc = await runOnDoorHost(useMachine, [
+    "systemctl", "--user", "is-active", REMOTE_SERVE_SERVICE,
+  ]);
+  console.log(`remote-serve.service: ${svc.stdout || svc.stderr || "unknown"}`);
+
+  const inspect = Bun.spawnSync(
+    ["podman", "inspect", REMOTE_SERVE_CONTAINER, "--format", "{{.Id}}|{{.State.StartedAt}}|{{.State.Running}}"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (inspect.exitCode !== 0) {
+    console.log(`container: not found (${new TextDecoder().decode(inspect.stderr).trim() || "no such container"})`);
+    return svc.ok ? 0 : 1;
+  }
+  const [fullId, startedAt, running] = new TextDecoder().decode(inspect.stdout).trim().split("|");
+  console.log(`container: ${REMOTE_SERVE_CONTAINER}`);
+  console.log(`  id: ${fullId?.slice(0, 12)} (full: ${fullId})`);
+  console.log(`  running: ${running}`);
+  console.log(`  started: ${startedAt}`);
+
+  // How many times has this unit (re)started recently? A tight cluster of
+  // "Take this session with you" banners is the crash-loop signature this
+  // exact command was built to catch (see this session's own debugging:
+  // RestartSec=5 means ~7 restarts in 40s reads as "it was crash-looping",
+  // not "seven people opened seven sessions").
+  const journal = await runOnDoorHost(useMachine, [
+    "journalctl", "--user", "-u", REMOTE_SERVE_SERVICE, "--no-pager",
+    "--since", "-15min", "-o", "cat",
+  ]);
+  const banners = journal.stdout.split("\n").filter((l) => l.includes("Take this session with you")).length;
+  console.log(`  RC session starts in the last 15min: ${banners}${banners >= 4 ? "  ⚠ crash-loop pattern — check journalctl --user -u remote-serve" : ""}`);
+
+  console.log(
+    `\nNote: the id the Claude app shows in its Remote Control picker is assigned\n` +
+    `by Anthropic's backend, not derived from this container — it will not\n` +
+    `necessarily match the "id" line above. To confirm causally, restart this\n` +
+    `service and check whether the app's entry changes right after (this\n` +
+    `interrupts whatever's currently attached):\n` +
+    `  ${useMachine ? "podman machine ssh -- " : ""}systemctl --user restart ${REMOTE_SERVE_SERVICE}`,
+  );
+  return svc.ok && running === "true" ? 0 : 1;
 }
 
 /** `claude-box authd-up` — the one-command version of the check-in → seed →
@@ -3138,6 +3231,8 @@ async function main(): Promise<number> {
       return cmdMintAuthGrant(rest);
     case "internal-print-rc-boot-script":
       return cmdPrintRcBootScript();
+    case "remote-serve-status":
+      return cmdRemoteServeStatus();
     case "auth-keys-path":
       // Prints the path to claude-box's own grant-signing public key (see
       // lib/box-keys.ts) — feed it to authd so it can verify grants a

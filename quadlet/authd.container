@@ -1,0 +1,86 @@
+# authd.container — Remote Control auth door (the --auth door)
+#
+# UNLIKE every other door here, authd's credential is EPHEMERAL by design —
+# seeded at boot, held in memory only, never written to disk (see authd.ts's
+# own header comment). A Quadlet unit can't perform the interactive OAuth
+# login itself (that needs a real human + browser), so the actual
+# credential-refresh step stays a human action:
+#
+#   claude-box check-in > ~/.claude-box/authd-cred.json
+#   systemctl --user restart authd
+#
+# Seeded via AUTHD_CRED_FILE (a bind-mounted file authd.ts reads directly),
+# NOT stdin — confirmed live that a detached (`podman run -d`) container,
+# even with `-i` and systemd's StandardInput=file: pointed at the same
+# file, does not reliably deliver piped stdin content (empty log, no error,
+# just never seeds). A bind-mounted file read directly sidesteps that
+# plumbing entirely.
+#
+# Re-reading the SAME file on every start (including an automatic
+# Restart=always retry) means a restart long after the refresh token has
+# already rotated in memory will seed a now-stale token and fail to
+# authenticate. Restart=always here buys resilience against transient
+# crashes with a still-fresh credential file, NOT unattended recovery from
+# an actually-expired login — that always needs the check-in step above,
+# done by a human, again.
+#
+# Install:
+#   cp *.volume *.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   claude-box check-in > ~/.claude-box/authd-cred.json   # human step, real browser login
+#   systemctl --user enable --now authd
+#
+# Logs:
+#   journalctl --user -u authd -f
+
+[Unit]
+Description=authd — Remote Control auth door for claude-box
+After=claude-doors-volume.service
+
+[Container]
+Image=localhost/authd:dev
+ContainerName=authd
+
+# Same numeric uid/gid as every other socket-creating door daemon — see
+# keeperd.container's comment for why (shared doors dir, no world-writable).
+UserNS=keep-id:uid=1000,gid=1000
+
+Volume=%h/.claude-box/run:/run/doors
+
+# The box-key issuer's PUBLIC key (claude-box auth-keys-path) — lets authd
+# verify grants a direct `claude-box --remote-serve`/dispatch launch mints
+# itself, without a live concierge round-trip. Public key material, not a
+# secret; still read-only.
+Volume=%h/.claude-box/issuer.pub.json:/keys/issuer.pub.json:ro
+Environment=AUTHD_ISSUER_KEYS_PATH=/keys/issuer.pub.json
+
+# The credential a human seeded via `claude-box check-in` (see the [Unit]
+# comment above) — read directly by authd.ts, never an argv value (shows up
+# in `ps`), never baked into the image.
+Volume=%h/.claude-box/authd-cred.json:/keys/authd-cred.json:ro
+Environment=AUTHD_CRED_FILE=/keys/authd-cred.json
+
+# The audience a presented grant must match — fixed, since there's only
+# ever ONE direct --remote-serve bastion per machine (bastionName()).
+Environment=ROOM_ID=claude-box-remote-serve
+
+# authd needs egress for the live OAuth refresh path (AUTHD_REFRESH_LIVE=1)
+# — unlike keeperd, this is not a pure local-socket daemon. No Network=none.
+
+# Security hardening
+NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+SecurityLabelDisable=true
+
+# Resource limits
+PidsLimit=128
+Memory=256m
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

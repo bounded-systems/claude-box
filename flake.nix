@@ -936,6 +936,37 @@
               };
             };
 
+          # claude-box-bundle — claude-box.ts bundled standalone (no image,
+          # just the JS), for populating the `claude-box-bundle` podman
+          # volume that remote-serve.container's ExecStartPre= reads from
+          # (see quadlet/remote-serve.container and quadlet/setup-vm.sh).
+          # Previously this volume was populated by hand-running `bun build
+          # --target=bun` on whatever checkout happened to be open — this
+          # package makes that step reproducible and pinned like every other
+          # image here, instead of a manual, undocumented one-off.
+          # Same source-tree + bundling approach as launcherd-image's own
+          # internal bundle (claude-box.ts is launcherd.ts's biggest
+          # dependency) — kept as a separate derivation rather than reusing
+          # launcherd-image's internal `launcherdBundle` because that binding
+          # is local to launcherd-image's own `let`, and this needs to be a
+          # standalone, directly-buildable output.
+          #   nix build .#claude-box-bundle   # ./result/claude-box.js
+          claude-box-bundle = pkgs.runCommand "claude-box-bundle"
+            { nativeBuildInputs = [ pkgs.bun ]; }
+            ''
+              mkdir -p src
+              cp ${./claude-box.ts} src/claude-box.ts
+              cp ${./door-interpose.ts} src/door-interpose.ts
+              cp -r ${./contract} src/contract
+              cp -r ${./guest-room} src/guest-room
+              cp -r ${./lib} src/lib
+              mkdir -p src/netd
+              cp ${./netd/netd.ts} src/netd/netd.ts
+              mkdir -p $out
+              cd src
+              HOME=$TMPDIR bun build claude-box.ts --target=bun --outfile=$out/claude-box.js
+            '';
+
           # concierged-image — the capability concierge as a container.
           # An INTRODUCER (CONCIERGE.md): holds a leased registry and hands back
           # attenuated door references on `resolve`. Pure routing — it never
@@ -1035,6 +1066,7 @@
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
             launcherd-image = self.packages.aarch64-linux.launcherd-image;
             authd-image = self.packages.aarch64-linux.authd-image;
+            claude-box-bundle = self.packages.aarch64-linux.claude-box-bundle;
             concierged-image = self.packages.aarch64-linux.concierged-image;
             # The default is the CLI, not the image. Installing/running a
             # `.tar.gz` (the old default) put junk entries in `nix profile` and

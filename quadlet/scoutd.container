@@ -20,6 +20,10 @@ Requires=scout-netd.service
 Image=localhost/scoutd:dev
 ContainerName=scoutd
 
+# Same numeric uid/gid as every other socket-creating door daemon — see
+# keeperd.container's comment for why (shared doors dir, no world-writable).
+UserNS=keep-id:uid=1000,gid=1000
+
 # Socket directory — mount the host's ~/.claude-box/run so sockets are accessible
 # from both the host CLI and containers. %h expands to the running user's home
 # (systemd specifier), so this stays host-agnostic — no per-machine editing.

@@ -43,6 +43,14 @@ After=claude-doors-volume.service
 Image=localhost/launcherd:dev
 ContainerName=launcherd
 
+# Same numeric uid/gid as every other socket-creating door daemon — see
+# keeperd.container's comment for why (shared doors dir, no world-writable).
+# Confirmed live: without this, launcherd's OWN assertSocketDir check
+# correctly refuses to start ("refusing socket in world-writable /run/doors
+# (hijack risk)") rather than silently trusting a directory anyone can write
+# to — this UserNS line is the actual fix, not a reason to relax that check.
+UserNS=keep-id:uid=1000,gid=1000
+
 # Socket directory — same shared volume every other door uses. launcherd
 # listens on BOTH launcherd.sock (general) and dispatch.sock (narrow) here —
 # see launcherd.ts's serve(socketPath, dispatchSocketPath).

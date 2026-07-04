@@ -12,6 +12,10 @@ import { createPublicKey, verify } from "node:crypto";
 import {
   ROOMS,
   handleRequest,
+  handleDispatch,
+  DISPATCH_METHODS,
+  sanitizeLabel,
+  buildPodmanArgv,
   generateLaunchId,
   sha256,
   loadOrCreateKey,
@@ -19,6 +23,7 @@ import {
 } from "../launcherd";
 import type { RequestEnvelope, ResponseEnvelope, SigningKey } from "../launcherd";
 import { PREDICATE_TYPE, IN_TOTO_STATEMENT_TYPE } from "../contract/types";
+import type { Launch, Manifest } from "../claude-box";
 
 describe("launcherd", () => {
   describe("rooms", () => {
@@ -48,6 +53,22 @@ describe("launcherd", () => {
         expect(typeof room.description).toBe("string");
       }
     });
+
+    test("dev, readonly, offline are dispatchable; dev-spawn and bootstrap are not", () => {
+      expect(ROOMS.dev.dispatchable).toBe(true);
+      expect(ROOMS.readonly.dispatchable).toBe(true);
+      expect(ROOMS.offline.dispatchable).toBe(true);
+      expect(ROOMS["dev-spawn"].dispatchable).toBeFalsy();
+      expect(ROOMS.bootstrap.dispatchable).toBeFalsy();
+    });
+
+    test("no dispatchable room holds the launcher door or opens ambient egress", () => {
+      for (const [name, room] of Object.entries(ROOMS)) {
+        if (!room.dispatchable) continue;
+        expect(room.doors).not.toContain("launcher");
+        expect(room.netOpen).toBeFalsy();
+      }
+    });
   });
 
   describe("generateLaunchId", () => {
@@ -62,6 +83,38 @@ describe("launcherd", () => {
     test("IDs start with box-", () => {
       const id = generateLaunchId();
       expect(id.startsWith("box-")).toBe(true);
+    });
+
+    test("splices a sanitized label in as a prefix, random suffix always appended", () => {
+      const id = generateLaunchId("fix-auth-bug");
+      expect(id.startsWith("box-fix-auth-bug-")).toBe(true);
+      // Two calls with the same label never collide.
+      expect(generateLaunchId("fix-auth-bug")).not.toBe(generateLaunchId("fix-auth-bug"));
+    });
+
+    test("falls back to the bare box-<rand> shape for no label", () => {
+      expect(generateLaunchId(undefined).startsWith("box-")).toBe(true);
+    });
+  });
+
+  describe("sanitizeLabel", () => {
+    test("lowercases and replaces disallowed characters", () => {
+      expect(sanitizeLabel("Fix Auth Bug!")).toBe("fix-auth-bug");
+    });
+
+    test("trims leading/trailing punctuation", () => {
+      expect(sanitizeLabel("--.fix-this.--")).toBe("fix-this");
+    });
+
+    test("truncates to 40 characters", () => {
+      const long = "a".repeat(60);
+      expect(sanitizeLabel(long)!.length).toBe(40);
+    });
+
+    test("returns undefined for empty, undefined, or all-punctuation input", () => {
+      expect(sanitizeLabel(undefined)).toBeUndefined();
+      expect(sanitizeLabel("")).toBeUndefined();
+      expect(sanitizeLabel("---...___")).toBeUndefined();
     });
   });
 
@@ -161,6 +214,71 @@ describe("launcherd", () => {
       expect(resp.ok).toBe(false);
       // Either DOORS_UNREACHABLE (socket exists but unreachable) or ENOENT (socket doesn't exist)
       expect(["DOORS_UNREACHABLE", "ENOENT"]).toContain(resp.error?.code ?? "");
+    });
+  });
+
+  describe("dispatch", () => {
+    test("is unreachable on the general METHODS table", async () => {
+      const resp = await handleRequest(
+        JSON.stringify({ id: "d-1", method: "dispatch", params: { room: "dev" } })
+      );
+      expect(resp.ok).toBe(false);
+      expect(resp.error?.code).toBe("UNKNOWN_METHOD");
+    });
+
+    test("launch/kill/list/attach/status/rooms are unreachable on the dispatch table", async () => {
+      for (const method of ["launch", "kill", "list", "attach", "status", "rooms"]) {
+        const resp = await handleRequest(
+          JSON.stringify({ id: "d-2", method, params: {} }),
+          DISPATCH_METHODS
+        );
+        expect(resp.ok).toBe(false);
+        expect(resp.error?.code).toBe("UNKNOWN_METHOD");
+      }
+    });
+
+    test("requires a room name", async () => {
+      const resp = await handleRequest(JSON.stringify({ id: "d-3", method: "dispatch", params: {} }), DISPATCH_METHODS);
+      expect(resp.ok).toBe(false);
+      expect(resp.error?.code).toBe("INVALID_REQUEST");
+    });
+
+    test("refuses a non-dispatchable room (dev-spawn holds launcher)", async () => {
+      const resp = await handleRequest(
+        JSON.stringify({ id: "d-4", method: "dispatch", params: { room: "dev-spawn" } }),
+        DISPATCH_METHODS
+      );
+      expect(resp.ok).toBe(false);
+      expect(resp.error?.code).toBe("ROOM_NOT_DISPATCHABLE");
+      expect(resp.error?.message).toContain("Available:");
+    });
+
+    test("refuses an unknown room", async () => {
+      const resp = await handleRequest(
+        JSON.stringify({ id: "d-5", method: "dispatch", params: { room: "does-not-exist" } }),
+        DISPATCH_METHODS
+      );
+      expect(resp.ok).toBe(false);
+      expect(resp.error?.code).toBe("ROOM_NOT_DISPATCHABLE");
+    });
+
+    // Can't fully test dispatch without podman/doors running (same caveat as
+    // `launch`), but this proves two load-bearing things at once: doors are
+    // resolved GLOBALLY for a dispatchable room (no caller record, so no
+    // ATTENUATION_VIOLATION even though this test has no caller at all), and
+    // net+auth are always added on top of the room's own door list — "dev"
+    // only lists keeper/net/scout, so "auth" showing up in the unreachable
+    // list proves the addition happened.
+    test("resolves a dispatchable room's doors globally, always adding net+auth", async () => {
+      const resp = await handleRequest(
+        JSON.stringify({ id: "d-6", method: "dispatch", params: { room: "dev", label: "fix-auth-bug" } }),
+        DISPATCH_METHODS
+      );
+      expect(resp.ok).toBe(false);
+      expect(["DOORS_UNREACHABLE", "ENOENT"]).toContain(resp.error?.code ?? "");
+      if (resp.error?.code === "DOORS_UNREACHABLE") {
+        expect(resp.error.message).toContain("auth");
+      }
     });
   });
 
@@ -457,5 +575,124 @@ describe("caller-based policy (SO_PEERCRED)", () => {
   // Reset policy after tests
   test("cleanup policy", () => {
     setPolicy(null);
+  });
+
+  describe("buildPodmanArgv — rcServe mode (used only by handleDispatch)", () => {
+    const launch: Launch = {
+      guest: "claude",
+      repo: undefined,
+      repoRw: false,
+      repoEphemeral: false,
+      repoClone: false,
+      repoDoorRef: "main",
+      pod: false,
+      writable: [],
+      doors: [],
+      netOpen: false,
+      remoteControl: false,
+      remoteServe: true,
+      guestArgs: [],
+    };
+    const manifest: Manifest = {
+      guest: "claude",
+      repo: undefined,
+      repoRw: false,
+      repoEphemeral: false,
+      repoClone: false,
+      writable: [],
+      doors: [],
+      netOpen: false,
+      denied: [],
+      depth: 0,
+    };
+
+    test("omitted: behaves exactly like an ordinary launch (no entrypoint override)", async () => {
+      const argv = await buildPodmanArgv(launch, manifest, "box-plain-abc123");
+      expect(argv).not.toContain("--entrypoint");
+      expect(argv).toContain("claude-config:/home/claude/.config/claude:U");
+    });
+
+    test("present: overrides the entrypoint, uses a throwaway tmpfs, passes remoteControlArgs positionally", async () => {
+      const argv = await buildPodmanArgv(launch, manifest, "box-fix-auth-bug-abc123", {
+        leaseCmd: "echo lease",
+        remoteControlArgs: ["remote-control", "--spawn", "session", "--name", "fix-auth-bug"],
+      });
+      expect(argv).toContain("--entrypoint");
+      expect(argv[argv.indexOf("--entrypoint") + 1]).toBe("sh");
+      // Throwaway tmpfs, never the shared persistent volume.
+      expect(argv.some((a) => a.includes("home/claude/.config/claude:rw,mode=1777"))).toBe(true);
+      expect(argv).not.toContain("claude-config:/home/claude/.config/claude:U");
+      // "-c", "<script>", "claude-box", ...remoteControlArgs — tail order intact.
+      const cIdx = argv.indexOf("-c");
+      expect(argv.slice(cIdx)).toEqual([
+        "-c",
+        argv[cIdx + 1], // the script itself — content is buildRemoteServeScript's concern, not this one
+        "claude-box",
+        "remote-control",
+        "--spawn",
+        "session",
+        "--name",
+        "fix-auth-bug",
+      ]);
+      expect(typeof argv[cIdx + 1]).toBe("string");
+      expect((argv[cIdx + 1] as string).length).toBeGreaterThan(0);
+    });
+  });
+});
+
+describe("dispatch rate/concurrency limits — non-permissive by default", () => {
+  const {
+    setPolicy,
+    checkDispatchRateLimit,
+    checkDispatchConcurrentLimit,
+    recordDispatch,
+    __resetDispatchLimits,
+    __seedActiveDispatchCount,
+  } = require("../launcherd");
+
+  test("no policy still enforces a bounded default concurrency (unlike checkConcurrentLimit)", () => {
+    setPolicy(null);
+    __resetDispatchLimits();
+    expect(checkDispatchConcurrentLimit().allowed).toBe(true);
+    __seedActiveDispatchCount(5); // DEFAULT_MAX_CONCURRENT_DISPATCHED
+    expect(checkDispatchConcurrentLimit().allowed).toBe(false);
+    __resetDispatchLimits();
+  });
+
+  test("no policy still enforces a bounded default rate (unlike checkRateLimit)", () => {
+    setPolicy(null);
+    __resetDispatchLimits();
+    for (let i = 0; i < 20; i++) {
+      // DEFAULT_DISPATCH_RATE_LIMIT.max
+      expect(checkDispatchRateLimit().allowed).toBe(true);
+      recordDispatch();
+    }
+    const over = checkDispatchRateLimit();
+    expect(over.allowed).toBe(false);
+    expect(over.reason).toContain("dispatch rate limit exceeded");
+    __resetDispatchLimits();
+  });
+
+  test("policy.maxConcurrentDispatched overrides the default", () => {
+    setPolicy({ rules: [], maxConcurrentDispatched: 2 });
+    __resetDispatchLimits();
+    __seedActiveDispatchCount(2);
+    expect(checkDispatchConcurrentLimit().allowed).toBe(false);
+    __seedActiveDispatchCount(1);
+    expect(checkDispatchConcurrentLimit().allowed).toBe(true);
+    setPolicy(null);
+    __resetDispatchLimits();
+  });
+
+  test("policy.dispatchRateLimit overrides the default window/max", () => {
+    setPolicy({ rules: [], dispatchRateLimit: { window: 60, max: 1 } });
+    __resetDispatchLimits();
+    expect(checkDispatchRateLimit().allowed).toBe(true);
+    recordDispatch();
+    const second = checkDispatchRateLimit();
+    expect(second.allowed).toBe(false);
+    expect(second.reason).toContain("dispatch rate limit exceeded");
+    setPolicy(null);
+    __resetDispatchLimits();
   });
 });

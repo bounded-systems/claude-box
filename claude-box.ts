@@ -121,7 +121,7 @@ const BOX_CONFIG_DIR = "/home/claude/.config/claude";
 // "claude-box" (not "workspace") because the pre-created RC session's
 // display name is this directory's basename — a generic "workspace" name
 // was indistinguishable from any other tool's bastion in the RC list.
-const RC_WORKSPACE = "/home/claude/claude-box";
+export const RC_WORKSPACE = "/home/claude/claude-box";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -401,6 +401,24 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       grants: "spawn sub-boxes via launcherd (you hold no runtime)",
       use: "Spawn sub-boxes by requesting through launcherd at /run/doors/launcherd.sock ($LAUNCHERD_SOCK). You hold NO podman, NO runtime — request a spawn with a capability profile and launcherd performs it. Send JSON requests: {op:'spawn', profile:'work', doors:['keeper','net']}. The sub-box inherits doors you specify (if policy permits).",
       deny: "No spawn authority in this box. Do not attempt to launch containers or claim spawns succeeded — there is nothing in the box to spawn with. If the task needs sub-boxes, it must be RELAUNCHED with --launcher.",
+    },
+    // The dispatch door — deliberately NOT the launcher door. A box holding
+    // ONLY "dispatch" mounts a socket that speaks nothing but launcherd's
+    // narrow `dispatch` method (see launcherd.ts's DISPATCH_METHODS): no
+    // launch/kill/list/attach/status, no way to name a door/repo/escape
+    // flag. You send {room, label}; if the room is on launcherd's
+    // dispatchable allow-list, an entirely independent, separately-
+    // attachable `claude remote-control --spawn session` box is started —
+    // otherwise the request is refused. There is no ongoing connection to
+    // what gets started: no attach, no kill, no status feed. See --remote-serve.
+    dispatch: {
+      flag: "--dispatch",
+      inBox: "/run/doors/dispatch.sock",
+      env: "DISPATCH_SOCK",
+      hostDefault: env.DISPATCH_SOCK ?? defaultHostSock("dispatch", env),
+      grants: "request an independent, separately-attachable task session via launcherd's dispatch lane",
+      use: "Send exactly {room, label} to /run/doors/dispatch.sock ($DISPATCH_SOCK), one JSON line at a time: {\"id\":\"1\",\"method\":\"dispatch\",\"params\":{\"room\":\"dev\",\"label\":\"fix-auth-bug\"}}. `room` must be one of launcherd's dispatchable rooms (ask via a normal launcherd `rooms` call if unsure, or default to \"dev\"/\"readonly\"/\"offline\"). You will NEVER see, attach to, or manage what comes back — a new, independently-credentialed remote-control session appears as its OWN entry in the Claude app's session list, named for `label`. One task, one box: dispatch a fresh one per task rather than trying to reuse one.",
+      deny: "No dispatch authority in this box. Do not attempt to request sub-sessions or claim one was started; relaunch with --remote-serve (which grants this automatically) if the task needs it.",
     },
   };
 }
@@ -799,9 +817,17 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       // imply the auth door: a long-lived bastion leases its RC credential
       // from authd (ephemeral, access-token-only) instead of holding a
       // persisted refresh token in a volume — see the lease step in run().
+      // Also imply the dispatch door (NOT launcher — see knownDoors' comment
+      // on "dispatch"): a --remote-serve bastion's whole purpose is to be the
+      // one singleton you can ask to start independent task sessions, and
+      // dispatch is deliberately safe-by-construction to grant automatically
+      // (it can only ever trigger a root-resolved, allow-listed room launch,
+      // never an arbitrary door grant) — unlike launcher, which stays an
+      // explicit, separate opt-in.
       remoteServe = true;
       add(resolveDoor("net", undefined, env));
       add(resolveDoor("auth", undefined, env));
+      add(resolveDoor("dispatch", undefined, env));
       continue;
     }
     if (t === "--keeper") {
@@ -951,17 +977,19 @@ export function rcEgressAllow(launch: Launch): string[] {
  *  instead of an interactive session. Flags come from
  *  lib/remote-control-flags.ts (see schemas/remote-control-flags.schema.json
  *  for the full rationale) — one definition instead of ad hoc argv pushes.
- *  `--spawn worktree` needs an actual git repo, and --remote-serve can run
- *  with none mounted at all, so it only applies when `launch.repo` is set;
- *  otherwise same-dir (claude's own default) is the only option that works.
+ *  `--spawn session` needs no repo, so unlike the old `worktree`/`same-dir`
+ *  split this applies unconditionally, whether or not `launch.repo` is set.
  *  Empty for any non-serve launch, so the interactive entrypoint is
  *  byte-for-byte unchanged. */
 function remoteServeArgs(launch: Launch): string[] {
   if (!launch.remoteServe) return [];
-  const flags: RemoteControlFlags = {
-    ...CLAUDE_BOX_DEFAULT_FLAGS,
-    spawn: launch.repo ? CLAUDE_BOX_DEFAULT_FLAGS.spawn : "same-dir",
-  };
+  // --spawn session needs no repo (unlike the old --spawn worktree default),
+  // so there's no repo-conditional fallback to same-dir anymore — this is
+  // the one, unconditional posture. --name distinguishes the bastion itself
+  // in the Claude app's session list from every task session it dispatches
+  // (see the "dispatch" door) — those get their OWN --name from the
+  // caller-supplied label, never this one.
+  const flags: RemoteControlFlags = { ...CLAUDE_BOX_DEFAULT_FLAGS, name: "dispatch" };
   return ["remote-control", ...renderRemoteControlArgs(flags)];
 }
 
@@ -973,7 +1001,7 @@ function remoteServeArgs(launch: Launch): string[] {
  *  re-lease call in the bastion's background loop (see run()), since the box
  *  itself holds no signing key to mint a fresh one — a bastion outliving this
  *  needs a restart. Real per-launch/short-lived issuance is future hardening. */
-function mintAuthGrant(authDoor: DoorGrant, audience: string): SignedGrant {
+export function mintAuthGrant(authDoor: DoorGrant, audience: string): SignedGrant {
   const key = loadOrCreateBoxKey();
   return signGrant(
     authDoor,
@@ -1006,7 +1034,7 @@ function mintAuthGrant(authDoor: DoorGrant, audience: string): SignedGrant {
  *  "continuity across expiry" question — this only guarantees the FILE is
  *  always current; a re-lease loop wraps this for a long-lived bastion (see
  *  run()). */
-function authLeaseCmd(grant?: SignedGrant): string {
+export function authLeaseCmd(grant?: SignedGrant): string {
   const req: Record<string, unknown> = { id: "1", method: "lease", params: {} };
   if (grant) req.grant = grant;
   // A JS string literal (via JSON.stringify) whose value IS the exact NDJSON
@@ -1028,6 +1056,24 @@ function authLeaseCmd(grant?: SignedGrant): string {
     `s.on("error",e=>{console.error("authd connect failed: "+e.message);process.exit(1)});` +
     `'`
   );
+}
+
+/** The shell script that boots ANY box (the --remote-serve bastion, or a
+ *  dispatched task session launched via launcherd's `dispatch` RPC) into a
+ *  real, credentialed `claude remote-control` session: mkdir the workspace
+ *  if nothing else already mounted one, lease the RC credential (and keep
+ *  re-leasing it every 10 minutes for as long as the box stays up), pre-seed
+ *  that workspace's trust-dialog acceptance, then exec claude with "$@" —
+ *  the remote-control argv passed as this script's own positional params by
+ *  the caller (never string-interpolated). Shared by claude-box.ts's own
+ *  `run()` and launcherd.ts's `handleDispatch` so the two never drift. */
+export function buildRemoteServeScript(opts: {
+  repo?: string;
+  rcWorkspace: string;
+  leaseCmd: string;
+}): string {
+  const rcCwd = opts.repo ? "/work" : opts.rcWorkspace;
+  return `${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
 }
 
 /** Pure planner for `claude-box login` — the auth front door. Synthesizes a
@@ -1872,9 +1918,9 @@ async function run(
       );
       // If a repo is mounted, RC runs THERE (/work, already the podman -w) —
       // not the synthetic no-repo workspace. Either way the workspace still
-      // needs its trust pre-seeded (see RC_WORKSPACE above); /work doesn't
-      // need mkdir since planRepoMount already bind-mounted it.
-      const rcCwd = repo ? "/work" : RC_WORKSPACE;
+      // needs its trust pre-seeded — see buildRemoteServeScript, which also
+      // skips the mkdir when a repo is mounted since planRepoMount already
+      // bind-mounted it.
       // Lease the RC credential from authd BEFORE claude ever starts (the tmpfs
       // config mount above starts with no .credentials.json at all), then keep
       // it fresh with a backgrounded re-lease every 10 minutes for as long as
@@ -1889,7 +1935,7 @@ async function run(
       // remote-control invocation (remoteServeArgs), never string-interpolated.
       argv.push(
         "-c",
-        `${repo ? "" : `mkdir -p ${rcCwd}; `}${leaseCmd}; (while true; do sleep 600; ${leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`,
+        buildRemoteServeScript({ repo, rcWorkspace: RC_WORKSPACE, leaseCmd }),
         "claude-box",
         ...remoteServeArgs(launch),
       );

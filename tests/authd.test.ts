@@ -56,6 +56,27 @@ describe("authd gateGrant — door='auth' (the OIDC identity)", () => {
     expect((await gateGrant({ id: "1", method: "lease", grant: grant("keeper") })).reason).toBe("wrong-door");
   });
 
+  test("a grant minted for a different room (audience) is rejected", async () => {
+    const grantForOtherRoom = signGrant(
+      door("auth"),
+      { audience: "room-B", exp: Date.now() + 60_000, nonce: "n2", keyId: "k1" },
+      sign,
+    );
+    // ROOM_ID is "room-A" (beforeEach); this grant's audience is "room-B".
+    const result = await gateGrant({ id: "1", method: "lease", grant: grantForOtherRoom });
+    expect(result.ok).toBe(false);
+  });
+
+  test("an expired grant is rejected even though the signature is valid", async () => {
+    const expiredGrant = signGrant(
+      door("auth"),
+      { audience: "room-A", exp: Date.now() - 1_000, nonce: "n3", keyId: "k1" },
+      sign,
+    );
+    const result = await gateGrant({ id: "1", method: "lease", grant: expiredGrant });
+    expect(result.ok).toBe(false);
+  });
+
   test("handleRequest refuses an ungranted lease with UNAUTHORIZED (no handler reached)", async () => {
     const resp = await handleRequest(JSON.stringify({ id: "9", method: "lease" }));
     expect(resp.ok).toBe(false);

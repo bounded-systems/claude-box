@@ -60,7 +60,7 @@ test("no --writable ⇒ empty (whole worktree writable, unchanged default)", () 
 
 test("manifest surface reflects the narrowed writable set (json + prompt)", () => {
   const l = planLaunch(["--repo", ".", "--writable", "src", "--keeper"], ENV);
-  const m = buildManifest("personal", l, ENV);
+  const m = buildManifest(l, ENV);
   const json = JSON.parse(capabilityJson(m));
   expect(json.granted.writable).toEqual(["src"]);
   expect(capabilityPrompt(m)).toContain("READ-ONLY except: src");
@@ -68,6 +68,6 @@ test("manifest surface reflects the narrowed writable set (json + prompt)", () =
 
 test("manifest: no --writable ⇒ writable is null (whole worktree writable)", () => {
   const l = planLaunch(["--repo", "."], ENV);
-  const json = JSON.parse(capabilityJson(buildManifest("personal", l, ENV)));
+  const json = JSON.parse(capabilityJson(buildManifest(l, ENV)));
   expect(json.granted.writable).toBeNull();
 });

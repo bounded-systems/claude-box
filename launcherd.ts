@@ -410,7 +410,6 @@ async function getContainerId(launchId: string): Promise<string | undefined> {
 
 type LaunchRecord = {
   launchId: string;
-  account: string;
   pid: number;          // the `podman run` cli pid (attach/kill); NOT the peercred caller pid
   containerId?: string; // podman container Id — correlates a spawn caller's cgroup back here
   startedAt: Date;
@@ -642,9 +641,7 @@ async function handleStatus(_params: Record<string, unknown>): Promise<unknown> 
   };
 }
 
-async function handleList(params: Record<string, unknown>): Promise<unknown> {
-  const accountFilter = params.account as string | undefined;
-
+async function handleList(): Promise<unknown> {
   // Clean up exited processes
   for (const [id, rec] of launches) {
     if (rec.proc.exitCode !== null) {
@@ -653,10 +650,8 @@ async function handleList(params: Record<string, unknown>): Promise<unknown> {
   }
 
   const result = [...launches.values()]
-    .filter((rec) => !accountFilter || rec.account === accountFilter)
     .map((rec) => ({
       launchId: rec.launchId,
-      account: rec.account,
       pid: rec.pid,
       startedAt: rec.startedAt.toISOString(),
       doors: rec.doors.map((d) => d.name),
@@ -717,7 +712,6 @@ async function handleAttach(params: Record<string, unknown>): Promise<unknown> {
 }
 
 async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
-  const account = (params.account as string) ?? "personal";
   const repo = params.repo as string | undefined;
   const repoRw = (params.repoRw as boolean) ?? false;
   const roomName = params.room as string | undefined;
@@ -753,11 +747,6 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   const depth = callerRecord ? callerRecord.depth + 1 : 0;
   if (callerRecord) {
     log("INFO", `caller pid ${caller?.pid} → launch ${callerRecord.launchId} (depth ${callerRecord.depth}, doors [${callerRecord.doors.map((d) => d.name).join(",")}]); child depth ${depth}, references delegated from the parent`);
-  }
-
-  // Validate account
-  if (!/^[A-Za-z0-9._-]+$/.test(account)) {
-    throw { code: "INVALID_ACCOUNT", message: `invalid account name: ${account}` };
   }
 
   // Check rate limit
@@ -838,7 +827,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     remoteServe: false,
     guestArgs,
   };
-  const manifest = buildManifest(account, launch, process.env, depth);
+  const manifest = buildManifest(launch, process.env, depth);
   const manifestJson = capabilityJson(manifest);
 
   // From here on the interposers are live; tear them down if launch assembly or
@@ -855,7 +844,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     }
 
     // Build podman argv
-    const argv = await buildPodmanArgv(account, launch, manifest, launchId);
+    const argv = await buildPodmanArgv(launch, manifest, launchId);
 
     // Spawn
     proc = Bun.spawn(argv, {
@@ -875,7 +864,6 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
 
   const record: LaunchRecord = {
     launchId,
-    account,
     pid: proc.pid,
     containerId,
     startedAt: new Date(),
@@ -903,7 +891,6 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     launchId,
     pid: proc.pid,
     manifest: {
-      account: manifest.account,
       repo: manifest.repo,
       doors: manifest.doors.map((d) => d.name),
       denied: manifest.denied.map((d) => d.name),
@@ -919,7 +906,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
   };
 }
 
-async function buildPodmanArgv(account: string, launch: Launch, manifest: Manifest, launchId: string): Promise<string[]> {
+async function buildPodmanArgv(launch: Launch, manifest: Manifest, launchId: string): Promise<string[]> {
   const { repo, repoRw, doors, netOpen, guestArgs } = launch;
 
   const argv = [
@@ -928,7 +915,7 @@ async function buildPodmanArgv(account: string, launch: Launch, manifest: Manife
     "--security-opt", "no-new-privileges",
     "--cap-drop", "all",
     "--pids-limit", "2048",
-    "-v", `claude-${account}-config:/home/claude/.config/claude:U`,
+    "-v", "claude-config:/home/claude/.config/claude:U",
   ];
 
   // Network handling

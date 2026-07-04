@@ -139,17 +139,9 @@ describe("launcherd", () => {
       expect(resp.error?.code).toBe("INVALID_PARAMS");
     });
 
-    test("launch rejects invalid account", async () => {
-      const resp = await handleRequest(
-        JSON.stringify({ id: "test-6", method: "launch", params: { account: "../escape" } })
-      );
-      expect(resp.ok).toBe(false);
-      expect(resp.error?.code).toBe("INVALID_ACCOUNT");
-    });
-
     test("launch rejects unknown room", async () => {
       const resp = await handleRequest(
-        JSON.stringify({ id: "test-7", method: "launch", params: { account: "test", room: "nonexistent" } })
+        JSON.stringify({ id: "test-7", method: "launch", params: { room: "nonexistent" } })
       );
       expect(resp.ok).toBe(false);
       expect(resp.error?.code).toBe("UNKNOWN_ROOM");
@@ -163,7 +155,7 @@ describe("launcherd", () => {
         JSON.stringify({
           id: "test-8",
           method: "launch",
-          params: { account: "test", doors: ["keeper"] },
+          params: { doors: ["keeper"] },
         })
       );
       expect(resp.ok).toBe(false);
@@ -260,7 +252,7 @@ describe("L2 attestation", () => {
       netOpen: false,
       claudeArgs: [],
     };
-    const manifest = buildManifest("test", mockLaunch);
+    const manifest = buildManifest(mockLaunch);
     const manifestJson = capabilityJson(manifest);
     const launchId = "box-test-123";
     const imageDigest = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd";

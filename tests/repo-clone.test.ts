@@ -32,7 +32,7 @@ test("--repo / --repo-rw / --repo-ephemeral do NOT set repoClone", () => {
 });
 
 test("manifest JSON reports repoClone=true and repoGit ro (real .git unmounted)", () => {
-  const m = buildManifest("personal", planLaunch(["--repo-clone", "."], ENV), ENV);
+  const m = buildManifest(planLaunch(["--repo-clone", "."], ENV), ENV);
   const json = JSON.parse(capabilityJson(m));
   expect(json.granted.repoClone).toBe(true);
   // the SOURCE .git is never mounted, so the surface stays "ro" (not the unsafe rw)
@@ -40,7 +40,7 @@ test("manifest JSON reports repoClone=true and repoGit ro (real .git unmounted)"
 });
 
 test("in-box rulebook tells the agent it has full in-box git on a throwaway", () => {
-  const m = buildManifest("personal", planLaunch(["--repo-clone", "."], ENV), ENV);
+  const m = buildManifest(planLaunch(["--repo-clone", "."], ENV), ENV);
   const prompt = capabilityPrompt(m);
   expect(prompt).toContain("ISOLATED CLONE");
   expect(prompt).toContain("FULL in-box git");
@@ -48,7 +48,7 @@ test("in-box rulebook tells the agent it has full in-box git on a throwaway", ()
 });
 
 test("no --repo-clone ⇒ surface omits it (repoClone false)", () => {
-  const m = buildManifest("personal", planLaunch(["--repo", "."], ENV), ENV);
+  const m = buildManifest(planLaunch(["--repo", "."], ENV), ENV);
   expect(JSON.parse(capabilityJson(m)).granted.repoClone).toBe(false);
   expect(capabilityPrompt(m)).not.toContain("ISOLATED CLONE");
 });

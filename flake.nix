@@ -835,6 +835,107 @@
               };
             };
 
+          # authd-image — the Remote Control auth door as a container.
+          # UNLIKE keeperd/netd/scoutd/launcherd, authd's credential is
+          # EPHEMERAL, seeded from a single JSON line piped on stdin at boot
+          # (see authd.ts's own header comment) — nothing ever touches disk.
+          # A Quadlet unit for this needs to feed that stdin at container
+          # start (e.g. `StandardInput=file:...` + an ExecStartPre= that
+          # writes a fresh check-in credential there, the same shape already
+          # used for remote-serve.container's auth-grant ExecStartPre=) —
+          # NOT included here; this is just the image, the same scope
+          # launcherd-image covered before its own Quadlet wiring landed.
+          #   nix build .#authd-image && podman load -i result
+          #   claude-box check-in | podman run -i -v doors:/run/doors \
+          #     -e AUTHD_ISSUER_KEYS_PATH=/keys/issuer.json -v keys:/keys:ro \
+          #     -e ROOM_ID=claude-box-remote-serve authd
+          authd-image =
+            let
+              # No Bun.spawn anywhere in authd.ts (confirmed by inspection) —
+              # it's pure JS/network/file work, no external CLI dependency.
+              # cacert is still needed for the live OAuth refresh path
+              # (AUTHD_REFRESH_LIVE=1, talks to Anthropic's token endpoint).
+              authdTools = with pkgs; [
+                bun
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              authdEnv = pkgs.buildEnv {
+                name = "authd-image-root";
+                paths = authdTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # Same bundling approach as launcherd-image (bun build
+              # --target=bun, NOT --compile — see that derivation's comment
+              # for why) — authd.ts's import surface is small (lib/runtime.ts
+              # + guest-room/mod.ts, same as keeperd/scoutd), so this is
+              # more belt-and-suspenders than strictly necessary here, but
+              # keeps one bundling pattern across every daemon image rather
+              # than two.
+              authdBundle = pkgs.runCommand "authd-bundle"
+                { nativeBuildInputs = [ pkgs.bun ]; }
+                ''
+                  mkdir -p src/lib src/guest-room
+                  cp ${./authd.ts} src/authd.ts
+                  cp ${./lib/runtime.ts} src/lib/runtime.ts
+                  cp ${./guest-room/mod.ts} src/guest-room/mod.ts
+                  cp ${./guest-room/daemon.ts} src/guest-room/daemon.ts
+                  cp ${./guest-room/protocol.ts} src/guest-room/protocol.ts
+                  mkdir -p $out
+                  cd src
+                  HOME=$TMPDIR bun build authd.ts --target=bun --outfile=$out/authd.js
+                '';
+
+              authdEntrypoint = pkgs.writeShellScript "authd-entrypoint" ''
+                exec bun /app/authd.js serve \
+                  --socket /run/doors/authd.sock \
+                  "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "authd";
+              tag = "dev";
+
+              contents = [ authdEnv authdBundle ];
+
+              extraCommands = ''
+                mkdir -p app etc tmp run/doors keys
+                cp ${authdBundle}/authd.js app/authd.js
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                authd:x:${toString uid}:${toString uid}:authd:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                authd:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                chown -R ${toString uid}:${toString uid} run/doors keys
+              '';
+
+              config = {
+                Entrypoint = [ "${authdEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "authd";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                  "/keys" = {};
+                };
+              };
+            };
+
           # concierged-image — the capability concierge as a container.
           # An INTRODUCER (CONCIERGE.md): holds a leased registry and hands back
           # attenuated door references on `resolve`. Pure routing — it never
@@ -933,6 +1034,7 @@
             netd-image = self.packages.aarch64-linux.netd-image;
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
             launcherd-image = self.packages.aarch64-linux.launcherd-image;
+            authd-image = self.packages.aarch64-linux.authd-image;
             concierged-image = self.packages.aarch64-linux.concierged-image;
             # The default is the CLI, not the image. Installing/running a
             # `.tar.gz` (the old default) put junk entries in `nix profile` and

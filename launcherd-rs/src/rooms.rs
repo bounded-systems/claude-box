@@ -1,0 +1,102 @@
+//! Room registry — the dispatch allow-list.
+//!
+//! `dispatch` accepts only a room *name* off this list (plus a label); it can
+//! never name a door, repo, or escape flag (see `protocol::DispatchParams`).
+//! Mirrors `launcherd.ts`'s `ROOMS`: exactly `dev`, `readonly`, and `offline`
+//! are dispatchable. `dev-spawn` (holds `launcher`) and `bootstrap` (full
+//! egress) are deliberately absent, so a dispatched box structurally cannot
+//! itself dispatch or spawn further.
+
+/// A dispatchable room: its base door set. Every dispatched box additionally
+/// gets `net` + `auth` (it runs its own RC server and leases its own
+/// credential) — see [`Room::door_specs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Room {
+    pub name: &'static str,
+    base_doors: &'static [&'static str],
+}
+
+/// The dispatchable rooms, and only these. A name not here → `RoomNotDispatchable`.
+pub const DISPATCHABLE: &[Room] = &[
+    Room {
+        name: "dev",
+        base_doors: &["keeper", "net", "scout"],
+    },
+    Room {
+        name: "readonly",
+        base_doors: &["net", "scout"],
+    },
+    Room {
+        name: "offline",
+        base_doors: &[],
+    },
+];
+
+/// Look up a dispatchable room by name. `None` for unknown OR non-dispatchable
+/// names (`dev-spawn`, `bootstrap`, garbage) — the caller can't tell the
+/// difference, and shouldn't: from dispatch's side they're equally refused.
+pub fn dispatchable(name: &str) -> Option<Room> {
+    DISPATCHABLE.iter().copied().find(|r| r.name == name)
+}
+
+/// Comma-separated dispatchable room names, for the refusal message.
+pub fn available() -> String {
+    DISPATCHABLE
+        .iter()
+        .map(|r| r.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl Room {
+    /// The full door set for a dispatched box: the room's base doors plus
+    /// `net` + `auth` (always), de-duplicated, order-stable. Mirrors
+    /// `handleDispatch`'s `[...room.doors, "net", "auth"]` set.
+    pub fn door_specs(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = self.base_doors.to_vec();
+        for extra in ["net", "auth"] {
+            if !out.contains(&extra) {
+                out.push(extra);
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_readonly_offline_are_dispatchable() {
+        assert!(dispatchable("dev").is_some());
+        assert!(dispatchable("readonly").is_some());
+        assert!(dispatchable("offline").is_some());
+    }
+
+    #[test]
+    fn dev_spawn_and_bootstrap_and_garbage_are_not() {
+        assert!(dispatchable("dev-spawn").is_none());
+        assert!(dispatchable("bootstrap").is_none());
+        assert!(dispatchable("../etc/passwd").is_none());
+        assert!(dispatchable("").is_none());
+    }
+
+    #[test]
+    fn every_dispatched_box_gets_net_and_auth() {
+        let dev = dispatchable("dev").unwrap();
+        assert_eq!(dev.door_specs(), vec!["keeper", "net", "scout", "auth"]);
+        let ro = dispatchable("readonly").unwrap();
+        assert_eq!(ro.door_specs(), vec!["net", "scout", "auth"]);
+        let off = dispatchable("offline").unwrap();
+        assert_eq!(off.door_specs(), vec!["net", "auth"]);
+    }
+
+    #[test]
+    fn net_is_not_duplicated_when_room_already_has_it() {
+        // readonly already has net; door_specs must not list it twice.
+        let ro = dispatchable("readonly").unwrap();
+        let nets = ro.door_specs().iter().filter(|d| **d == "net").count();
+        assert_eq!(nets, 1);
+    }
+}

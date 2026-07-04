@@ -1,24 +1,24 @@
 # launcherd.container — launch-controller daemon (the --launcher and --dispatch doors)
 #
-# `nix build .#launcherd-image` NOW EXISTS and is real — built, loaded, and
-# smoke-tested end-to-end in a real podman container: both sockets come up
-# correctly, dispatch.sock structurally cannot reach launch/kill/list/attach
-# (UNKNOWN_METHOD), and non-dispatchable rooms are refused. That part of
-# "not ready to run" is resolved.
+# `nix build .#launcherd-image` is real — built, loaded, and smoke-tested
+# end-to-end in a real podman container: both sockets come up correctly,
+# dispatch.sock structurally cannot reach launch/kill/list/attach
+# (UNKNOWN_METHOD), and non-dispatchable rooms are refused.
 #
-# What's STILL open, found by testing it for real rather than guessing:
-# mounting the host's rootless podman API socket into this container
-# (the CONTAINER_HOST approach below) reaches the socket (no ENOENT) but
-# gets a flat permission denial connecting to it — tried matching
-# --user to the socket's owning uid:gid, and --userns=keep-id, neither
-# resolved it (rootless-podman-in-rootless-podman user-namespace/SELinux
-# interaction, not a simple ownership fix). Disabling SELinux confinement
-# on the mount was NOT attempted as a fix here — that's a real security
-# posture change, not a config detail, and deserves a deliberate decision
-# by someone who owns that tradeoff, not a quick unblock. Until this is
-# resolved, launcherd can run (and dispatch's socket-isolation guarantees
-# hold), but it cannot actually EXECUTE a spawn that reaches this host's
-# real podman.
+# Reaching the host's rootless podman API socket (the CONTAINER_HOST mount
+# below) is RESOLVED and verified live — `podman version`, `podman ps`, and a
+# real ephemeral `podman run` all succeed from inside this container. The
+# earlier "flat permission denial" this comment described was a MISDIAGNOSIS:
+# it was never a socket-permission / SELinux / rootless-in-rootless
+# user-namespace problem. keep-id:uid=1000 maps this container's uid 1000 back
+# to the VM's invoking user (uid 501), which owns the socket, so the
+# connection itself is fine. The actual failure was the podman CLIENT refusing
+# to initialize because the image bakes HOME=/root, which is neither writable
+# nor present for the uid-1000 process under ReadOnly=true ("cannot resolve
+# /root: lstat /root: no such file or directory"). The fix is a writable HOME
+# (Environment=HOME=/tmp below, backed by ReadOnlyTmpfs) — a config detail, NOT
+# the security-posture decision the old comment warned about. No SELinux
+# confinement was disabled; the socket mount keeps its default labeling.
 #
 # Boxes ask to spawn/inspect/kill sub-boxes through /run/doors/launcherd.sock
 # (the --launcher door, attenuated, name-based identity — see LAUNCHERD.md),
@@ -59,21 +59,26 @@ Volume=%h/.claude-box/run:/run/doors
 # launcherd is the one daemon that must reach the HOST's container runtime
 # (to actually spawn/inspect/kill sibling containers) — unlike keeperd/netd/
 # scoutd, which are pure socket daemons with no host-control surface at all.
-# This mount REACHES the socket but currently gets permission-denied talking
-# to it (see the [Unit] comment above for what was tried) — left in place as
-# the intended shape, not because it's known to work yet.
-#   Volume=%t/podman/podman.sock:/run/podman/podman.sock
-#   Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
-# This is a meaningfully more privileged grant than anything keeperd/netd/
-# scoutd need (it's adjacent to "control the host's container runtime") —
-# resolving the permission denial (matching uid/gid alone and --userns=
-# keep-id both failed in testing) needs someone who owns the security
-# tradeoff to decide the approach — e.g. a narrower proxy in front of the
-# socket, a dedicated rootless podman user the launcherd container's
-# namespace genuinely maps to, or another mechanism entirely — not a
-# quick unblock.
+# %t resolves to the VM systemd-user runtime dir (/run/user/501 here — the
+# invoking user's uid, NOT 1000), where the rootless podman API socket lives.
+# Verified live: launcherd reaches AND successfully uses this socket (spawn
+# works) once HOME is writable (see below). This is still a meaningfully more
+# privileged grant than anything keeperd/netd/scoutd hold — it is adjacent to
+# "control the host's container runtime" — so it stays scoped to this one
+# daemon; a narrower proxy in front of the socket remains a reasonable future
+# hardening, but is no longer a BLOCKER the way the old comment implied.
 Volume=%t/podman/podman.sock:/run/podman/podman.sock
 Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
+
+# The launcherd IMAGE bakes HOME=/root (it normally runs as root). Under
+# UserNS=keep-id:uid=1000 + ReadOnly=true, /root is neither present nor
+# writable for the uid-1000 process, and the podman CLIENT refuses to start
+# without a usable HOME ("cannot resolve /root: lstat /root: no such file or
+# directory") — which is what made spawns fail, NOT any socket-permission
+# issue. Point HOME at the writable tmpfs (ReadOnlyTmpfs gives /tmp) so the
+# client can initialize. Verified live: with this, `podman run` from inside
+# launcherd succeeds against the mounted host socket.
+Environment=HOME=/tmp
 
 # Security hardening — same floor as the other doors. NoNewPrivileges/
 # DropCapability=all/ReadOnly still apply to launcherd's OWN process; they do

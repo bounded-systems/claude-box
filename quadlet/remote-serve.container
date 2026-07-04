@@ -1,18 +1,28 @@
 # remote-serve.container — the singleton RC dispatcher bastion
 #
-# UNLIKE keeperd/netd/scoutd/launcherd, this unit has ONE unresolved piece:
-# `claude-box --remote-serve`'s CLI path mints a FRESH, freshly-signed authd
-# grant at invocation time (mintAuthGrant, claude-box.ts) and bakes it
-# directly into the boot script (buildRemoteServeScript's leaseCmd). A
-# systemd-started container has no such invocation moment — there is no CLI
-# process running to mint that grant before this unit's ExecStart fires.
-# Minting must stay host-side (the signing key never enters any box, by
-# design — see lib/box-keys.ts), so the real fix is a small NEW host-only
-# CLI verb (e.g. `claude-box internal-mint-auth-grant --audience
-# claude-box-remote-serve`) invoked from `ExecStartPre=`, writing the grant
-# to a file consumed via `EnvironmentFile=` — NOT implemented here. Treat
-# this unit as correct for everything BUT the auth lease until that lands;
-# don't `systemctl enable --now` it expecting a working RC session yet.
+# UNLIKE `claude-box --remote-serve`'s CLI path, this systemd-started
+# container has no invocation moment for claude-box.ts to mint a fresh
+# signed authd grant or build the RC bootstrap script inline (mintAuthGrant/
+# buildRemoteServeScript in run()). Both are produced host-side, once per
+# start, by ExecStartPre=, and handed to the container two ways:
+#   - the grant: base64, via an EnvironmentFile= (see cmdMintAuthGrant)
+#   - the boot script: a plain file, bind-mounted read-only (see
+#     cmdPrintRcBootScript) — NOT embedded directly in this unit's Exec=,
+#     because systemd's own argv-splitting rules (distinct from POSIX
+#     shell) make a script this size and this quote-heavy genuinely risky
+#     to hand-transcribe correctly without a real host to test against.
+#     Referencing it by path keeps Exec= itself trivial.
+# The signing key never leaves the host either way (see lib/box-keys.ts) —
+# only the signed grant object does, same as the CLI path.
+#
+# This unit is unvalidated against a real systemd+podman host (developed and
+# tested only in a sandboxed environment with no such host available) —
+# the mechanism and every piece it depends on (cmdMintAuthGrant,
+# cmdPrintRcBootScript, authLeaseFromEnvCmd) are unit-tested in isolation,
+# but the ExecStartPre=/EnvironmentFile=/bind-mounted-script wiring here has
+# not been exercised end-to-end. Sanity-check `systemctl --user start
+# remote-serve` + `journalctl --user -u remote-serve` on a real deployment
+# before relying on it.
 #
 # Install:
 #   cp *.volume *.container ~/.config/containers/systemd/
@@ -40,6 +50,15 @@ ContainerName=claude-box-remote-serve
 # (see claude-box.ts's --remote-serve block in planLaunch).
 Volume=%h/.claude-box/run:/run/doors
 
+# The freshly-minted grant (see [Service] ExecStartPre= below), read by the
+# boot script's lease step (authLeaseFromEnvCmd) at $CLAUDE_BOX_RC_GRANT.
+EnvironmentFile=%t/claude-box-rc-grant.env
+
+# The boot script itself (see [Service] ExecStartPre= below) — generated
+# fresh each start (so it always matches the current claude-box code), not
+# baked into the image.
+Volume=%t/claude-box-rc-boot.sh:/rc-boot.sh:ro
+
 # RC needs egress (leasing the credential from authd, then ordinary
 # inference/tool traffic) — default podman network, same posture as netd.
 # No Network=none here.
@@ -51,15 +70,10 @@ Volume=%h/.claude-box/run:/run/doors
 # `--tmpfs BOX_CONFIG_DIR:rw,mode=1777`.
 Tmpfs=/home/claude/.config/claude:rw,mode=1777
 
-# --entrypoint sh (the RC bootstrap wrapper — see claude-box.ts's
-# buildRemoteServeScript) and the actual remote-control argv are both
-# invocation-time constructs today, not something a static Quadlet Exec= can
-# reproduce byte for byte — this is the SAME "two constructions of one
-# argv" tradeoff already accepted for keeperd/netd/scoutd's doors-serve vs.
-# .container split, not a new problem this unit introduces. Fill in once
-# the ExecStartPre auth-grant mechanism above exists:
-# Entrypoint=sh
-# Exec=-c "<buildRemoteServeScript output>" claude-box remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session
+# Boot straight into the generated script — see the ExecStartPre= note above
+# for why this is a bind-mounted file rather than inline script content.
+Entrypoint=sh
+Exec=/rc-boot.sh claude-box remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session
 
 # Deliberately NO "-it" here: the Claude app attaches over claude.ai/code,
 # never a local tty, so a Quadlet-managed bastion runs detached like every
@@ -78,6 +92,13 @@ PidsLimit=2048
 Memory=1g
 
 [Service]
+# Mint this start's grant + boot script host-side (see the [Unit] comment
+# above for why). %t is the same systemd runtime-dir specifier used by the
+# Volume=/EnvironmentFile= lines above, so both sides agree on the path
+# without any per-machine editing.
+ExecStartPre=/bin/sh -c 'claude-box internal-mint-auth-grant --audience claude-box-remote-serve | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
+ExecStartPre=/bin/sh -c 'claude-box internal-print-rc-boot-script > %t/claude-box-rc-boot.sh && chmod +r %t/claude-box-rc-boot.sh'
+
 Restart=always
 RestartSec=5
 

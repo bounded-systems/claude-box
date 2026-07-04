@@ -10,8 +10,8 @@ quadlet/
 ├── netd.container         # the box's egress door (claude-netd: Anthropic allowlist)
 ├── scout-netd.container   # scoutd's egress door (a netd instance: GitHub allowlist)
 ├── scoutd.container       # external reads — runs --network=none, egress via scout-netd
-├── launcherd.container    # launch + dispatch doors — NOT YET RUNNABLE, see its header comment
-└── remote-serve.container # the singleton RC dispatcher bastion — NOT YET RUNNABLE, see its header comment
+├── launcherd.container    # launch + dispatch doors — image builds and runs; host-podman-socket access still unresolved, see its header comment
+└── remote-serve.container # the singleton RC dispatcher bastion — unvalidated against a real host, see its header comment
 ```
 
 ## Schema

@@ -22,6 +22,9 @@ import {
   RC_NETD_ALLOW,
   bastionName,
   bastionAlreadyRunning,
+  authLeaseFromEnvCmd,
+  cmdMintAuthGrant,
+  cmdPrintRcBootScript,
 } from "../claude-box.ts";
 
 const EMPTY = { HOME: "/tmp" } as Record<string, string | undefined>;
@@ -255,5 +258,73 @@ describe("bastionAlreadyRunning: real podman liveness (skips without podman)", (
   podmanTest("returns undefined or the running bastion's name", () => {
     const result = bastionAlreadyRunning();
     expect(result === undefined || typeof result === "string").toBe(true);
+  });
+});
+
+describe("authLeaseFromEnvCmd: env-sourced grant for a Quadlet-managed bastion", () => {
+  test("reads the grant from the named env var, base64+JSON decoded, at runtime", () => {
+    const script = authLeaseFromEnvCmd("CLAUDE_BOX_RC_GRANT");
+    expect(script).toContain("process.env.CLAUDE_BOX_RC_GRANT");
+    expect(script).toContain('Buffer.from(g,"base64")');
+    expect(script).toContain("JSON.parse");
+    // No grant is ever baked into the script itself — only the env var name is.
+    expect(script).not.toContain('"binding"');
+    expect(script).not.toContain('"signature"');
+  });
+
+  test("still writes .credentials.json and merges oauthAccount, same as authLeaseCmd", () => {
+    const script = authLeaseFromEnvCmd("X");
+    expect(script).toContain(".credentials.json");
+    expect(script).toContain("oauthAccount");
+  });
+});
+
+describe("cmdMintAuthGrant: internal-mint-auth-grant CLI verb", () => {
+  function captureStdout(fn: () => number): { code: number; lines: string[] } {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      return { code: fn(), lines };
+    } finally {
+      console.log = original;
+    }
+  }
+
+  test("requires --audience", () => {
+    const { code, lines } = captureStdout(() => cmdMintAuthGrant([]));
+    expect(code).toBe(1);
+    expect(lines).toEqual([]);
+  });
+
+  test("prints exactly one base64 line decoding to a signed grant for the given audience", () => {
+    const { code, lines } = captureStdout(() =>
+      cmdMintAuthGrant(["--audience", "claude-box-remote-serve"])
+    );
+    expect(code).toBe(0);
+    expect(lines.length).toBe(1);
+    const decoded = JSON.parse(Buffer.from(lines[0]!, "base64").toString("utf-8"));
+    expect(decoded.name).toBe("auth");
+    expect(decoded.binding.audience).toBe("claude-box-remote-serve");
+    expect(typeof decoded.signature).toBe("string");
+    expect(decoded.signature.length).toBeGreaterThan(0);
+  });
+});
+
+describe("cmdPrintRcBootScript: the Quadlet-managed bastion's entrypoint script", () => {
+  test("prints a script that leases via the env-sourced grant, never a baked-in one", () => {
+    const original = console.log;
+    let printed = "";
+    console.log = (...args: unknown[]) => { printed += args.map(String).join(" "); };
+    try {
+      expect(cmdPrintRcBootScript()).toBe(0);
+    } finally {
+      console.log = original;
+    }
+    expect(printed).toContain("process.env.CLAUDE_BOX_RC_GRANT");
+    expect(printed).toContain("/home/claude/claude-box"); // RC_WORKSPACE
+    expect(printed).toContain('exec claude "$@"');
+    expect(printed).not.toContain('"binding"');
+    expect(printed).not.toContain('"signature"');
   });
 });

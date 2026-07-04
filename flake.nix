@@ -721,6 +721,120 @@
               };
             };
 
+          # launcherd-image — the launch-controller daemon as a container.
+          # Unlike keeperd/netd/scoutd, launcherd needs to reach the HOST's
+          # container runtime (it shells out to `podman run`/`inspect`/`kill`
+          # to actually spawn/manage sibling boxes — see launcherd.ts's
+          # buildPodmanArgv/getContainerId) — the one daemon in this list
+          # with a host-control surface, not just a socket-scoped capability.
+          #   nix build .#launcherd-image && podman load -i result
+          #   podman run -v doors:/run/doors \
+          #     -v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock \
+          #     -e CONTAINER_HOST=unix:///run/podman/podman.sock launcherd
+          # ^ that socket mount is the recommended-but-unvalidated approach
+          # from quadlet/launcherd.container's own header comment — treat it
+          # the same way here: a real privilege grant, worth a dedicated
+          # security pass before a production deployment, not a settled
+          # default just because it appears in this file.
+          launcherd-image =
+            let
+              launcherdTools = with pkgs; [
+                bun # ONLY for TypeScript type-stripping at runtime (`bun run`
+                    # on the bundle below) — NOT `bun build --compile`, which
+                    # needs network access to fetch a target runtime and
+                    # produces a silent 0-byte output in the Nix sandbox (see
+                    # the claude-box launcher package's own comment on this
+                    # exact pitfall, above).
+                podman
+                git
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              launcherdEnv = pkgs.buildEnv {
+                name = "launcherd-image-root";
+                paths = launcherdTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              # launcherd.ts pulls in a much larger module graph than
+              # keeperd/scoutd (the whole ./claude-box, which itself imports
+              # guest-room/, lib/box-keys.ts, lib/remote-control-flags.ts,
+              # netd/netd.ts, ...) — rather than hand-enumerating every
+              # transitive file the way keeperd-src/scoutd-src do (fragile:
+              # a missed file only surfaces as a runtime crash), bundle with
+              # `bun build --target=bun` (plain JS bundling, NOT --compile —
+              # no network fetch, so it's Nix-sandbox-safe) against the full
+              # source tree. A missing dependency fails LOUDLY at BUILD time
+              # here instead of silently at container runtime.
+              launcherdBundle = pkgs.runCommand "launcherd-bundle"
+                { nativeBuildInputs = [ pkgs.bun ]; }
+                ''
+                  mkdir -p src
+                  cp ${./launcherd.ts} src/launcherd.ts
+                  cp ${./claude-box.ts} src/claude-box.ts
+                  cp ${./door-interpose.ts} src/door-interpose.ts
+                  cp -r ${./contract} src/contract
+                  cp -r ${./guest-room} src/guest-room
+                  cp -r ${./lib} src/lib
+                  mkdir -p src/netd
+                  cp ${./netd/netd.ts} src/netd/netd.ts
+                  mkdir -p $out
+                  cd src
+                  HOME=$TMPDIR bun build launcherd.ts --target=bun --outfile=$out/launcherd.js
+                '';
+
+              launcherdEntrypoint = pkgs.writeShellScript "launcherd-entrypoint" ''
+                exec bun /app/launcherd.js serve \
+                  --socket /run/doors/launcherd.sock \
+                  --dispatch-socket /run/doors/dispatch.sock \
+                  --key /keys/launcherd.key \
+                  "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "launcherd";
+              tag = "dev";
+
+              contents = [ launcherdEnv launcherdBundle ];
+
+              extraCommands = ''
+                mkdir -p app etc tmp run/doors run/podman keys
+                cp ${launcherdBundle}/launcherd.js app/launcherd.js
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                EOF
+              '';
+
+              config = {
+                Entrypoint = [ "${launcherdEntrypoint}" ];
+                WorkingDir = "/app";
+                # Runs as root (unlike keeperd/scoutd's dedicated non-root
+                # user) — it needs to reach the mounted podman socket, whose
+                # host-side permissions this image doesn't control. Narrowing
+                # this is part of the same security pass the socket-mount
+                # approach itself needs (see the comment above).
+                Env = [
+                  "HOME=/root"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "GIT_SSL_CAINFO=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                  "CONTAINER_HOST=unix:///run/podman/podman.sock"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                  "/run/podman" = {};
+                  "/keys" = {};
+                };
+              };
+            };
+
           # concierged-image — the capability concierge as a container.
           # An INTRODUCER (CONCIERGE.md): holds a leased registry and hands back
           # attenuated door references on `resolve`. Pure routing — it never
@@ -818,6 +932,7 @@
             keeperd-image = self.packages.aarch64-linux.keeperd-image;
             netd-image = self.packages.aarch64-linux.netd-image;
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
+            launcherd-image = self.packages.aarch64-linux.launcherd-image;
             concierged-image = self.packages.aarch64-linux.concierged-image;
             # The default is the CLI, not the image. Installing/running a
             # `.tar.gz` (the old default) put junk entries in `nix profile` and

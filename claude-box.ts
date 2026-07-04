@@ -543,6 +543,19 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   claude-box auth-keys-path   path to claude-box's grant-signing public key —
                               feed to authd: AUTHD_ISSUER_KEYS_PATH=$(claude-box
                               auth-keys-path) authd serve --port 3003
+  claude-box internal-mint-auth-grant --audience NAME
+                              host-only: mint a fresh signed "auth" door grant
+                              for NAME, base64-encoded to stdout — for a
+                              systemd/Quadlet-managed bastion's ExecStartPre=
+                              (no CLI invocation exists there to mint one
+                              inline the way run() does). See
+                              quadlet/remote-serve.container.
+  claude-box internal-print-rc-boot-script
+                              host-only: prints the RC bootstrap script a
+                              Quadlet-managed bastion runs as its entrypoint
+                              (env-sourced grant, not baked in) — written to
+                              a file by ExecStartPre=, bind-mounted in, so
+                              the unit's Exec= never embeds it directly.
   claude-box doors init       one-shot setup (build images, install units)
   claude-box doors status     show door service status
   claude-box status           show launcherd status
@@ -1047,6 +1060,40 @@ export function authLeaseCmd(grant?: SignedGrant): string {
     `const raw=process.env.AUTHD_SOCK;` +
     `const opts=raw.startsWith("tcp:")?(()=>{const r=raw.slice(4),i=r.lastIndexOf(":");return{host:r.slice(0,i),port:Number(r.slice(i+1))};})():{path:raw};` +
     `const s=net.createConnection(opts,()=>{s.write(${wireLine})});` +
+    `let buf="";` +
+    `s.on("data",d2=>{buf+=d2.toString();if(buf.indexOf("\\n")>=0){s.end();const resp=JSON.parse(buf.split("\\n")[0]);` +
+    `if(!resp.ok){console.error("authd lease failed: "+(resp.error&&resp.error.message));process.exit(1)}` +
+    `fs.writeFileSync(d+"/.credentials.json",JSON.stringify({claudeAiOauth:resp.result.claudeAiOauth}));` +
+    `if(resp.result.oauthAccount){const cp=d+"/.claude.json";let cj={};try{cj=JSON.parse(fs.readFileSync(cp,"utf8"))}catch{};cj.oauthAccount=resp.result.oauthAccount;fs.writeFileSync(cp,JSON.stringify(cj))}` +
+    `}});` +
+    `s.on("error",e=>{console.error("authd connect failed: "+e.message);process.exit(1)});` +
+    `'`
+  );
+}
+
+/** Same lease request as authLeaseCmd, but for a box that never had a CLI
+ *  process mint its own grant inline (a systemd/Quadlet-managed bastion —
+ *  see `internal-mint-auth-grant` and quadlet/remote-serve.container's
+ *  ExecStartPre=). The grant instead arrives via `envVar`, base64-encoded
+ *  JSON (an EnvironmentFile= value), and is decoded at RUNTIME inside the
+ *  container rather than being baked into the script at build time.
+ *
+ *  This deliberately duplicates authLeaseCmd's connect/response-handling
+ *  body rather than threading a "where does the grant come from" branch
+ *  through one shared string-builder — each generates a small, complete,
+ *  independently-readable script; a conditional embedded in a string of
+ *  generated JS is harder to get right (and to verify by reading) than two
+ *  parallel scripts that differ in exactly one line. */
+export function authLeaseFromEnvCmd(envVar: string): string {
+  return (
+    `bun -e '` +
+    `const net=require("net"),fs=require("fs"),d=process.env.CLAUDE_CONFIG_DIR;` +
+    `const raw=process.env.AUTHD_SOCK;` +
+    `const opts=raw.startsWith("tcp:")?(()=>{const r=raw.slice(4),i=r.lastIndexOf(":");return{host:r.slice(0,i),port:Number(r.slice(i+1))};})():{path:raw};` +
+    `const g=process.env.${envVar};` +
+    `const req={id:"1",method:"lease",params:{}};` +
+    `if(g)req.grant=JSON.parse(Buffer.from(g,"base64").toString("utf8"));` +
+    `const s=net.createConnection(opts,()=>{s.write(JSON.stringify(req)+"\\n")});` +
     `let buf="";` +
     `s.on("data",d2=>{buf+=d2.toString();if(buf.indexOf("\\n")>=0){s.end();const resp=JSON.parse(buf.split("\\n")[0]);` +
     `if(!resp.ok){console.error("authd lease failed: "+(resp.error&&resp.error.message));process.exit(1)}` +
@@ -2925,6 +2972,58 @@ async function cmdCheckIn(): Promise<number> {
   return 0;
 }
 
+/** `claude-box internal-mint-auth-grant --audience NAME` — host-only. Mints
+ *  a fresh signed "auth" door grant (same signing key + mechanism as the
+ *  inline mint inside run()'s --remote-serve branch, mintAuthGrant) and
+ *  prints it, base64-encoded, to stdout — nothing else on that line, so a
+ *  shell can capture it directly:
+ *
+ *    echo "CLAUDE_BOX_RC_GRANT=$(claude-box internal-mint-auth-grant \
+ *      --audience claude-box-remote-serve)" > grant.env
+ *
+ *  This is the missing piece for a systemd/Quadlet-managed bastion (see
+ *  quadlet/remote-serve.container's header comment): there is no CLI
+ *  invocation moment for such a container to mint its own grant inline, so
+ *  a Quadlet unit's `ExecStartPre=` runs this instead, writing an
+ *  EnvironmentFile= that hands the container's boot script
+ *  (authLeaseFromEnvCmd) the grant to decode at runtime. The signing key
+ *  itself never leaves the host — only the signed grant object does,
+ *  exactly as when a CLI-invoked bastion mints one for itself. */
+function cmdMintAuthGrant(args: string[]): number {
+  const audIdx = args.indexOf("--audience");
+  const audience = audIdx >= 0 ? args[audIdx + 1] : undefined;
+  if (!audience) {
+    console.error("claude-box: internal-mint-auth-grant requires --audience NAME");
+    return 1;
+  }
+  const authDoor = resolveDoor("auth", undefined, process.env);
+  const grant = mintAuthGrant(authDoor, audience);
+  console.log(Buffer.from(JSON.stringify(grant), "utf-8").toString("base64"));
+  return 0;
+}
+
+/** `claude-box internal-print-rc-boot-script` — host-only. Prints the exact
+ *  RC bootstrap script (buildRemoteServeScript) a Quadlet-managed bastion
+ *  should run as its entrypoint, using authLeaseFromEnvCmd so the lease step
+ *  reads its grant from $CLAUDE_BOX_RC_GRANT at runtime instead of having it
+ *  baked in (see cmdMintAuthGrant / quadlet/remote-serve.container).
+ *
+ *  This exists so the Quadlet unit's `Exec=` never has to embed the script's
+ *  quote-heavy content directly in systemd unit-file syntax (which has its
+ *  own argv-splitting rules, distinct from POSIX shell, and is easy to get
+ *  subtly wrong for a script this size) — instead `ExecStartPre=` writes
+ *  this output to a host file once at start, the unit bind-mounts that file
+ *  in read-only, and `Exec=` just runs it by path. */
+function cmdPrintRcBootScript(): number {
+  console.log(
+    buildRemoteServeScript({
+      rcWorkspace: RC_WORKSPACE,
+      leaseCmd: authLeaseFromEnvCmd("CLAUDE_BOX_RC_GRANT"),
+    }),
+  );
+  return 0;
+}
+
 /** `claude-box authd-up` — the one-command version of the check-in → seed →
  *  serve dance this session did by hand across several terminals: runs
  *  check-in interactively, then starts `authd serve` DETACHED (nohup'd,
@@ -3035,6 +3134,10 @@ async function main(): Promise<number> {
       return cmdCheckIn();
     case "authd-up":
       return cmdAuthdUp();
+    case "internal-mint-auth-grant":
+      return cmdMintAuthGrant(rest);
+    case "internal-print-rc-boot-script":
+      return cmdPrintRcBootScript();
     case "auth-keys-path":
       // Prints the path to claude-box's own grant-signing public key (see
       // lib/box-keys.ts) — feed it to authd so it can verify grants a
@@ -3095,6 +3198,8 @@ export {
   originHostOf,
   bastionName,
   bastionAlreadyRunning,
+  cmdMintAuthGrant,
+  cmdPrintRcBootScript,
 };
 export type { DoorGrant, DoorTransport, Manifest, Launch, GuestPreset, RunningBox };
 

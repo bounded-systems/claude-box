@@ -1,16 +1,16 @@
 /**
- * door-client tests — the client half of "launch bare, request a capability
+ * bellhop tests — the client half of "launch bare, request a capability
  * on demand" (CONCIERGE.md §3b, REPOD.md Status). Stands up a fake concierge
  * (only implements resolve) and a fake repod-shaped tcp door (only
  * implements prepare) as real Bun.listen sockets, and exercises
  * requestRepoCheckout end-to-end — no real daemons needed, but the actual
  * wire protocol (NDJSON, {id,method,params,grant}) is real.
  *
- *   nix run nixpkgs#bun -- test tests/door-client.test.ts
+ *   nix run nixpkgs#bun -- test tests/bellhop.test.ts
  */
 import { test, expect, describe, afterEach } from "bun:test";
 import type { Socket } from "bun";
-import { requestRepoCheckout } from "../door-client.ts";
+import { requestRepoCheckout } from "../bellhop.ts";
 import { unix, tcp, type SignedGrant } from "../guest-room/mod.ts";
 import type { ResponseEnvelope, RequestEnvelope } from "../guest-room/protocol.ts";
 
@@ -23,7 +23,7 @@ function fakeGrant(port: number): SignedGrant {
     grants: "repo access",
     use: "use repo",
     binding: { audience: "room-A", exp: Date.now() + 60_000, nonce: "n1", keyId: "k1" },
-    signature: "fake-sig", // door-client never verifies this — repod does
+    signature: "fake-sig", // bellhop never verifies this — repod does
   };
 }
 

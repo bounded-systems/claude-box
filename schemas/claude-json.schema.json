@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://claude-box/schemas/claude-json.schema.json",
+  "title": "ClaudeJson (partial)",
+  "description": "$CLAUDE_CONFIG_DIR/.claude.json — Claude Code's own internal state file (~90 top-level keys as of v2.1.199: UI/onboarding caches, feature flags, usage counters, per-project settings). claude-box does not own this format and it evolves independently of this repo, so this schema deliberately does NOT pin most of it (additionalProperties: true throughout) — only the fields claude-box's authd/check-in/remote-serve wiring actually depends on are typed precisely: oauthAccount (org/subscription identity, read by `claude remote-control`'s eligibility check — see authd.ts's ClaudeCredentials.oauthAccount) and projects[path].hasTrustDialogAccepted (pre-seeded by claude-box.ts's --remote-serve boot script to skip the workspace-trust dialog).",
+  "type": "object",
+  "properties": {
+    "userID": { "type": "string", "description": "opaque per-install hash, not the account UUID" },
+    "oauthAccount": {
+      "type": "object",
+      "description": "Populated by `claude auth login` (and refreshed by `claude auth status`) — a separate profile/org lookup, NOT part of the OAuth token exchange in .credentials.json. Required for `claude remote-control`'s org-eligibility check; a box that only has a leased access token but never populated this fails with \"Unable to determine your organization\" even with valid credentials (confirmed live, 2026-07-04).",
+      "required": ["organizationUuid"],
+      "properties": {
+        "accountUuid": { "type": "string" },
+        "emailAddress": { "type": "string" },
+        "organizationUuid": { "type": "string" },
+        "organizationName": { "type": "string" },
+        "organizationType": { "type": "string", "examples": ["claude_max"] },
+        "organizationRole": { "type": "string", "examples": ["admin"] },
+        "organizationRateLimitTier": { "type": "string" },
+        "workspaceRole": { "type": ["string", "null"] },
+        "userRateLimitTier": { "type": ["string", "null"] },
+        "billingType": { "type": "string", "examples": ["stripe_subscription"] },
+        "hasExtraUsageEnabled": { "type": "boolean" },
+        "displayName": { "type": "string" },
+        "seatTier": { "type": ["string", "null"] },
+        "accountCreatedAt": { "type": "string", "format": "date-time" },
+        "subscriptionCreatedAt": { "type": "string", "format": "date-time" },
+        "profileFetchedAt": { "type": "integer", "description": "epoch milliseconds" },
+        "claudeCodeTrialEndsAt": { "type": ["string", "null"] },
+        "claudeCodeTrialDurationDays": { "type": ["integer", "null"] },
+        "ccOnboardingFlags": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "projects": {
+      "type": "object",
+      "description": "Keyed by absolute workspace path.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "hasTrustDialogAccepted": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

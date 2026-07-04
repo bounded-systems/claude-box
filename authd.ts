@@ -65,14 +65,25 @@ export interface ClaudeCredentials {
     subscriptionType?: string;
     rateLimitTier?: string;
   };
+  // `claude remote-control`'s org-eligibility check reads oauthAccount from
+  // .claude.json, NOT .credentials.json — it's not part of the OAuth token
+  // exchange at all, but a separate profile/org lookup `claude` caches after
+  // login (org UUID, name, subscription info). A box that only gets a leased
+  // access token but never populated this itself fails RC with "Unable to
+  // determine your organization," even with a perfectly valid credential
+  // (confirmed live). Captured once at check-in time (see claude-box.ts's
+  // cmdCheckIn) and passed through opaquely — it doesn't rotate/expire like
+  // the access token, so it's not part of the lease/refresh logic at all.
+  oauthAccount?: unknown;
 }
 
 /** Strip the refreshToken: the box gets an ACCESS-TOKEN-ONLY credential it can
  *  run RC on but never refresh (validated in the spike — access-token-only runs
- *  RC). Pure. */
+ *  RC). oauthAccount passes through unchanged — it's not secret, and the box
+ *  needs it to pass RC's org-eligibility check. Pure. */
 export function toAccessTokenOnly(creds: ClaudeCredentials): ClaudeCredentials {
   const { refreshToken: _dropped, ...rest } = creds.claudeAiOauth;
-  return { claudeAiOauth: { ...rest } };
+  return { claudeAiOauth: { ...rest }, oauthAccount: creds.oauthAccount };
 }
 
 // ── OAuth2 refresh (authd → Anthropic) ───────────────────────────────────────
@@ -166,11 +177,50 @@ function writeEphemeral(creds: ClaudeCredentials): void {
   ephemeralCred = creds;
 }
 
-/** Parse and seed the store from a raw JSON credential blob (the shape
- *  `bellhop`'s throwaway-login-container flow produces). Exported so the
+/** Runtime validation for the untrusted JSON piped on stdin at boot — see
+ *  schemas/claude-credentials.schema.json for the canonical shape (and how
+ *  it was derived). No Zod: this repo ships zero npm dependencies by
+ *  design, so this is a small hand-rolled check instead, covering exactly
+ *  the fields authd actually reads (accessToken/expiresAt/scopes) rather
+ *  than a full schema walk. Throws a clear SEED_INVALID error instead of a
+ *  cryptic property-access crash three calls later. */
+function assertClaudeCredentials(raw: unknown): asserts raw is ClaudeCredentials {
+  if (typeof raw !== "object" || raw === null) {
+    throw { code: "SEED_INVALID", message: "credential JSON must be an object" };
+  }
+  const oauth = (raw as Record<string, unknown>).claudeAiOauth;
+  if (typeof oauth !== "object" || oauth === null) {
+    throw { code: "SEED_INVALID", message: "credential JSON missing a claudeAiOauth object" };
+  }
+  const o = oauth as Record<string, unknown>;
+  if (typeof o.accessToken !== "string") {
+    throw { code: "SEED_INVALID", message: "claudeAiOauth.accessToken must be a string" };
+  }
+  if (typeof o.expiresAt !== "number") {
+    throw { code: "SEED_INVALID", message: "claudeAiOauth.expiresAt must be a number" };
+  }
+  if (!Array.isArray(o.scopes) || !o.scopes.every((s) => typeof s === "string")) {
+    throw { code: "SEED_INVALID", message: "claudeAiOauth.scopes must be a string array" };
+  }
+}
+
+/** Parse + validate a raw JSON credential blob (the shape `claude-box
+ *  check-in`'s throwaway-login-container flow produces). Exported so the
  *  CLI's stdin-read and tests share one entry point. */
+export function parseClaudeCredentials(rawJson: string): ClaudeCredentials {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch (e) {
+    throw { code: "SEED_PARSE_ERROR", message: `credential JSON is not valid JSON: ${(e as Error).message}` };
+  }
+  assertClaudeCredentials(parsed);
+  return parsed;
+}
+
+/** Seed the ephemeral store from a raw JSON credential blob. */
 export function seedEphemeral(rawJson: string): void {
-  const parsed = JSON.parse(rawJson) as ClaudeCredentials;
+  const parsed = parseClaudeCredentials(rawJson);
   if (!parsed.claudeAiOauth?.refreshToken) {
     throw { code: "SEED_NO_REFRESH_TOKEN", message: "seeded credential has no claudeAiOauth.refreshToken" };
   }
@@ -212,8 +262,14 @@ async function handleLease(): Promise<unknown> {
     return toAccessTokenOnly(nativeBlob);
   }
   const { creds, rotatedRefreshToken } = await refreshAccessToken(refreshToken);
-  writeEphemeral({ claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: rotatedRefreshToken } });
-  return toAccessTokenOnly(creds);
+  // oauthAccount doesn't come back from a token refresh (it's not part of the
+  // OAuth exchange at all) — carry the seeded copy forward across rotations.
+  const rotated: ClaudeCredentials = {
+    claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: rotatedRefreshToken },
+    oauthAccount: nativeBlob.oauthAccount,
+  };
+  writeEphemeral(rotated);
+  return toAccessTokenOnly(rotated);
 }
 
 const METHODS: Record<string, MethodHandler> = {
@@ -341,7 +397,34 @@ async function main(): Promise<number> {
     // Seed from a single JSON credential line on stdin BEFORE listening — a
     // lease requested before this resolves would otherwise race an unseeded
     // store. stdin, never an argv value: an argv value shows up in `ps`.
-    const line = (await new Response(Bun.stdin.stream()).text()).split("\n")[0]?.trim();
+    //
+    // Read chunks and stop at the first newline — NOT `Response(stream).text()`,
+    // which buffers until the stream fully CLOSES. That's wrong for a FIFO
+    // (`claude-box authd-up`'s detached-daemon path feeds the credential
+    // through one): a plain pipe's EOF arrives as soon as the writer closes,
+    // but reading a FIFO's whole stream to completion doesn't reliably behave
+    // the same way, so `serve` would hang forever after a perfectly good
+    // write+close (confirmed live — empty log, never became reachable).
+    // Reading only up to the first line is also just more correct: this only
+    // ever needs one line, never the writer's full close.
+    let line: string | undefined;
+    {
+      let buf = "";
+      const reader = Bun.stdin.stream().getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const nl = buf.indexOf("\n");
+        if (nl >= 0) {
+          line = buf.slice(0, nl).trim();
+          break;
+        }
+      }
+      if (line === undefined) line = buf.trim() || undefined;
+      reader.releaseLock();
+    }
     if (!line) {
       log("ERR", "no credential JSON was piped on stdin (see bellhop's login flow)");
       return 1;

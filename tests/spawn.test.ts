@@ -23,7 +23,7 @@ describe("lib/spawn types", () => {
       repoRw: false,
       doors: ["keeper", "net"],
       netOpen: false,
-      claudeArgs: ["--resume"],
+      guestArgs: ["--resume"],
       depth: 1,
     };
 

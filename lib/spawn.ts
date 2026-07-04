@@ -34,8 +34,9 @@ export type SpawnOptions = {
   doors?: string[];
   /** Ambient egress (unsafe, no allowlist) */
   netOpen?: boolean;
-  /** Args to pass through to claude */
-  claudeArgs?: string[];
+  /** Args to pass through to the guest (claude or a tool guest) — wire name
+   *  must match launcherd.ts's handleLaunch, which reads params.guestArgs. */
+  guestArgs?: string[];
   /** Spawn depth (auto-incremented from current box) */
   depth?: number;
 };
@@ -217,7 +218,7 @@ export async function spawn(options: SpawnOptions = {}): Promise<SpawnResult> {
     repoRw: options.repoRw ?? false,
     doors: options.doors ?? [],
     netOpen: options.netOpen ?? false,
-    claudeArgs: options.claudeArgs ?? [],
+    guestArgs: options.guestArgs ?? [],
     depth: (options.depth ?? currentDepth) + 1,  // Increment depth
   };
 

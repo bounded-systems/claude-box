@@ -1,15 +1,24 @@
 # launcherd.container — launch-controller daemon (the --launcher and --dispatch doors)
 #
-# UNLIKE keeperd/netd/scoutd, launcherd is NOT ready to run from this unit
-# yet — Image=localhost/launcherd:dev does not exist as a build target (no
-# `launcherd-image` derivation in flake.nix, unlike keeperd-image/netd-image/
-# scoutd-image). Building one is a real prerequisite, not just "cp this file
-# and go": it needs the `podman` CLI binary inside the image (launcherd
-# shells out to `podman run`/`podman inspect`/`podman kill` directly — see
-# launcherd.ts's buildPodmanArgv/getContainerId), plus a way to reach the
-# host's container runtime from inside its own container (see the podman
-# socket note below). Treat this unit as the target shape to build toward,
-# not a drop-in-and-run file.
+# `nix build .#launcherd-image` NOW EXISTS and is real — built, loaded, and
+# smoke-tested end-to-end in a real podman container: both sockets come up
+# correctly, dispatch.sock structurally cannot reach launch/kill/list/attach
+# (UNKNOWN_METHOD), and non-dispatchable rooms are refused. That part of
+# "not ready to run" is resolved.
+#
+# What's STILL open, found by testing it for real rather than guessing:
+# mounting the host's rootless podman API socket into this container
+# (the CONTAINER_HOST approach below) reaches the socket (no ENOENT) but
+# gets a flat permission denial connecting to it — tried matching
+# --user to the socket's owning uid:gid, and --userns=keep-id, neither
+# resolved it (rootless-podman-in-rootless-podman user-namespace/SELinux
+# interaction, not a simple ownership fix). Disabling SELinux confinement
+# on the mount was NOT attempted as a fix here — that's a real security
+# posture change, not a config detail, and deserves a deliberate decision
+# by someone who owns that tradeoff, not a quick unblock. Until this is
+# resolved, launcherd can run (and dispatch's socket-isolation guarantees
+# hold), but it cannot actually EXECUTE a spawn that reaches this host's
+# real podman.
 #
 # Boxes ask to spawn/inspect/kill sub-boxes through /run/doors/launcherd.sock
 # (the --launcher door, attenuated, name-based identity — see LAUNCHERD.md),
@@ -42,16 +51,19 @@ Volume=%h/.claude-box/run:/run/doors
 # launcherd is the one daemon that must reach the HOST's container runtime
 # (to actually spawn/inspect/kill sibling containers) — unlike keeperd/netd/
 # scoutd, which are pure socket daemons with no host-control surface at all.
-# RECOMMENDED approach, not yet validated against a real deployment: mount
-# the rootless podman API socket and point the in-image `podman` CLI at it
-# over the wire, rather than trying to share a container runtime directly.
+# This mount REACHES the socket but currently gets permission-denied talking
+# to it (see the [Unit] comment above for what was tried) — left in place as
+# the intended shape, not because it's known to work yet.
 #   Volume=%t/podman/podman.sock:/run/podman/podman.sock
 #   Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
 # This is a meaningfully more privileged grant than anything keeperd/netd/
 # scoutd need (it's adjacent to "control the host's container runtime") —
-# treat the exact socket path, permissions, and whether a narrower proxy is
-# warranted as an open question for security review before enabling this in
-# a real deployment, not a settled default.
+# resolving the permission denial (matching uid/gid alone and --userns=
+# keep-id both failed in testing) needs someone who owns the security
+# tradeoff to decide the approach — e.g. a narrower proxy in front of the
+# socket, a dedicated rootless podman user the launcherd container's
+# namespace genuinely maps to, or another mechanism entirely — not a
+# quick unblock.
 Volume=%t/podman/podman.sock:/run/podman/podman.sock
 Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
 

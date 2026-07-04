@@ -19,6 +19,10 @@ After=claude-doors-volume.service
 Image=localhost/netd:dev
 ContainerName=scout-netd
 
+# Same numeric uid/gid as every other socket-creating door daemon — see
+# keeperd.container's comment for why (shared doors dir, no world-writable).
+UserNS=keep-id:uid=1000,gid=1000
+
 # Own socket (NETD_SOCK) so it coexists with the box's netd on one doors volume.
 Environment=NETD_SOCK=/run/doors/scout-netd.sock
 # The reason's allowlist: GitHub API + tarballs + raw/objects, plus npm/pypi.

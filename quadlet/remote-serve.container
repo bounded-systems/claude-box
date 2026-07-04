@@ -46,6 +46,54 @@ After=claude-doors-volume.service launcherd.service
 Image=localhost/claude-personal:dev
 ContainerName=claude-box-remote-serve
 
+# `claude remote-control` asks a ONE-TIME "Enable Remote Control? (y/n)"
+# confirmation on stdin before it actually starts serving — confirmed live,
+# it prints the confirmation prompt then exits 0 immediately when nothing
+# answers it (a detached, non-interactive container has no tty for this).
+# -i is required for ANY stdin delivery to reach the container at all (same
+# finding as authd.container's own PodmanArgs=-i) — paired with
+# StandardInput=data: below (a fixed "y\n", not a secret, so unlike authd's
+# credential this can just be a static value baked into the unit rather
+# than an ExecStartPre-generated file).
+PodmanArgs=-i
+
+# Same numeric uid/gid as every door daemon that shares this directory —
+# see keeperd.container's comment for why. Confirmed live: without this,
+# this box can't even reach authd.sock at all ("connect ENOENT
+# /run/doors/authd.sock") despite the file genuinely existing — a bastion
+# holding doors is exactly as subject to this as a door daemon creating
+# one.
+UserNS=keep-id:uid=1000,gid=1000
+
+# The image bakes CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in by default;
+# --remote-control/--remote-serve MUST unset it so the RC feature-flag gate
+# (tengu_ccr_bridge, via GrowthBook) can evaluate at all — confirmed live:
+# without this, claude fails with "You must be logged in to use Remote
+# Control" regardless of whether a valid credential was actually leased,
+# since the feature itself reads as unavailable, not just unauthenticated.
+# This mirrors claude-box.ts's own authEnvArgs() for --remote-serve, which
+# this Quadlet unit doesn't go through at all (see the [Unit] comment on
+# why this whole unit reproduces run()'s env wiring as static keys).
+# UnsetEnvironment= is NOT a supported Quadlet key in this version either
+# (confirmed live — same "unsupported key" class of error as StandardInput=
+# earlier) — PodmanArgs= is the raw escape hatch, same as the -i fix on
+# authd.container.
+PodmanArgs=--unsetenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+
+# The auth door — where the boot script's lease step (authLeaseFromEnvCmd)
+# actually connects. Unix path this time (VM-native), not the tcp:host:port
+# form claude-box.ts uses in TCP/macOS-dev mode.
+Environment=AUTHD_SOCK=/run/doors/authd.sock
+
+# The net door — same fixed loopback the image's own in-box relay always
+# forwards to netd (see claude-box.ts's NETD_PROXY constant); the relay is
+# what actually bridges this to /run/doors/netd.sock, not something this
+# unit needs to know the transport details of.
+Environment=HTTPS_PROXY=http://127.0.0.1:3128
+Environment=HTTP_PROXY=http://127.0.0.1:3128
+Environment=ALL_PROXY=http://127.0.0.1:3128
+Environment=NO_PROXY=localhost,127.0.0.1
+
 # Same shared socket dir as every door — this box holds net+auth+dispatch
 # (see claude-box.ts's --remote-serve block in planLaunch).
 Volume=%h/.claude-box/run:/run/doors
@@ -72,8 +120,16 @@ Tmpfs=/home/claude/.config/claude:rw,mode=1777
 
 # Boot straight into the generated script — see the ExecStartPre= note above
 # for why this is a bind-mounted file rather than inline script content.
+# NOTE: no leading "claude-box" positional here (unlike the CLI path's own
+# `sh -c '<script>' claude-box <args>`, which needs one to seed $0) — `sh
+# /rc-boot.sh <args>` runs the script as a FILE, not via -c, so the script
+# itself already becomes $0 and everything after IS "$@". Confirmed live:
+# including the extra "claude-box" here shifted every arg by one, so
+# `remote-control` was never recognized as the subcommand at all (it landed
+# in "$@" as an ordinary positional, and `--spawn` — a remote-control-only
+# flag — hit plain claude's arg parser instead: "unknown option '--spawn'").
 Entrypoint=sh
-Exec=/rc-boot.sh claude-box remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session
+Exec=/rc-boot.sh remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session
 
 # Deliberately NO "-it" here: the Claude app attaches over claude.ai/code,
 # never a local tty, so a Quadlet-managed bastion runs detached like every
@@ -92,12 +148,57 @@ PidsLimit=2048
 Memory=1g
 
 [Service]
+# Answers `claude remote-control`'s one-time "Enable Remote Control? (y/n)"
+# confirmation (see the [Container] PodmanArgs=-i comment above for why this
+# needs -i at all). Verified there is no flag for this in the real
+# `remote-control --help` output — --name/--remote-control-session-name-
+# prefix/--permission-mode/--debug-file/-v/--spawn/--capacity/--create-
+# session-in-dir is the complete list, no --yes/--force/non-interactive
+# equivalent. A fixed "y\n" (base64 "eQo=") is not a secret, so unlike
+# authd's per-start credential this is just a static value baked into the
+# unit rather than something ExecStartPre needs to (re)generate.
+StandardInput=data:eQo=
+
 # Mint this start's grant + boot script host-side (see the [Unit] comment
 # above for why). %t is the same systemd runtime-dir specifier used by the
 # Volume=/EnvironmentFile= lines above, so both sides agree on the path
 # without any per-machine editing.
-ExecStartPre=/bin/sh -c 'claude-box internal-mint-auth-grant --audience claude-box-remote-serve | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
-ExecStartPre=/bin/sh -c 'claude-box internal-print-rc-boot-script > %t/claude-box-rc-boot.sh && chmod +r %t/claude-box-rc-boot.sh'
+#
+# There is no bare `claude-box` CLI on this host's PATH (confirmed live —
+# the podman-machine VM doesn't have Nix, so `nix build .#claude-box`'s
+# output isn't directly runnable here) — these run the bundled
+# claude-box.ts (`bun build claude-box.ts --target=bun`, the same
+# offline-safe bundling used for launcherd-image/authd-image) inside a
+# throwaway container instead, reusing localhost/authd:dev purely because
+# it already has `bun` on its PATH, not because it's semantically the
+# right image — a dedicated small "claude-box-cli" image would be cleaner
+# but isn't built yet.
+#
+# Both the bundle and the box's own private signing key (~/.config/
+# claude-box/issuer.key.pem — the same key mintAuthGrant uses on the CLI
+# path; migrated into the claude-box-issuer-keys volume the same
+# podman-cp-not-bind-mount way as keeperd's key, since a raw bind mount of
+# a plain host file hits the identical SELinux denial keeperd's did) must
+# be podman volumes, not bind mounts — confirmed live: bind-mounting either
+# the bundle file or the key file directly gives EACCES even as the
+# correct uid, while the identical content via `podman cp` into a volume
+# reads fine.
+# CRITICAL: the grant must NEVER be captured by journald. A plain outer
+# shell `>` redirect on `podman run` (without --log-driver=none) does NOT
+# prevent this — podman's own logging driver (journald, by default) gets a
+# SEPARATE copy of the container's stdout regardless of what the invoking
+# shell does with the CLI's own output stream (confirmed live: a real
+# signed grant ended up in `journalctl -u remote-serve`, repeated on every
+# auto-restart, and was only caught because a human happened to be grepping
+# those logs — do not assume an outer `>` alone is sufficient). A bind-
+# mounted output file was tried as a fix and ALSO failed (permission
+# denied writing into %t from inside the container, a separate issue from
+# the SELinux-bind-mount-read problem noted above) — `--log-driver=none`
+# is the actual fix: it disables podman's journald logging pipeline for
+# this one invocation while leaving the live attached stdout (which the
+# outer `>` captures) untouched. Confirmed live.
+ExecStartPre=/bin/sh -c 'podman run --rm --log-driver=none --userns keep-id:uid=1000,gid=1000 -v claude-box-issuer-keys:/keys:ro -v claude-box-bundle:/app:ro -e HOME=/tmp --entrypoint sh localhost/authd:dev -c "mkdir -p /tmp/.config/claude-box && cp /keys/issuer.key.pem /keys/issuer.pub.json /tmp/.config/claude-box/ && bun /app/claude-box.js internal-mint-auth-grant --audience claude-box-remote-serve" | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
+ExecStartPre=/bin/sh -c 'podman run --rm -v claude-box-bundle:/app:ro --entrypoint bun localhost/authd:dev /app/claude-box.js internal-print-rc-boot-script > %t/claude-box-rc-boot.sh && chmod +r %t/claude-box-rc-boot.sh'
 
 Restart=always
 RestartSec=5

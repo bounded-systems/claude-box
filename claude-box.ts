@@ -1118,9 +1118,21 @@ export function buildRemoteServeScript(opts: {
   repo?: string;
   rcWorkspace: string;
   leaseCmd: string;
+  /** In unix-socket mode (no TCP relay to a host-exposed port), the box's
+   *  own HTTPS_PROXY=http://127.0.0.1:3128 points at nothing unless
+   *  SOMETHING bridges that loopback port to the mounted netd unix socket
+   *  — normally an in-box `socat` relay run()'s own pod/repo-origin
+   *  branches already start (see netdRelayCmd), but NOT this script's own
+   *  callers until now. Confirmed live: without this, the feature-flag
+   *  check `claude remote-control` does at boot fails ("the feature-flag
+   *  service was unreachable"). Omit when the caller doesn't hold/need the
+   *  net door, or is in TCP mode (where NETD_SOCK already points at a real
+   *  host-reachable address and no relay is needed). */
+  netdRelay?: string;
 }): string {
   const rcCwd = opts.repo ? "/work" : opts.rcWorkspace;
-  return `${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
+  const relay = opts.netdRelay ? `${opts.netdRelay} ` : "";
+  return `${relay}${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
 }
 
 /** Pure planner for `claude-box login` — the auth front door. Synthesizes a
@@ -3019,6 +3031,12 @@ function cmdPrintRcBootScript(): number {
     buildRemoteServeScript({
       rcWorkspace: RC_WORKSPACE,
       leaseCmd: authLeaseFromEnvCmd("CLAUDE_BOX_RC_GRANT"),
+      // A Quadlet-managed bastion is always unix-socket mode (never TCP —
+      // that's the macOS/virtiofs-only accommodation), so HTTPS_PROXY=
+      // http://127.0.0.1:3128 needs this relay bridging to the mounted
+      // /run/doors/netd.sock, the same way run()'s pod/repo-origin
+      // branches already bridge it for their own launch shapes.
+      netdRelay: "socat TCP-LISTEN:3128,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:/run/doors/netd.sock & sleep 0.3;",
     }),
   );
   return 0;

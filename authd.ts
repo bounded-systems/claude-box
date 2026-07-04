@@ -394,21 +394,35 @@ async function main(): Promise<number> {
       if (args[i] === "--socket" || args[i] === "-s") socketPath = args[++i]!;
       else if (args[i] === "--port" || args[i] === "-p") port = Number(args[++i]);
     }
-    // Seed from a single JSON credential line on stdin BEFORE listening — a
-    // lease requested before this resolves would otherwise race an unseeded
-    // store. stdin, never an argv value: an argv value shows up in `ps`.
+    // Seed from a single JSON credential line BEFORE listening — a lease
+    // requested before this resolves would otherwise race an unseeded
+    // store. Two input paths, never an argv value (shows up in `ps`):
     //
-    // Read chunks and stop at the first newline — NOT `Response(stream).text()`,
-    // which buffers until the stream fully CLOSES. That's wrong for a FIFO
-    // (`claude-box authd-up`'s detached-daemon path feeds the credential
-    // through one): a plain pipe's EOF arrives as soon as the writer closes,
-    // but reading a FIFO's whole stream to completion doesn't reliably behave
-    // the same way, so `serve` would hang forever after a perfectly good
-    // write+close (confirmed live — empty log, never became reachable).
-    // Reading only up to the first line is also just more correct: this only
-    // ever needs one line, never the writer's full close.
+    // AUTHD_CRED_FILE=path — read one line from a bind-mounted file.
+    // Exists specifically for a detached, systemd/Quadlet-managed
+    // container: `podman run -d`, even with `-i` and systemd's own
+    // StandardInput=file: pointed at the same file, does NOT reliably
+    // deliver that content to the container's stdin (confirmed live —
+    // empty log, container never seeds, no error either — a general
+    // podman detached-stdin limitation, not something fixable from the
+    // unit file). A bind-mounted file read directly sidesteps that
+    // plumbing entirely.
+    //
+    // stdin (default) — for the CLI/manual path (`claude-box check-in |
+    // authd serve` or the FIFO `claude-box authd-up` feeds). Read chunks
+    // and stop at the first newline — NOT `Response(stream).text()`, which
+    // buffers until the stream fully CLOSES. That's wrong for a FIFO: a
+    // plain pipe's EOF arrives as soon as the writer closes, but reading a
+    // FIFO's whole stream to completion doesn't reliably behave the same
+    // way, so `serve` would hang forever after a perfectly good write+close
+    // (confirmed live — empty log, never became reachable). Reading only up
+    // to the first line is also just more correct: this only ever needs one
+    // line, never the writer's full close.
     let line: string | undefined;
-    {
+    const credFile = process.env.AUTHD_CRED_FILE;
+    if (credFile) {
+      line = readFileSync(credFile, "utf-8").split("\n")[0]?.trim();
+    } else {
       let buf = "";
       const reader = Bun.stdin.stream().getReader();
       const decoder = new TextDecoder();
@@ -426,11 +440,19 @@ async function main(): Promise<number> {
       reader.releaseLock();
     }
     if (!line) {
-      log("ERR", "no credential JSON was piped on stdin (see bellhop's login flow)");
+      log(
+        "ERR",
+        credFile
+          ? `AUTHD_CRED_FILE=${credFile} was empty`
+          : "no credential JSON was piped on stdin (see bellhop's login flow)",
+      );
       return 1;
     }
     seedEphemeral(line);
-    log("INFO", "credential store seeded from stdin (in-memory only, nothing written to disk)");
+    log(
+      "INFO",
+      `credential store seeded from ${credFile ? "AUTHD_CRED_FILE" : "stdin"} (in-memory only, nothing written to disk)`,
+    );
     if (port) await serveTcp(port);
     else await serveUnix(socketPath);
     return 0;
@@ -444,9 +466,15 @@ Usage:
   authd serve --socket PATH  custom socket path
 
 A single JSON credential line (the ClaudeCredentials shape, from
-\`claude-box check-in\`) must be piped on stdin at boot — the refresh token
-lives ONLY in this process's memory from then on, gone the instant it exits.
+\`claude-box check-in\`) must be seeded at boot — the refresh token lives
+ONLY in this process's memory from then on, gone the instant it exits.
 Nothing ever touches disk. A restart requires a fresh login. Portable to any OS.
+
+AUTHD_CRED_FILE=path          read the credential line from this file instead
+                              of stdin — for a detached, systemd/Quadlet-
+                              managed container, where \`podman run -d\` does
+                              not reliably deliver piped stdin content.
+                              Otherwise: piped on stdin (the CLI/manual path).
 
 ROOM_ID=name                 the audience a presented grant must match (the
                               gate checks grant.binding.audience === ROOM_ID).

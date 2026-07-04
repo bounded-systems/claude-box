@@ -19,9 +19,22 @@ After=claude-doors-volume.service claude-keys-volume.service
 Image=localhost/keeperd:dev
 ContainerName=keeperd
 
+# Every socket-creating door daemon (keeperd/netd/scout-netd/scoutd/launcherd)
+# needs the SAME numeric uid/gid here, mapped consistently via keep-id — NOT
+# left as podman's default rootless mapping, where each container gets its
+# own unrelated subordinate uid range. Without this, the only way for
+# multiple such containers to all write into the one shared doors directory
+# is making it world-writable — which launcherd's own code explicitly (and
+# correctly) refuses to bind a socket in ("refusing socket in world-writable
+# /run/doors (hijack risk)"). Confirmed live: this directory's actual owner
+# must match this exact uid/gid or every daemon here EACCES on bind().
+UserNS=keep-id:uid=1000,gid=1000
+
 # Socket directory — mount the host's ~/.claude-box/run so sockets are accessible
 # from both the host CLI and containers. %h expands to the running user's home
 # (systemd specifier), so this stays host-agnostic — no per-machine editing.
+# Must be owned by the SAME uid/gid as UserNS above, mode 0770 (group, not
+# world, writable) — e.g. `chown 1000:1000 ~/.claude-box/run && chmod 0770 …`.
 Volume=%h/.claude-box/run:/run/doors
 
 # Key volume (keeperd-only, persistent)

@@ -200,12 +200,18 @@
             # NB: ripgrep and fd are deliberately ABSENT. claude-code vendors its
             # OWN per-platform ripgrep binary (vendor/ripgrep/<platform>/rg) for
             # its Grep tool and does its own globbing for Glob — a separate
-            # system ripgrep/fd would be dead weight, not a dependency. Likewise
-            # gnugrep/gnused/gawk/less: nothing in this repo's own generated
-            # boot scripts (grep for `mkdir -p`/`sleep`/`dirname`/`cat`/`echo`
-            # below) shells out to any of them — "the agent might want it in an
-            # ad hoc pipeline" is exactly the unbounded justification this list
-            # is meant to reject.
+            # system ripgrep/fd would be dead weight, not a dependency.
+            # gnused/gawk/less are ALSO absent — no evidence anything (this
+            # repo's own scripts, or a real ad-hoc Bash pipeline) needs them.
+            # gnugrep is a DIFFERENT case: it was cut in an earlier pass on
+            # the same "no evidence" reasoning, but that was wrong — plain
+            # `grep` in an ad-hoc shell pipe (e.g. `ls ... | grep -v ...`) is
+            # baseline shell vocabulary, not a search-tool alternative to
+            # claude-code's own Grep tool, and removing it broke a real,
+            # pre-existing test (tests/ocap.test.ts's ssh-agent-absence
+            # check pipes `ls` through `grep -v`) — confirmed live by booting
+            # the trimmed image. Restored.
+            gnugrep
             bun                # agent/runtime (also what prx is built with)
             openssh            # git-over-ssh transport (no keys shipped; agent not forwarded)
             socat              # netd-door relay (loopback proxy → /run/netd.sock)
@@ -267,16 +273,26 @@
           gitAiHookCmd = "command -v git-ai >/dev/null 2>&1 && git-ai checkpoint claude --hook-input stdin || true";
           recordAuthoredCmd = "bun ${recordAuthoredPath} || true";
           cmdHook = command: { type = "command"; inherit command; };
-          # permissions: opt-in tools + a hard deny on the leased credential file.
-          # The classifier already refuses credential extraction (see
-          # #193 on claude-box, verified live 2026-07-04), but that's a soft,
+          # permissions: a hard deny on the leased credential file. The
+          # classifier already refuses credential extraction (see #193 on
+          # claude-box, verified live 2026-07-04), but that's a soft,
           # prompt-dependent guardrail with no claude-box-side backstop if it
-          # ever changes upstream — this is that backstop. defaultMode "deny"
-          # means any tool NOT in `allow` below hard-fails with no prompt, so
-          # the allow list is deliberately the full set this box's actual
-          # workflows need (code editing, search, research, sub-agents) — NOT
-          # a per-Bash-command allowlist (that would be too brittle to
-          # enumerate; Bash itself is opted in, same as every other tool here).
+          # ever changes upstream — this is that backstop.
+          #
+          # NB: there is NO defaultMode value that means "deny anything not
+          # explicitly allow-listed" — verified against the actual installed
+          # claude-code binary's own embedded validator strings (this shipped
+          # version's real defaultMode enum is default/acceptEdits/plan/
+          # bypassPermissions — an overall interaction mode, not a per-tool
+          # allow/deny default). An earlier attempt set defaultMode="deny",
+          # which isn't a valid enum member; managed-settings validation is
+          # strict (unlike user-settings), so the ENTIRE permissions object —
+          # including this deny rule — was silently discarded ("Failed schema
+          # validation. This field was ignored"), confirmed live by booting
+          # the built image. Do not reintroduce defaultMode here without
+          # re-verifying against the actual running binary first — the public
+          # docs (or a summary of them) are not reliable ground truth for
+          # this specific enum.
           # allowedMcpServers = [] is a full MCP lockdown: no MCP server loads
           # by default (managed, so user/project .mcp.json can't override it)
           # until a future managed entry explicitly opts one in.
@@ -287,23 +303,9 @@
             strictPluginOnlyCustomization = [ "skills" ];
             allowedMcpServers = [ ];
             permissions = {
-              defaultMode = "deny";
               deny = [
                 "Read(${credentialsPath})"
                 "Bash(cat ${credentialsPath}*)"
-              ];
-              allow = [
-                "Bash(*)"
-                "Read(*)"
-                "Write(*)"
-                "Edit(*)"
-                "Grep(*)"
-                "Glob(*)"
-                "WebSearch(*)"
-                "WebFetch(*)"
-                "Task(*)"
-                "TodoWrite(*)"
-                "Skill(*)"
               ];
             };
             hooks = {

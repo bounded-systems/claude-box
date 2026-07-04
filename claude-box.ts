@@ -15,7 +15,7 @@
  * docs/prx/claude-runtime.md, epic prx-d4o). Run via pinned Bun.
  */
 
-import { existsSync, mkdirSync, statSync, rmSync, mkdtempSync, readFileSync, openSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, rmSync, mkdtempSync, readFileSync, openSync, closeSync } from "node:fs";
 import { dirname, resolve, relative, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 // The guest-agnostic room+door engine. claude-box is its first consumer: it
@@ -2803,20 +2803,22 @@ async function cmdCheckIn(): Promise<number> {
     // that interactive output down the same pipe, silently starving both the
     // user (no visible prompt) and authd (which blocks reading stdin until
     // EOF). /dev/tty bypasses the outer process's stdio entirely.
-    let ttyIn: number | undefined;
-    let ttyOut: number | undefined;
+    // A single read-write fd (not two separate opens) so a real terminal's
+    // stdin/stdout/stderr all reference the SAME tty device, as they would
+    // for an ordinary interactive process.
+    let tty: number | undefined;
     try {
-      ttyIn = openSync("/dev/tty", "r");
-      ttyOut = openSync("/dev/tty", "w");
+      tty = openSync("/dev/tty", "r+");
     } catch {
       // No controlling terminal (e.g. a non-interactive CI run) — best effort.
     }
     const proc = Bun.spawn(argv, {
-      stdin: ttyIn ?? "inherit",
-      stdout: ttyOut ?? "inherit",
-      stderr: ttyOut ?? "inherit",
+      stdin: tty ?? "inherit",
+      stdout: tty ?? "inherit",
+      stderr: tty ?? "inherit",
     });
     const code = await proc.exited;
+    if (tty !== undefined) closeSync(tty);
     if (code !== 0) return code;
     const credPath = join(outDir, "cred.json");
     if (!existsSync(credPath)) {

@@ -1,6 +1,6 @@
 # ADR — launcherd is a control plane; door socket paths live in one namespace
 
-> Status: **proposed** (2026-07-04). Tracking: refines `ADR-ORCHESTRATION.md`
+> Status: **accepted** (2026-07-04). Tracking: refines `ADR-ORCHESTRATION.md`
 > (Quadlet for doors) for the one daemon that ADR's uniform rule doesn't fit.
 > Motivating incident: an end-to-end dispatch spawn failed through three
 > stacked, runtime-only bugs (see Context). This ADR is the contract those

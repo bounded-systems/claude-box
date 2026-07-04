@@ -17,6 +17,33 @@
 //!   `podman run`, the exact mechanism `remote-serve.container`'s ExecStartPre
 //!   uses. Reimplementing the crypto/boot-script in Rust is a later increment;
 //!   the control plane (validate, limit, name, mount, spawn) is Rust now.
+//!
+//! ## KNOWN BLOCKER — RC registration 405 through netd (LOUD, unresolved)
+//!
+//! Verified live: a dispatched box now spawns confined, reaches its doors,
+//! leases its credential, authenticates, and *attempts* RC session
+//! registration — then fails with `Registration: Failed with status 405`.
+//! Root cause is NOT security posture and NOT dispatch-specific plumbing: the
+//! RC client registers via `POST https://api.anthropic.com/v1/environments/
+//! bridge` as a **non-CONNECT** proxied request, and `netd` is a CONNECT-only
+//! allowlist proxy — it tunnels TLS and, by design, REFUSES to forward
+//! plaintext non-CONNECT requests (`netd … DENY non-CONNECT POST …/bridge`),
+//! which the client surfaces as 405.
+//!
+//! The two ways forward, per the "always more secure; if not, name the
+//! shortcoming + risk + research" rule:
+//!   1. MORE SECURE (preferred): keep netd CONNECT-only and find how to make the
+//!      RC bridge use CONNECT (or a route that doesn't need netd to forward a
+//!      bare POST). Needs research into the `tengu_ccr_bridge` transport.
+//!   2. SHORTCUT (a real weakening — do NOT take silently): teach netd to
+//!      forward non-CONNECT POSTs to allow-listed hosts. RISK: netd would then
+//!      proxy plaintext application requests (seeing/forwarding bodies), not
+//!      just blind-tunnel TLS — eroding the "netd never sees cleartext" property
+//!      that makes it a trustworthy egress boundary. If ever taken, it must be
+//!      scoped to the exact RC bridge host+path and documented as such.
+//!   OPEN QUESTION: does the live bastion hit the same 405? If so this is a
+//!   pre-existing, system-wide RC-through-netd gap (the "claude-box" app entry
+//!   may never have fully registered), not something dispatch introduced.
 
 use std::process::Command;
 
@@ -111,9 +138,24 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     // The doors themselves — THIS is the ADR payoff: each source is a HostPath,
     // each dest an InBoxPath, and DoorSocket.mount_arg() is the only way to form
     // the pair. A wrong-namespace source can't be typed here.
+    //
+    // SECURITY POSTURE — deliberately MORE secure than the rest of the fleet.
+    // The door sockets live under the user's home, so they carry `user_home_t`,
+    // which a confined `container_t` box cannot read (verified live: bare mounts
+    // showed `-?????????` / permission denied). The whole existing fleet
+    // (keeperd/netd/.../remote-serve) sidesteps this with
+    // `SecurityLabelDisable=true` — i.e. it turns SELinux confinement OFF for
+    // the container. We do NOT do that here. Instead each door mount gets `:z`,
+    // which relabels the source to the SHARED `container_file_t:s0` a confined
+    // box can read, while the box itself stays fully confined (`container_t`
+    // with its own MCS categories). Net: a dispatched box reaches exactly its
+    // granted doors AND keeps SELinux confinement — strictly stronger isolation
+    // than the label-disabled bastion. `:z` (shared) not `:Z` (private) because
+    // door sockets are shared services many boxes mount; a private label would
+    // lock a socket to one box and break the others.
     for d in &plan.doors {
         p(a, "-v");
-        a.push(d.mount_arg());
+        a.push(format!("{}:z", d.mount_arg()));
         p(a, "-e");
         a.push(format!("{}={}", d.env, d.in_box));
     }
@@ -122,9 +164,11 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     p(a, "--tmpfs");
     p(a, "/home/claude/.config/claude:rw,mode=1777");
 
-    // The generated boot script, host→in-box, read-only.
+    // The generated boot script, host→in-box, read-only + `:z` (same reasoning
+    // as the doors — it's host-written so it carries `user_home_t`; without the
+    // relabel a confined box gets `sh: /rc-boot.sh: Permission denied`).
     p(a, "-v");
-    a.push(format!("{}:ro", bind_mount(&plan.boot_script, &InBoxPath::new("/rc-boot.sh"))));
+    a.push(format!("{}:ro,z", bind_mount(&plan.boot_script, &InBoxPath::new("/rc-boot.sh"))));
 
     p(a, "--entrypoint");
     p(a, "sh");
@@ -255,21 +299,31 @@ mod tests {
     }
 
     #[test]
-    fn door_bind_mounts_are_host_to_in_box() {
+    fn door_bind_mounts_are_host_to_in_box_with_z_relabel() {
         let a = argv();
-        assert!(window(&a, "-v", "/var/home/core/.claude-box/run/netd.sock:/run/doors/netd.sock"));
-        assert!(window(&a, "-v", "/var/home/core/.claude-box/run/authd.sock:/run/doors/authd.sock"));
-        // door env vars point at the in-box path
+        // `:z` keeps the box SELinux-confined while letting it read the
+        // user_home_t door sockets (see the security-posture comment).
+        assert!(window(&a, "-v", "/var/home/core/.claude-box/run/netd.sock:/run/doors/netd.sock:z"));
+        assert!(window(&a, "-v", "/var/home/core/.claude-box/run/authd.sock:/run/doors/authd.sock:z"));
+        // door env vars point at the in-box path (no :z on the env value)
         assert!(window(&a, "-e", "NETD_SOCK=/run/doors/netd.sock"));
         assert!(window(&a, "-e", "AUTHD_SOCK=/run/doors/authd.sock"));
     }
 
     #[test]
-    fn boot_script_mounted_readonly() {
+    fn no_security_label_disable() {
+        // The box must stay confined — never `--security-opt label=disable`
+        // (the fleet-wide shortcut we deliberately do NOT take here).
+        let a = argv();
+        assert!(!a.iter().any(|s| s.contains("label=disable")));
+    }
+
+    #[test]
+    fn boot_script_mounted_readonly_with_z_relabel() {
         let a = argv();
         assert!(window(
             &a, "-v",
-            "/var/home/core/.claude-box/run/boot-box-hooksmith-abc123.sh:/rc-boot.sh:ro"
+            "/var/home/core/.claude-box/run/boot-box-hooksmith-abc123.sh:/rc-boot.sh:ro,z"
         ));
     }
 

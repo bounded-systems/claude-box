@@ -1045,6 +1045,22 @@
             cargoLock.lockFile = ./peercred/Cargo.lock;
           };
 
+          # launcherd-rs — the launch+dispatch control-plane door, reimplemented
+          # in Rust (ADR-DISPATCH-PATH-NAMESPACES). Built via pkgsStatic so the
+          # output is a STATIC binary with no dynamic loader — the previous bun
+          # implementation could not run on the VM (Fedora CoreOS has no JS
+          # runtime, and the nix bun's ELF interpreter is absent there), which is
+          # exactly what blocked "VM-native." A static musl binary runs on CoreOS
+          # with zero runtime dependency. Increment #1 is the contract only (path
+          # types + wire protocol); handlers + socket serving land incrementally,
+          # with the bun launcherd staying live until parity.
+          launcherd-rs = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+            pname = "launcherd";
+            version = "0.1.0";
+            src = ./launcherd-rs;
+            cargoLock.lockFile = ./launcherd-rs/Cargo.lock;
+          };
+
           # claude-box — the host launcher CLI, available natively on Linux.
           # A typed Bun CLI run via pinned bun (`bun --compile` fetches its
           # runtime from the network → blocked in the nix sandbox; a pinned-bun

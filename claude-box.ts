@@ -122,6 +122,12 @@ const BOX_CONFIG_DIR = "/home/claude/.config/claude";
 // display name is this directory's basename — a generic "workspace" name
 // was indistinguishable from any other tool's bastion in the RC list.
 const RC_WORKSPACE = "/home/claude/claude-box";
+// A local (--plugin-dir, no marketplace) plugin baked into the image at build
+// time (see flake.nix), providing the check-ocap skill. Plugin-sourced skills
+// are exempt from managed-settings' strictPluginOnlyCustomization=["skills"]
+// lockdown (see gitAiManagedSettings) — this is the one way a skill still
+// loads in this box.
+const CHECK_OCAP_PLUGIN_DIR = "/opt/plugins/check-ocap";
 // The loopback proxy the in-box relay exposes; the image entrypoint forwards it
 // to the netd door (/run/netd.sock). Egress clients route here (HTTPS_PROXY=…).
 const NETD_PROXY = "http://127.0.0.1:3128";
@@ -1462,7 +1468,9 @@ async function runPod(launch: Launch): Promise<number> {
         `${netdRelayCmd} export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; git clone --depth 1 "$1" /work || { echo "claude-box: clone failed — --repo-origin clones over netd with NO credentials (works for PUBLIC repos). For a private repo, use the scout read-door, which injects the token. There is no TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && shift && exec ${guestCmd} "$@"`,
         "claude-box", repoOrigin,
       );
-      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      if (guest === "claude") {
+        argv.push("--append-system-prompt", capabilityPrompt(manifest), "--plugin-dir", CHECK_OCAP_PLUGIN_DIR);
+      }
       argv.push(...guestArgs);
     } else if (repoDoor) {
       // Ask repod (over the shared unix socket, pod-internal) for a checkout,
@@ -1484,7 +1492,9 @@ async function runPod(launch: Launch): Promise<number> {
         "claude-box",
         repoDoorRef,
       );
-      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      if (guest === "claude") {
+        argv.push("--append-system-prompt", capabilityPrompt(manifest), "--plugin-dir", CHECK_OCAP_PLUGIN_DIR);
+      }
       argv.push(...guestArgs);
     } else {
       // No repo: still needs the netd relay started before the guest runs, so
@@ -1496,7 +1506,9 @@ async function runPod(launch: Launch): Promise<number> {
       const cmdTokens = guestPreset.entrypoint ?? [guestCmd];
       argv.push("--entrypoint", "sh", IMAGE, "-c", `${netdRelayCmd} exec "$@"`, "claude-box");
       argv.push(...cmdTokens);
-      if (guest === "claude") argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      if (guest === "claude") {
+        argv.push("--append-system-prompt", capabilityPrompt(manifest), "--plugin-dir", CHECK_OCAP_PLUGIN_DIR);
+      }
       argv.push(...guestArgs);
     }
 
@@ -1856,7 +1868,7 @@ async function run(
     // `claude remote-control` has no --append-system-prompt equivalent (see the
     // matching skip in the non-origin branch below) — omit it for RC server mode.
     if (guest === "claude" && !launch.remoteServe) {
-      argv.push("--append-system-prompt", capabilityPrompt(manifest));
+      argv.push("--append-system-prompt", capabilityPrompt(manifest), "--plugin-dir", CHECK_OCAP_PLUGIN_DIR);
     }
     argv.push(...guestArgs);
   } else {
@@ -1889,13 +1901,13 @@ async function run(
       // remote-control invocation (remoteServeArgs), never string-interpolated.
       argv.push(
         "-c",
-        `${repo ? "" : `mkdir -p ${rcCwd}; `}${leaseCmd}; (while true; do sleep 600; ${leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`,
+        `${repo ? "" : `mkdir -p ${rcCwd}; `}${leaseCmd}; (while true; do sleep 600; ${leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude --plugin-dir ${CHECK_OCAP_PLUGIN_DIR} "$@"`,
         "claude-box",
         ...remoteServeArgs(launch),
       );
     } else {
       if (guest === "claude") {
-        argv.push("--append-system-prompt", capabilityPrompt(manifest));
+        argv.push("--append-system-prompt", capabilityPrompt(manifest), "--plugin-dir", CHECK_OCAP_PLUGIN_DIR);
       }
       // Add entrypoint override if the guest specifies one, then the args.
       if (guestPreset.entrypoint) {

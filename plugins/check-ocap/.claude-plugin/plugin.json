@@ -1,0 +1,6 @@
+{
+  "name": "check-ocap",
+  "version": "1.0.0",
+  "description": "Verify claude-box's live capability/door boundaries from inside a running session.",
+  "author": { "name": "claude-box" }
+}

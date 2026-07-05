@@ -95,8 +95,10 @@ pub struct SpawnPlan {
     /// The generated RC boot script, written to this host path and bind-mounted
     /// read-only at `/rc-boot.sh`.
     pub boot_script: HostPath,
-    /// The freshly-minted, base64 auth grant for this box (audience = launch id).
-    pub grant_b64: String,
+    /// A 0600 env-file holding `CLAUDE_BOX_RC_GRANT=<b64>`, passed via
+    /// `--env-file` — never `-e` on the argv (which would leak the grant into
+    /// the worker's systemd-run unit command line / journald).
+    pub grant_env_file: HostPath,
 }
 
 /// Build the `podman run` argv for a dispatched box. Pure — no I/O.
@@ -166,9 +168,10 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     p(a, "-e");
     p(a, "AUTHD_SOCK=/run/doors/authd.sock");
 
-    // The per-box grant the boot script decodes to lease its credential.
-    p(a, "-e");
-    a.push(format!("CLAUDE_BOX_RC_GRANT={}", plan.grant_b64));
+    // The per-box grant, via an env-FILE (0600) so it never appears on the argv
+    // / systemd-run unit / journald. The boot script decodes it to lease.
+    p(a, "--env-file");
+    a.push(plan.grant_env_file.to_string());
 
     // The doors themselves — THIS is the ADR payoff: each source is a HostPath,
     // each dest an InBoxPath, and DoorSocket.mount_arg() is the only way to form
@@ -232,9 +235,6 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     std::mem::take(a)
 }
 
-/// The stdin fed to the spawned box: the fixed, non-secret `y\n` answering the
-/// one-time "Enable Remote Control?" prompt.
-pub const RC_CONFIRM_STDIN: &[u8] = b"y\n";
 
 /// Mint a fresh base64 auth grant scoped to `audience` (the box's launch id),
 /// by running the bundled `claude-box internal-mint-auth-grant` in a throwaway
@@ -321,7 +321,7 @@ mod tests {
                 },
             ],
             boot_script: HostPath::new("/var/home/core/.claude-box/run/boot-box-hooksmith-abc123.sh"),
-            grant_b64: "GRANTB64".into(),
+            grant_env_file: HostPath::new("/var/home/core/.claude-box/run/grant-box-hooksmith-abc123.env"),
         }
     }
 
@@ -398,9 +398,11 @@ mod tests {
     }
 
     #[test]
-    fn grant_and_traffic_flag_present() {
+    fn grant_via_env_file_never_on_argv() {
         let a = argv();
-        assert!(window(&a, "-e", "CLAUDE_BOX_RC_GRANT=GRANTB64"));
+        // The grant is passed by file, so no `CLAUDE_BOX_RC_GRANT=...` arg exists.
+        assert!(window(&a, "--env-file", "/var/home/core/.claude-box/run/grant-box-hooksmith-abc123.env"));
+        assert!(!a.iter().any(|s| s.starts_with("CLAUDE_BOX_RC_GRANT=")));
         assert!(window(&a, "--unsetenv", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
     }
 

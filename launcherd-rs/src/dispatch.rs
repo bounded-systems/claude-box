@@ -7,8 +7,6 @@
 //! the Claude app. No `LaunchRecord`, no attach/kill/list relationship — "not
 //! really even a child."
 
-use std::io::Write;
-
 use crate::doors;
 use crate::id::{generate_launch_id, sanitize_label};
 use crate::limits::{Decision, Limits};
@@ -131,13 +129,20 @@ pub fn handle(
     if let Err(e) = write_boot_script(&boot_path, &script) {
         return Response::err(id, ErrorCode::SpawnFailed, e);
     }
+    // The signed grant goes to a 0600 env-FILE, passed via `--env-file` — NOT
+    // `-e CLAUDE_BOX_RC_GRANT=…` on the argv, which would land the grant in the
+    // worker's systemd-run unit command line (visible in `systemctl`/journald).
+    let grant_path = format!("{}/grant-{}.env", env.work_dir, launch_id);
+    if let Err(e) = write_grant_file(&grant_path, &grant_b64) {
+        return Response::err(id, ErrorCode::SpawnFailed, e);
+    }
 
     let plan = SpawnPlan {
         launch_id: launch_id.clone(),
         label,
         doors: door_socks,
         boot_script: HostPath::new(&boot_path),
-        grant_b64,
+        grant_env_file: HostPath::new(&grant_path),
     };
 
     match run_box(&plan) {
@@ -158,42 +163,59 @@ fn write_boot_script(path: &str, script: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Actually run the box: a FOREGROUND `podman run -i` (never `-d` — RC only
-/// registers with an interactive stdin, see `spawn::podman_run_argv`), fed the
-/// fixed `y\n` confirmation. The container lives as long as this `podman run`
-/// process, so launcherd owns it in a detached thread and keeps serving other
-/// requests; `podman logs <launch_id>` still works for inspection.
+/// Write the grant env-file (`CLAUDE_BOX_RC_GRANT=<b64>`) at 0600 — podman reads
+/// it host-side for `--env-file`, so the grant never appears on any argv. Owner
+/// is the launcherd (core) user, which is also who podman runs as.
+fn write_grant_file(path: &str, grant_b64: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, format!("CLAUDE_BOX_RC_GRANT={grant_b64}\n"))
+        .map_err(|e| format!("write grant file {path}: {e}"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod grant file {path}: {e}"))?;
+    Ok(())
+}
+
+/// Shell-quote one argument (single-quote wrap, escape embedded quotes) so a
+/// podman argv can be embedded in a `/bin/sh -c` string without word-splitting.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Launch the box as its OWN transient systemd user unit, INDEPENDENT of
+/// launcherd. `systemd-run --user` registers a `Type=simple` service whose
+/// ExecStart is `printf 'y\n' | podman run -i …` — foreground (so RC actually
+/// registers, unlike `-d`; see `spawn::podman_run_argv`) with the one-time y/n
+/// confirmation piped in, exactly as the proven prototype and the bastion do.
 ///
-/// KNOWN LIMITATION (follow-up): because launcherd owns the child, a dispatched
-/// box currently dies if launcherd dies — not the fully-independent box the
-/// dispatch design wants. True independence needs `claude remote-control` to
-/// register under `-d` (which needs the RC confirmation pre-set in config
-/// rather than answered on stdin), or a per-box supervisor. Also: the
-/// concurrency counter isn't decremented on box exit yet (the rate limit still
-/// bounds dispatch); wiring release across the thread boundary is deferred.
+/// Because the box is its own systemd unit (not a child of launcherd), it
+/// survives a launcherd restart — the "not really even a child" independence the
+/// dispatch design wants. `--collect` cleans the unit up when the box exits.
+/// `systemd-run` returns immediately once the transient unit is started, so the
+/// serve loop is free for the next dispatch.
 fn run_box(plan: &SpawnPlan) -> Result<(), String> {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let argv = spawn::podman_run_argv(plan);
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn podman: {e}"))?;
-    // Feed the one-time "Enable Remote Control? (y/n)" answer, then drop stdin
-    // (EOF) — the prototype did the same (`printf 'y\n' | podman run -i`).
-    match child.stdin.take() {
-        Some(mut stdin) => stdin
-            .write_all(spawn::RC_CONFIRM_STDIN)
-            .map_err(|e| format!("write RC-confirm stdin: {e}"))?,
-        None => return Err("podman child had no stdin pipe".into()),
+    let podman = argv
+        .iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // `printf 'y\n'` answers the one-time "Enable Remote Control? (y/n)".
+    let cmd = format!("printf 'y\\n' | {podman}");
+    // launch_id is already sanitized to [a-z0-9_.-]; safe as a systemd unit name.
+    let unit = format!("--unit=claude-box-worker-{}", plan.launch_id);
+
+    let out = Command::new("systemd-run")
+        .args(["--user", "--collect", &unit, "/bin/sh", "-c", &cmd])
+        .output()
+        .map_err(|e| format!("systemd-run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemd-run exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    // Own the long-lived foreground child in a detached thread so the serve loop
-    // is free to handle more dispatches; the box lives with this thread.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
     Ok(())
 }
 

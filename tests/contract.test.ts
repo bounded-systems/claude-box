@@ -20,6 +20,7 @@ type ContractDoor = {
   env: string;
   mountable: boolean;
   bootRequired: boolean;
+  interface?: string;
 };
 type ContractRoom = {
   name: string;
@@ -113,6 +114,33 @@ describe("capability contract", () => {
         expect(typeof s.writer).toBe("string");
         expect(s.writer.length).toBeGreaterThan(0);
         expect(s.readers ?? []).not.toContain(s.writer);
+      }
+    });
+
+    // I6 — doors reference a verbspec interface (the method surface). Enforced at
+    // presence + shape now; beads (first door migrated to verbspec, prx#990)
+    // must carry one. Full coverage + resolution are the named follow-ups.
+    const INTERFACE_RE = /^[a-z0-9][a-z0-9-]*@[0-9]+\.[0-9]+\.[0-9]+$/;
+
+    test("I6 — every declared door interface is well-formed (name@semver)", () => {
+      for (const d of contract.doors) {
+        if (d.interface !== undefined) {
+          expect(d.interface, `door ${d.name} interface malformed`).toMatch(INTERFACE_RE);
+        }
+      }
+    });
+
+    test("I6 — beads (the door migrated to verbspec) carries an interface reference", () => {
+      const beads = doorByName.get("beads");
+      expect(beads, "no beads door").toBeDefined();
+      expect(beads?.interface, "beads must reference its verbspec interface").toMatch(INTERFACE_RE);
+    });
+
+    test("I6 — only mountable doors may declare an interface (control doors have no method surface)", () => {
+      for (const d of contract.doors) {
+        if (d.interface !== undefined) {
+          expect(d.mountable, `non-mountable door ${d.name} must not declare an interface`).toBe(true);
+        }
       }
     });
   });

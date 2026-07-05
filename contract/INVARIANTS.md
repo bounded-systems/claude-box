@@ -62,9 +62,11 @@ as a second SQL server. Enforced operationally by the single-writer guard on
 binds the volume writable. The retired prx-pod `dolt` must never start a
 competing server on this volume.
 
-## I6 — every door resolves to an interface  *(target — enforced once doors carry verbspec interfaces)*
+## I6 — doors reference an interface  *(enforced: presence + shape; full coverage + resolution incremental)*
 ```
-∀ d ∈ D. mount(d) ⇒ ∃ iface. d.interface = iface ∧ iface ∈ VerbspecInterfaces
+∀ d ∈ D. d.interface defined ⇒ well-formed(d.interface)      // enforced now
+  ∧  beads.interface defined                                  // enforced now (the first migrated door)
+Target: ∀ d ∈ D. mount(d) ⇒ ∃ iface. d.interface = iface ∧ iface ∈ VerbspecInterfaces
 ```
 This contract is the **topology** layer — it says which doors *exist* and how
 they're wired (socket, env, room membership, boot). It does **not** say what you
@@ -75,12 +77,22 @@ door's NDJSON JSON-RPC transport (`dispatchNdjson`) and its published interface
 doc (`toOpenRpcDocument`). Same "single source, many projections, cannot drift"
 principle as this contract — one level up the stack (verbs, not nouns).
 
-I6 links the two levels: a `door` entry gains an `interface` reference (e.g.
-`"interface": "beadsd@v1"`), and the validator asserts every mountable door
-resolves to a real verbspec interface — the same drift-check I1 does for room
-doors, now spanning topology → interface. **Not yet enforced**: doors don't carry
-verbspec interfaces yet. Enforcement lands with the first door migrated to
-verbspec (beadsd); until then I6 is the stated target, not a green test.
+I6 links the two levels: a `door` entry carries an `interface` reference of the
+form `name@major.minor.patch` (e.g. `"beadsd@0.1.0"`), pointing at the OpenRPC
+doc that daemon publishes (prx `beadsd.openrpc.json`, shipped in prx#990).
+
+**Enforced now** (`tests/contract.test.ts`): every `interface` present is
+well-formed against the schema pattern, and **beads** — the first door migrated
+to verbspec (prx#990) — carries one. This is the topology→interface link made
+real, not a stated target.
+
+**Incremental to the full form**, in two named follow-ups:
+1. *Coverage* — as keeper/net/scout/auth get verbspec interfaces, each adds its
+   `interface`; when every mountable door has one, I6 tightens to the ∀ target.
+2. *Resolution* — asserting `d.interface` actually resolves to a real published
+   OpenRPC doc (matching name + version) needs that doc available to claude-box
+   across the repo boundary — a cross-repo artifact decision (vendor vs publish
+   as a package). Presence + shape hold until then.
 
 ## Scope (v0.1)
 Models the launcherd **dispatch** door/room surface (`knownDoors` + `ROOMS`) and

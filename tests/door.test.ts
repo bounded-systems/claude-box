@@ -41,6 +41,32 @@ test("--scout grants the scout read door (content, not credential)", () => {
   expect(JSON.parse(capabilityJson(m)).network).toBe("none");
 });
 
+test("--issue implies --scout and seeds guestArgs with a prompt (owner/repo#N form)", () => {
+  const l = planLaunch(["--issue", "bounded-systems/gh-project-room#74"], EMPTY);
+  expect(l.doors.map((d) => d.name)).toContain("scout");
+  expect(l.guestArgs).toHaveLength(1);
+  expect(l.guestArgs[0]).toContain("bounded-systems/gh-project-room#74");
+  expect(l.guestArgs[0]).toContain("scout door");
+});
+
+test("--issue accepts a full GitHub issue URL", () => {
+  const l = planLaunch(
+    ["--issue", "https://github.com/bounded-systems/gh-project-room/issues/74"],
+    EMPTY,
+  );
+  expect(l.guestArgs[0]).toContain("bounded-systems/gh-project-room#74");
+});
+
+test("--issue prepends its seed prompt ahead of any other guest args", () => {
+  const l = planLaunch(["--repo", ".", "--issue", "org/repo#1", "--resume"], EMPTY);
+  expect(l.guestArgs).toEqual([l.guestArgs[0], "--resume"]);
+  expect(l.guestArgs[0]).toContain("org/repo#1");
+});
+
+test("--issue rejects an unparseable spec", () => {
+  expect(() => planLaunch(["--issue", "not-a-valid-ref"], EMPTY)).toThrow(/--issue needs/);
+});
+
 test("preset host socket is overridable via env (same launch, any transport)", () => {
   const d = resolveDoor("keeper", undefined, { HOME: "/tmp", KEEPERD_SOCK: "/relay/k.sock" });
   expect(d.host).toEqual({ kind: "unix", path: "/relay/k.sock" });

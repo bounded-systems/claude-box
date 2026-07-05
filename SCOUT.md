@@ -87,8 +87,18 @@ The daemon supports:
 - `repo` — fetch GitHub repo metadata
 - `pr` — fetch PR metadata, diff, comments
 - `issue` — fetch issue metadata + comments
+- `project` — fetch GitHub Projects v2 board items (read-only; GraphQL —
+  there's no REST equivalent). Lets a box SEE a project board (e.g. the org's
+  Front Desk roadmap) without holding a token; it cannot set Status/Score/etc.
+  through this door — writing to a board stays a host-side, App-token
+  operation (see GHAPPD.md).
 - `fetch` — fetch arbitrary URL (allowlist enforced)
 - `download` — download file content (base64)
+
+`claude-box --issue owner/repo#N` (or a full GitHub issue URL) is sugar over
+this: it implies `--scout` and seeds the guest's first prompt with an
+instruction to read that issue via scoutd's `issue` method and work it — so
+handing an agent a specific piece of work never requires it to hold a token.
 
 Tokens: set `SCOUTD_ALLOW` to customize the allowlist (default: GitHub + npm + pypi).
 Place a GitHub token at `~/.claude-box/scout_github_token` for private repo access.

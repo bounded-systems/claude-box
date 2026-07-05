@@ -50,6 +50,14 @@ PidsLimit=512
 Memory=1g
 
 [Service]
+# Single-writer guard (capability contract I5). dolt's own working-set lock
+# already fails a second sql-server on prx-dolt-data ("database is locked by
+# another dolt process"), so there is no silent-corruption path — but that
+# surfaces late, as a crash-loop on an opaque lock error. This refuses to start
+# EARLY and LOUDLY, naming the offending container, if anything other than our
+# own `dolt` already holds the volume (e.g. a leftover prx-pod dolt). Exactly
+# one writer for prx-dolt-data; everything else reaches beads through beadsd.
+ExecStartPre=/bin/sh -c 'busy=$(podman ps --format "{{.Names}}" --filter volume=prx-dolt-data | grep -vx dolt || true); [ -z "$busy" ] || { echo "dolt: REFUSING to start — prx-dolt-data is already held by: $busy (single-writer invariant I5). Stop the competing writer first (it must connect through beadsd, not open a second server)." >&2; exit 1; }'
 Restart=always
 RestartSec=5
 

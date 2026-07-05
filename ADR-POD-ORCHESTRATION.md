@@ -1,9 +1,11 @@
 # ADR — pod orchestration: `podman kube play` vs Quadlet `.container` units
 
-> Status: **open question / convergence record** (2026-07-05). Captures a
-> divergence surfaced while wiring the beads door single-writer guard (claude-box
-> #219/#223/#225, prx #989). No decision forced yet — this records the two
-> realizations now coexisting and the trade-offs, so the choice is deliberate.
+> Status: **decided — converge on Quadlet** (2026-07-05). Surfaced while wiring
+> the beads door single-writer guard (claude-box #219/#223/#225, prx #989), which
+> had to add the *same* guard twice because two orchestrators own overlapping
+> resources. The pod (netns) is settled; its realization converges on Quadlet
+> `.container` units. Migration sequencing (not the decision) belongs with the
+> prx-asr ADR.
 
 ## The invariant that is NOT in question
 
@@ -51,18 +53,22 @@ Option A** for the per-repo pod. Both now target the *same* store (`prx-dolt-dat
 side) had to be added on *both*. That duplication is a symptom: two orchestrators
 own overlapping resources.
 
-## Decision (proposed)
+## Decision
 
-Converge on **Option B (Quadlet units)** for the single-host VM deployment,
-**unless** shipping to real Kubernetes becomes a near-term goal that justifies the
-`kube play` secret-split tax. Rationale: the only concrete payoff of `kube play`
-is k8s portability, which is currently unused; meanwhile its secret limitation
-already forced a two-runtime split, and claude-box's Quadlet path is where the
-door fleet and the enforcement guards already live.
+Converge on **Option B (Quadlet units)** for the single-host VM deployment.
+Rationale: the only concrete payoff of `kube play` is k8s portability, which is
+currently unused; meanwhile its secret limitation already forced a two-runtime
+split, and claude-box's Quadlet path is where the door fleet and the enforcement
+guards already live. One realization, one lifecycle manager, one place for the
+single-writer guard.
 
-Not yet ratified — this is the record, not the migration. Sequencing and the
-"does the per-repo pod still run dolt-box at all" question belong with the
-**prx-asr** ADR (`docs/prx/beadsd-door-wiring.md` in the prx repo).
+**Reopen only if** shipping to real Kubernetes becomes a near-term goal that
+justifies the `kube play` secret-split tax — at which point the trade flips and
+this ADR should be revisited.
+
+This ADR is the decision; it is **not** the migration. Sequencing and the "does
+the per-repo pod still run dolt-box at all" question belong with the **prx-asr**
+ADR (`docs/prx/beadsd-door-wiring.md` in the prx repo).
 
 ## Consequences if adopted
 

@@ -250,13 +250,25 @@ Until Phase 2, do not claim non-bypassable introduction — Phase 1 is addressin
 The concierge is the **etcd-*pattern*** (a registry of who-serves-what that
 resolves to a live provider) done the OCAP way — an *introducer* that hands back
 an **attenuated door reference**, not a bare address (§2). That framing draws a
-clean line between three layers people conflate as "names":
+clean line between four layers people conflate as "names":
 
 | Layer | Question | Where it lives | Status |
 |---|---|---|---|
-| **Static catalog** | *Which doors/rooms may exist, and their wiring* | [`contract/capabilities.contract.json`](./contract/capabilities.contract.json) | shipped (#223) — both the TS and Rust impls validate against it |
-| **Dynamic registry** | *Who is serving what capability, right now (with liveness)* | the concierge (§2–§7) | design record, no code |
-| **Identity scheme** | *What names the work units / providers carry* (e.g. `GH-NNN`, and the org→repo-scoped identity for cross-repo beads edges) | the beads / work-unit identity layer | org→repo scoping is the owner's stated next step |
+| **Interface (IDL)** | *What can I **say** to a door — methods, params, results* | [`@bounded-systems/verbspec`](https://github.com/bounded-systems/verbspec) verbs, projected via `dispatchNdjson` (JSON-RPC transport) + `toOpenRpcDocument` | verbspec shipped; door methods not yet migrated onto it (slice: beadsd first) |
+| **Static catalog (topology)** | *Which doors/rooms **exist**, and their wiring* | [`contract/capabilities.contract.json`](./contract/capabilities.contract.json) | shipped (#223) — both the TS and Rust impls validate against it |
+| **Dynamic registry** | *Who is **serving** what capability, right now (with liveness)* | the concierge (§2–§7) | design record, no code |
+| **Identity scheme** | *What **names** the work units / providers carry* (e.g. `GH-NNN`, and the org→repo-scoped identity for cross-repo beads edges) | the beads / work-unit identity layer | org→repo scoping is the owner's stated next step |
+
+The **interface** and **topology** layers share one thesis — *single source, many
+projections, cannot drift.* verbspec projects one Zod verb to CLI/MCP/tool-use/
+OpenRPC/NDJSON; the contract validates one JSON topology against the TS and Rust
+impls. They are the **same principle one level apart** (verbs vs. nouns) and
+compose by reference: a door in the contract points at its verbspec interface
+(`"interface": "beadsd@v1"`), which invariant **I6** (`contract/INVARIANTS.md`)
+turns into a drift check. They must NOT be merged into one artifact — an
+interface evolves for API reasons, a topology for deployment reasons, and they
+validate with different tools. Precedents: gRPC's `.proto` (interface) vs. xDS
+(topology); k8s OpenAPI vs. `Service`/`Endpoints`.
 
 Consequences of keeping these separate:
 

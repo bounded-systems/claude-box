@@ -62,6 +62,26 @@ as a second SQL server. Enforced operationally by the single-writer guard on
 binds the volume writable. The retired prx-pod `dolt` must never start a
 competing server on this volume.
 
+## I6 — every door resolves to an interface  *(target — enforced once doors carry verbspec interfaces)*
+```
+∀ d ∈ D. mount(d) ⇒ ∃ iface. d.interface = iface ∧ iface ∈ VerbspecInterfaces
+```
+This contract is the **topology** layer — it says which doors *exist* and how
+they're wired (socket, env, room membership, boot). It does **not** say what you
+can *say* to a door — that is the **interface** layer, owned by
+[`@bounded-systems/verbspec`](https://github.com/bounded-systems/verbspec): each
+door's methods are verbspec verbs (typed Zod input/output), projected to the
+door's NDJSON JSON-RPC transport (`dispatchNdjson`) and its published interface
+doc (`toOpenRpcDocument`). Same "single source, many projections, cannot drift"
+principle as this contract — one level up the stack (verbs, not nouns).
+
+I6 links the two levels: a `door` entry gains an `interface` reference (e.g.
+`"interface": "beadsd@v1"`), and the validator asserts every mountable door
+resolves to a real verbspec interface — the same drift-check I1 does for room
+doors, now spanning topology → interface. **Not yet enforced**: doors don't carry
+verbspec interfaces yet. Enforcement lands with the first door migrated to
+verbspec (beadsd); until then I6 is the stated target, not a green test.
+
 ## Scope (v0.1)
 Models the launcherd **dispatch** door/room surface (`knownDoors` + `ROOMS`) and
 the store single-writer map. Out of scope for now: the claude-box.ts launch-side

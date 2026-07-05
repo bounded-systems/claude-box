@@ -158,32 +158,42 @@ fn write_boot_script(path: &str, script: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Actually run the box: `podman run -d -i …` with the fixed `y\n` on stdin for
-/// the one-time RC confirmation. Returns once the detached container has been
-/// created (podman prints its id and exits; the box keeps running).
+/// Actually run the box: a FOREGROUND `podman run -i` (never `-d` — RC only
+/// registers with an interactive stdin, see `spawn::podman_run_argv`), fed the
+/// fixed `y\n` confirmation. The container lives as long as this `podman run`
+/// process, so launcherd owns it in a detached thread and keeps serving other
+/// requests; `podman logs <launch_id>` still works for inspection.
+///
+/// KNOWN LIMITATION (follow-up): because launcherd owns the child, a dispatched
+/// box currently dies if launcherd dies — not the fully-independent box the
+/// dispatch design wants. True independence needs `claude remote-control` to
+/// register under `-d` (which needs the RC confirmation pre-set in config
+/// rather than answered on stdin), or a per-box supervisor. Also: the
+/// concurrency counter isn't decremented on box exit yet (the rate limit still
+/// bounds dispatch); wiring release across the thread boundary is deferred.
 fn run_box(plan: &SpawnPlan) -> Result<(), String> {
     use std::process::{Command, Stdio};
     let argv = spawn::podman_run_argv(plan);
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("spawn podman: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
+    // Feed the one-time "Enable Remote Control? (y/n)" answer, then drop stdin
+    // (EOF) — the prototype did the same (`printf 'y\n' | podman run -i`).
+    match child.stdin.take() {
+        Some(mut stdin) => stdin
             .write_all(spawn::RC_CONFIRM_STDIN)
-            .map_err(|e| format!("write RC-confirm stdin: {e}"))?;
+            .map_err(|e| format!("write RC-confirm stdin: {e}"))?,
+        None => return Err("podman child had no stdin pipe".into()),
     }
-    let out = child.wait_with_output().map_err(|e| format!("wait podman: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "podman run exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
+    // Own the long-lived foreground child in a detached thread so the serve loop
+    // is free to handle more dispatches; the box lives with this thread.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

@@ -59,6 +59,29 @@ pub const ISSUER_KEYS_VOLUME: &str = "claude-box-issuer-keys";
 /// "right" image, just one that already has bun — same as the bastion's ExecStartPre).
 pub const BUNDLE_RUNNER_IMAGE: &str = "localhost/authd:dev";
 
+/// The transparent SNI-passthrough egress network a dispatched RC box uses
+/// instead of the netd relay (see ADR-RC-EGRESS-SNI). RC session registration
+/// (`POST /v1/environments/bridge`) is a forward-proxy request netd's
+/// CONNECT-only proxy can't carry; a dispatched box therefore does DIRECT
+/// end-to-end TLS with `api.anthropic.com`, routed through an SNI-allowlist
+/// gateway that reads the ClientHello SNI and blind-passes the bytes (no MITM,
+/// no cleartext, no CONNECT requirement). Verified live: RC registers cleanly
+/// through this, which it can't through netd.
+pub const SNI_NETWORK: &str = "sni-egress";
+/// The gateway's fixed address on `SNI_NETWORK` (pinned so the argv is
+/// deterministic — the network is created with this subnet + `--ip`).
+pub const SNI_GATEWAY_IP: &str = "10.90.0.2";
+/// The hosts an RC box needs, pinned to the gateway via `--add-host` so the box
+/// resolves them to the SNI gateway (and, on an `--internal` egress network, can
+/// reach nothing else). The gateway's own allowlist is the real enforcement;
+/// this list just tells the box where to send them.
+pub const RC_HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "claude.ai",
+    "platform.claude.com",
+];
+
 /// Everything needed to render the `podman run` for a dispatched box, all paths
 /// already in their correct namespaces.
 pub struct SpawnPlan {
@@ -92,8 +115,15 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
 
     p(a, "podman");
     p(a, "run");
-    p(a, "-d"); // detached — the app attaches over claude.ai/code, no local tty
-    p(a, "-i"); // stdin for the one-time "Enable Remote Control? (y/n)"
+    // NOT `-d`. `claude remote-control` only actually REGISTERS the session when
+    // it's run with an interactive (foreground) stdin — verified live: a `-d`
+    // box prints the serving banner but never makes the registration call (the
+    // SNI gateway sees zero traffic), while a foreground `-i` box registers a
+    // real session. So launcherd owns a long-lived foreground `podman run` child
+    // per box (like the bun launcherd's Bun.spawn model), not a detached
+    // container. The box lives as long as that child (see run_box). `-i` also
+    // carries the one-time "Enable Remote Control? (y/n)" confirmation on stdin.
+    p(a, "-i");
     p(a, "--rm");
     p(a, "--name");
     a.push(plan.launch_id.clone());
@@ -116,18 +146,23 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     p(a, "--unsetenv");
     p(a, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
 
-    // Egress goes through the in-box netd relay the boot script starts.
-    for kv in [
-        "HTTPS_PROXY=http://127.0.0.1:3128",
-        "HTTP_PROXY=http://127.0.0.1:3128",
-        "ALL_PROXY=http://127.0.0.1:3128",
-        "NO_PROXY=localhost,127.0.0.1",
-    ] {
-        p(a, "-e");
-        p(a, kv);
+    // Egress: the transparent SNI-passthrough gateway, NOT netd (see the
+    // SNI_NETWORK doc + ADR-RC-EGRESS-SNI). No HTTPS_PROXY is set, so `claude`
+    // makes DIRECT end-to-end TLS to api.anthropic.com — which is the only way
+    // its forward-proxy RC-registration works. The box joins the SNI egress
+    // network and resolves every RC host to the gateway; the gateway allowlists
+    // by ClientHello SNI and blind-passes the bytes. (The boot script still
+    // starts its netd relay, harmlessly: with no HTTPS_PROXY nothing uses it,
+    // and with no netd.sock mounted it just fails in the background.)
+    p(a, "--network");
+    p(a, SNI_NETWORK);
+    for host in RC_HOSTS {
+        p(a, "--add-host");
+        a.push(format!("{host}:{SNI_GATEWAY_IP}"));
     }
 
-    // The auth door socket (the boot script's lease step connects here).
+    // The auth door socket (the boot script's lease step connects here). Unix
+    // socket, unaffected by the egress model.
     p(a, "-e");
     p(a, "AUTHD_SOCK=/run/doors/authd.sock");
 
@@ -153,7 +188,14 @@ pub fn podman_run_argv(plan: &SpawnPlan) -> Vec<String> {
     // than the label-disabled bastion. `:z` (shared) not `:Z` (private) because
     // door sockets are shared services many boxes mount; a private label would
     // lock a socket to one box and break the others.
+    // The `net` door (netd) is deliberately NOT mounted: a dispatched RC box's
+    // egress is the SNI gateway, not netd (see the --network block above). Its
+    // other doors (keeper/scout/auth) are unix sockets, unaffected by the egress
+    // model, and mount normally.
     for d in &plan.doors {
+        if d.name == "net" {
+            continue;
+        }
         p(a, "-v");
         a.push(format!("{}:z", d.mount_arg()));
         p(a, "-e");
@@ -292,22 +334,35 @@ mod tests {
     }
 
     #[test]
-    fn detached_named_after_launch_id() {
+    fn foreground_interactive_named_after_launch_id() {
         let a = argv();
-        assert!(a.contains(&"-d".to_string()));
+        // NOT detached — RC only registers with a foreground stdin (see the
+        // comment in podman_run_argv). `-i` carries the y/n confirmation.
+        assert!(!a.contains(&"-d".to_string()));
+        assert!(a.contains(&"-i".to_string()));
         assert!(window(&a, "--name", "box-hooksmith-abc123"));
     }
 
     #[test]
-    fn door_bind_mounts_are_host_to_in_box_with_z_relabel() {
+    fn non_net_door_mounts_are_host_to_in_box_with_z_relabel() {
         let a = argv();
         // `:z` keeps the box SELinux-confined while letting it read the
         // user_home_t door sockets (see the security-posture comment).
-        assert!(window(&a, "-v", "/var/home/core/.claude-box/run/netd.sock:/run/doors/netd.sock:z"));
         assert!(window(&a, "-v", "/var/home/core/.claude-box/run/authd.sock:/run/doors/authd.sock:z"));
-        // door env vars point at the in-box path (no :z on the env value)
-        assert!(window(&a, "-e", "NETD_SOCK=/run/doors/netd.sock"));
         assert!(window(&a, "-e", "AUTHD_SOCK=/run/doors/authd.sock"));
+    }
+
+    #[test]
+    fn net_door_is_not_mounted_egress_is_sni() {
+        // A dispatched RC box's egress is the SNI gateway, not netd — so the
+        // net door is skipped, no HTTPS_PROXY is set, and the box joins the SNI
+        // network with the RC hosts pinned to the gateway.
+        let a = argv();
+        assert!(!window(&a, "-v", "/var/home/core/.claude-box/run/netd.sock:/run/doors/netd.sock:z"));
+        assert!(!a.iter().any(|s| s.starts_with("HTTPS_PROXY=")));
+        assert!(window(&a, "--network", SNI_NETWORK));
+        assert!(window(&a, "--add-host", &format!("api.anthropic.com:{SNI_GATEWAY_IP}")));
+        assert!(window(&a, "--add-host", &format!("claude.ai:{SNI_GATEWAY_IP}")));
     }
 
     #[test]

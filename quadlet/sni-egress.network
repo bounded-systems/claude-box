@@ -1,0 +1,22 @@
+# sni-egress.network — the internal egress network for RC boxes (the bastion
+# and every dispatched session). See ADR-RC-EGRESS-SNI.
+#
+# `Internal=true` means boxes on this network have NO route to the internet
+# except through the SNI gateway container (sni-gateway.container, pinned at
+# 10.90.0.2, which is dual-homed onto an egress network). So a dispatched box —
+# even if compromised — can reach ONLY the hosts the gateway's SNI allowlist
+# permits, and only over end-to-end TLS the gateway never decrypts.
+
+[Unit]
+Description=sni-egress — internal network; RC boxes reach the internet only via the SNI gateway
+
+[Network]
+# Keep the podman network name exactly "sni-egress" (Quadlet would otherwise
+# prefix it "systemd-…"), so `--network sni-egress` in launcherd-rs's spawn and
+# `Network=sni-egress` on the bastion both resolve to this network.
+NetworkName=sni-egress
+Internal=true
+Subnet=10.90.0.0/24
+
+[Install]
+WantedBy=default.target

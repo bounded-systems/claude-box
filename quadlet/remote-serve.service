@@ -1,0 +1,22 @@
+[Unit]
+Description=remote-serve — singleton claude-box RC dispatcher bastion (foreground, SNI egress)
+Requires=claude-doors-volume.service launcherd.service sni-gateway.service
+After=claude-doors-volume.service launcherd.service sni-gateway.service
+
+[Service]
+Type=simple
+# Mint this start's grant + boot script host-side. --log-driver=none keeps the
+# grant out of journald.
+ExecStartPre=/bin/sh -c 'podman run --rm --log-driver=none --userns keep-id:uid=1000,gid=1000 -v claude-box-issuer-keys:/keys:ro -v claude-box-bundle:/app:ro -e HOME=/tmp --entrypoint sh localhost/authd:dev -c "mkdir -p /tmp/.config/claude-box && cp /keys/issuer.key.pem /keys/issuer.pub.json /tmp/.config/claude-box/ && bun /app/claude-box.js internal-mint-auth-grant --audience claude-box-remote-serve" | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
+ExecStartPre=/bin/sh -c 'podman run --rm -v claude-box-bundle:/app:ro --entrypoint bun localhost/authd:dev /app/claude-box.js internal-print-rc-boot-script > %t/claude-box-rc-boot.sh && chmod +r %t/claude-box-rc-boot.sh'
+# Foreground `printf y | podman run -i` (the proven-registering shape) via a
+# helper script — RC only registers with a real interactive stdin, and piping
+# printf into the pipe is what delivers the y/n reliably (StandardInput=data
+# got drained by the ExecStartPre pipes).
+ExecStart=/var/home/core/.claude-box/bin/bastion-run.sh
+ExecStopPost=-/usr/bin/podman rm -f claude-box-remote-serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

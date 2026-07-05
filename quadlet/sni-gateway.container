@@ -1,0 +1,51 @@
+# sni-gateway.container — transparent SNI-passthrough allowlist egress gateway.
+#
+# The one egress route for RC boxes on the internal `sni-egress` network. nginx
+# `ssl_preread` (see sni-gw.conf) reads the ClientHello SNI without terminating
+# TLS, allowlists it (*.anthropic.com / claude.ai / *.claude.com), and blind-
+# passes the encrypted bytes to the real host — no MITM, no cleartext. This is
+# what lets RC session REGISTRATION (a forward-proxy bridge POST netd can't
+# carry — see ADR-RC-EGRESS-SNI) work, while keeping a policed, no-cleartext
+# egress boundary. Verified live before landing: dispatched boxes AND the
+# bastion register real sessions through it.
+#
+# Install:
+#   cp sni-gw.conf ~/.claude-box/sni-gw.conf   (the install script does this)
+#   cp *.network *.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sni-gateway
+
+[Unit]
+Description=sni-gateway — transparent SNI-passthrough allowlist egress for RC boxes
+Wants=sni-egress-network.service
+After=sni-egress-network.service
+
+[Container]
+Image=docker.io/library/nginx:alpine
+ContainerName=sni-gateway
+
+# Box-side: the internal network, at the pinned IP that launcherd-rs's spawn and
+# the bastion both `--add-host` the RC hosts to.
+Network=sni-egress.network:ip=10.90.0.2
+# Egress-side: the default bridge network so the gateway can actually forward
+# the allowlisted TLS out to the real hosts (the internal network can't).
+Network=podman
+
+# The allowlist config. `:z` relabels it so the confined nginx can read it.
+Volume=%h/.claude-box/sni-gw.conf:/etc/nginx/nginx.conf:ro,z
+
+# Security floor. NOT SecurityLabelDisable — the gateway holds no door sockets,
+# so it stays SELinux-confined (unlike the label-disabled door daemons).
+NoNewPrivileges=true
+DropCapability=all
+# nginx needs to bind :443 and set its worker uid.
+AddCapability=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+PidsLimit=512
+Memory=128m
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

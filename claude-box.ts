@@ -524,6 +524,10 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
   --scout             forward the scoutd door (external reads)
+  --issue owner/repo#N or a GitHub issue URL
+                      implies --scout; seeds the guest with a prompt to read
+                      and work that issue (no token in the box — read via
+                      scoutd's `issue` method)
   --launcher          forward the launcherd door (spawn sub-boxes)
   --room NAME         forward a door bundle (tool | read | dev)
   --door NAME[:CAV...][@SOCK]  attach door with optional caveats
@@ -714,12 +718,35 @@ type Launch = {
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
 
+/** Parse "owner/repo#N" or a GitHub issue URL into its parts, for `--issue`. */
+function parseIssueRef(input: string): { owner: string; repo: string; number: number } | null {
+  const urlMatch = input.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/);
+  if (urlMatch) {
+    return { owner: urlMatch[1]!, repo: urlMatch[2]!, number: parseInt(urlMatch[3]!, 10) };
+  }
+  const shortMatch = input.match(/^([^/]+)\/([^/]+)#(\d+)$/);
+  if (shortMatch) {
+    return { owner: shortMatch[1]!, repo: shortMatch[2]!, number: parseInt(shortMatch[3]!, 10) };
+  }
+  return null;
+}
+
+/** The seed prompt `--issue` prepends to guestArgs — read via the scout door,
+ *  never a directly-held token (see scoutd.ts's `issue` method). */
+function seedPromptForIssue(ref: { owner: string; repo: string; number: number }): string {
+  return `Use the scout door (lib/scout.ts's fetchIssue) to read ` +
+    `${ref.owner}/${ref.repo}#${ref.number} (with comments: true), then implement it. ` +
+    `Follow that repo's own contribution norms (CLAUDE.md, existing PR conventions) for how to ship the change.`;
+}
+
 /** Split a launch's tail into claude-box flags (--guest / --repo / --net[-open]
- *  / --keeper / --beads / --scout / --room / --door) and the guest passthrough
- *  args. `--net` takes an optional socket path (bare ⇒ the default netd door);
- *  `--net-open` is the unsafe ambient-egress escape (no door); `--room` expands a
- *  named door bundle that later flags compose over. `--guest` selects a runtime;
- *  tool guests (bun, node, python) apply their defaultRoom if no explicit room. */
+ *  / --keeper / --beads / --scout / --issue / --room / --door) and the guest
+ *  passthrough args. `--net` takes an optional socket path (bare ⇒ the default
+ *  netd door); `--net-open` is the unsafe ambient-egress escape (no door);
+ *  `--issue owner/repo#N` implies --scout and prepends a seed prompt onto
+ *  guestArgs; `--room` expands a named door bundle that later flags compose
+ *  over. `--guest` selects a runtime; tool guests (bun, node, python) apply
+ *  their defaultRoom if no explicit room. */
 function planLaunch(tail: string[], env: Env = process.env): Launch {
   let guest = "claude";
   let explicitRoom = false;
@@ -861,6 +888,23 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     }
     if (t === "--scout") {
       add(resolveDoor("scout", undefined, env));
+      continue;
+    }
+    if (t === "--issue") {
+      // Seed the guest with a specific GitHub issue to work: implies --scout
+      // (the box has no web access of its own — it reads the issue, and later
+      // a project board, only through the scout door, never holding a token
+      // itself) and prepends a seed prompt as the guest's first positional
+      // arg, ahead of anything else already collected in guestArgs.
+      const spec = tail[++i] ?? "";
+      const ref = parseIssueRef(spec);
+      if (!ref) {
+        throw new Error(
+          `--issue needs "owner/repo#N" or a GitHub issue URL, got: ${JSON.stringify(spec)}`,
+        );
+      }
+      add(resolveDoor("scout", undefined, env));
+      guestArgs.unshift(seedPromptForIssue(ref));
       continue;
     }
     if (t === "--launcher") {

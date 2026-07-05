@@ -6,10 +6,13 @@
  * The box holds no tokens — it asks scoutd to fetch.
  *
  * Usage:
- *   import { fetchPr, fetchIssue, fetchRepo, fetchUrl } from "./lib/scout";
+ *   import { fetchPr, fetchIssue, fetchProject, fetchRepo, fetchUrl } from "./lib/scout";
  *
  *   const pr = await fetchPr({ repo: "owner/repo", number: 123 });
  *   console.log(pr.title);
+ *
+ *   const board = await fetchProject({ org: "bounded-systems", number: 2 });
+ *   console.log(board.items.filter((i) => i.fields.Status === "Todo"));
  *
  *   const content = await fetchUrl({ url: "https://..." });
  *   console.log(content.body);
@@ -102,6 +105,37 @@ export type IssueResult = {
     body: string;
     createdAt: string;
   }>;
+};
+
+/** Options for fetching a GitHub Projects v2 board via scoutd. */
+export type ProjectOptions = {
+  /** Org login, e.g. "bounded-systems" */
+  org: string;
+  /** Project number, e.g. 2 for Front Desk */
+  number: number;
+  /** Page size (default 50, max 100) */
+  first?: number;
+  /** Pagination cursor from a previous page's `pageInfo.endCursor` */
+  after?: string;
+};
+
+/** One item on a Projects v2 board. */
+export type ProjectItem = {
+  number: number;
+  title: string;
+  url: string;
+  repo: string;
+  contentType: "Issue" | "PullRequest";
+  state: string;
+  /** Custom field values keyed by field name (e.g. Status, Kind, Score). */
+  fields: Record<string, string | number>;
+};
+
+/** A page of Projects v2 board items fetched via scoutd. */
+export type ProjectResult = {
+  title: string;
+  items: ProjectItem[];
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
 };
 
 /** Options for fetching a URL via scoutd. */
@@ -313,6 +347,25 @@ export async function fetchIssue(options: IssueOptions): Promise<IssueResult> {
 }
 
 /**
+ * Fetch items from a GitHub Projects v2 board (e.g. Front Desk,
+ * bounded-systems project #2). Read-only — the box can SEE the board but
+ * cannot set Status/Score/etc. through this door (that stays a host-side,
+ * App-token write — see GHAPPD.md). The board's own ranked-view sort isn't
+ * queryable through this API, so sort `items` client-side (e.g. by
+ * `fields.Score`) once fetched.
+ *
+ * Requires the `--scout` door.
+ */
+export async function fetchProject(options: ProjectOptions): Promise<ProjectResult> {
+  return request<ProjectResult>("project", {
+    org: options.org,
+    number: options.number,
+    first: options.first ?? 50,
+    after: options.after,
+  });
+}
+
+/**
  * Fetch a URL (allowlist enforced).
  *
  * Requires the `--scout` door.
@@ -399,6 +452,24 @@ async function main(): Promise<number> {
       console.log(JSON.stringify(result, null, 2));
       return 0;
     }
+    case "project": {
+      const org = args[0];
+      const number = parseInt(args[1]);
+      if (!org || !number) {
+        console.error("usage: scout project <org> <number> [--first N] [--after CURSOR]");
+        return 1;
+      }
+      const firstIdx = args.indexOf("--first");
+      const afterIdx = args.indexOf("--after");
+      const result = await fetchProject({
+        org,
+        number,
+        first: firstIdx >= 0 ? parseInt(args[firstIdx + 1]) : undefined,
+        after: afterIdx >= 0 ? args[afterIdx + 1] : undefined,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
     case "fetch": {
       const url = args[0];
       if (!url) {
@@ -417,6 +488,7 @@ Usage:
   scout repo <owner/repo>    fetch repo metadata
   scout pr <repo> <n>        fetch PR (--diff, --comments)
   scout issue <repo> <n>     fetch issue (--comments)
+  scout project <org> <n>    fetch a Projects v2 board (--first, --after)
   scout fetch <url>          fetch URL content
 
 This command only works inside a box with the --scout door.`);

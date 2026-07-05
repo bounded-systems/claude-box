@@ -6,6 +6,37 @@ host/VM/room topology), the per-door specs (NETD / SCOUT / REPOD / LAUNCHERD),
 [HANDOFF.md](./HANDOFF.md) (provenance L2/L3), and
 [PRX-DAEMON-HANDOFF.md](./PRX-DAEMON-HANDOFF.md) (the bridge to the prx daemons).
 
+## 2026-07-05 — Remote Control dispatch substrate (current focus)
+
+The effort has moved from doors/rooms to a **Remote Control dispatch substrate**:
+a persistent **dispatcher** ("dispatch" in the Claude app) you drive from your
+phone, which dispatches independent, SELinux-confined worker sessions. The goal:
+**claude-box as the substrate for the whole prx anchored chain** — a `GH-NNN`
+ticket, driven from the app, planned and executed in credential-free boxes.
+
+**Built & live** (merged): Rust **launcherd-rs** (VM-native static binary) serving
+the dispatch lane; **SNI-passthrough egress** (no-MITM) that lets RC boxes
+register (netd's CONNECT-only proxy can't carry RC's forward-proxy bridge POST);
+a foreground **dispatcher** service that resumes one stable session; workers as
+independent transient systemd units, confined, grants off-argv. `install.sh` +
+a nix `launchd.agents.claude-box-machine` (ai-home) make it reproducible +
+reboot-durable.
+
+**Designed, not built** (the ticket→PR path — all door-mediated, nothing baked
+into a box):
+- `USER-STORY.md` — the primary spec (persona, 7 acceptance criteria, unknowns).
+- `ADR-DISPATCH-PATH-NAMESPACES` (launcherd→Rust), `ADR-RC-EGRESS-SNI` (two-tier
+  egress), `ADR-DISPATCH-REPO-ACCESS` (repo via the repod door — **never a
+  bind-mount**), `ADR-DISPATCH-PLANNING-FROM-TICKET` (planning box → beads plan),
+  `ADR-DISPATCH-APPROVAL-GATES` (Delegate→Review→Own: permission-mode + no
+  auto-execute + PR-open-not-merge).
+- Auth model confirmed solid: authd (RC cred) / ghappd (`GHAPPD.md`, GH token) /
+  keeper (git writes) — borrow a scoped, self-expiring token, never hold the root.
+
+**We are at the design→build boundary.** The remaining build (deploy
+beadsd/repod/ghappd; add the `planning` room + per-room `permissionMode`; the
+`/request-repo` command; grant caveats) is tracked in **beads** — no more ADRs.
+
 ## The model in one line
 
 A **room** is a credential-free container; its authority is exactly the **doors**

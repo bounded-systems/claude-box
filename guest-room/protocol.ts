@@ -319,6 +319,22 @@ function connectTarget(endpoint: string): { unix: string } | { hostname: string;
 }
 
 /**
+ * A door RPC failure, carrying the machine-readable `code` the daemon
+ * returned (e.g. `INVALID_PARAMS`, `NOT_FOUND`) — or a transport-level code
+ * (`PARSE_ERROR`, `CONNECTION_ERROR`, `CONNECTION_CLOSED`) when the daemon
+ * never got to answer. Per-door clients pattern-match on `.code`; plain
+ * `Error` has no such field, so `call()` throws this instead.
+ */
+export class DoorCallError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "DoorCallError";
+  }
+}
+
+/**
  * Send a request to a door daemon and wait for the response. The endpoint is a
  * unix socket path or a `host:port` TCP target (see {@link connectTarget}).
  *
@@ -350,21 +366,23 @@ export async function call<T = unknown>(
 
   return new Promise((resolve, reject) => {
     let buffer = "";
+    let settled = false;
     const handlers: ConnectHandlers = {
       data(socket, chunk) {
         buffer += Buffer.from(chunk).toString("utf-8");
         const idx = buffer.indexOf("\n");
-        if (idx !== -1) {
+        if (idx !== -1 && !settled) {
+          settled = true;
           const line = buffer.slice(0, idx);
           try {
             const resp = JSON.parse(line) as ResponseEnvelope;
             if (resp.ok) {
               resolve(resp.result as T);
             } else {
-              reject(new Error(resp.error?.message ?? "unknown error"));
+              reject(new DoorCallError(resp.error?.code ?? "UNKNOWN", resp.error?.message ?? "unknown error"));
             }
-          } catch (e) {
-            reject(e);
+          } catch {
+            reject(new DoorCallError("PARSE_ERROR", "invalid response from door"));
           }
           socket.end();
         }
@@ -373,9 +391,17 @@ export async function call<T = unknown>(
         socket.write(JSON.stringify(req) + "\n");
       },
       error(_socket, error) {
-        reject(error);
+        if (!settled) {
+          settled = true;
+          reject(new DoorCallError("CONNECTION_ERROR", `failed to connect: ${error}`));
+        }
       },
-      close() {},
+      close() {
+        if (!settled) {
+          settled = true;
+          reject(new DoorCallError("CONNECTION_CLOSED", "connection closed before response"));
+        }
+      },
     };
     // Branch on the transport so each Bun.connect call matches a concrete
     // overload (unix vs tcp); spreading the union would defeat overload selection.
@@ -384,6 +410,11 @@ export async function call<T = unknown>(
       "unix" in target
         ? Bun.connect({ unix: target.unix, socket: handlers })
         : Bun.connect({ hostname: target.hostname, port: target.port, socket: handlers });
-    conn.catch(reject);
+    conn.catch((e) => {
+      if (!settled) {
+        settled = true;
+        reject(new DoorCallError("CONNECTION_ERROR", `failed to connect: ${e}`));
+      }
+    });
   });
 }

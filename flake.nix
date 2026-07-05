@@ -25,7 +25,7 @@
   # truth; ./guest-room/ is a generated mirror of mod/protocol/daemon at this
   # pin, kept honest by the `guest-room-mirror` check below. Bump with
   # `nix flake update guest-room` + `nix run .#sync-guest-room`, commit together.
-  inputs.guest-room.url = "github:bounded-systems/guest-room/66ee3c1da1e0aa1f3ec82ceb557038ceef427f1f";
+  inputs.guest-room.url = "github:bounded-systems/guest-room/e8cbeaa664ebe5a2ec90ad6ebf9f9c4cbe25895c";
   inputs.guest-room.flake = false;
 
   # The capability-provenance contract, extracted to its own public repo and
@@ -40,7 +40,7 @@
   # door-kit's lib/, kept honest by the `door-kit-mirror` check below. Bump with
   # `nix flake update door-kit` + `nix run .#sync-door-kit`. (door-kit itself pins
   # the SAME guest-room rev as this flake — keep them in lockstep.)
-  inputs.door-kit.url = "github:bounded-systems/door-kit/b0e1a39084f11e03889117ce92462b335a1d16d7";
+  inputs.door-kit.url = "github:bounded-systems/door-kit/40f27edae0a89337cd61db364fb0bb00f8ce014a";
   inputs.door-kit.flake = false;
 
   # door-keeper — the keeperd git-signing door, extracted to its own public repo.

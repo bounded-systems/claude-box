@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bounded-systems/claude-box/contract/Capabilities/v0.1",
+  "title": "Capabilities contract (v0.1)",
+  "description": "Declarative source of truth for the door/room/store capability surface. Validated against both the TS and Rust implementations. See contract/INVARIANTS.md for I1-I5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "doors", "autoDoors", "rooms", "stores"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": "0.1" },
+    "description": { "type": "string" },
+    "doors": {
+      "description": "The full door catalog. `mountable` doors can be forwarded into a box as a room door (keeper/net/scout/auth/beads); non-mountable doors are control-plane doors (launcher/dispatch) that a dispatchable room may never hold (I2).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "socket", "env", "mountable", "bootRequired"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "socket": { "type": "string", "pattern": "^[a-z0-9-]+\\.sock$" },
+          "env": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+          "mountable": { "type": "boolean" },
+          "bootRequired": {
+            "description": "Part of the always-on core fleet asserted before launcherd-rs will serve. Only meaningful for mountable doors (I4).",
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "autoDoors": {
+      "description": "Doors every dispatched box additionally receives, on top of its room's doors (I3). Must be mountable.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rooms": {
+      "description": "The room table. `dispatchable` rooms are the launcherd dispatch allow-list; they may hold only mountable doors and never open ambient egress (I2).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "doors", "dispatchable"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "doors": { "type": "array", "items": { "type": "string" } },
+          "dispatchable": { "type": "boolean" },
+          "netOpen": {
+            "description": "UNSAFE ambient egress escape. A dispatchable room may never set this (I2).",
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "stores": {
+      "description": "Persistent volumes and their single writer (I5). Exactly one writer per volume.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["volume", "writer"],
+        "properties": {
+          "volume": { "type": "string" },
+          "writer": { "type": "string" },
+          "readers": { "type": "array", "items": { "type": "string" } },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}

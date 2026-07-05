@@ -44,6 +44,20 @@ Each level in the chain has its own buildType:
 - **[`types.ts`](./types.ts)** — internal OCAP types (used before conversion)
 - **[`capability-provenance.v0.1.schema.json`](./capability-provenance.v0.1.schema.json)** — legacy schema
 
+## Capabilities contract (the door/room/store surface)
+
+Separate from the provenance chain above: a declarative source of truth for the
+**live** capability surface — the door catalog, the room table, and the storage
+single-writer map — that both the TypeScript (`knownDoors`/`ROOMS`) and Rust
+(`launcherd-rs` `doors.rs`/`rooms.rs`) implementations are validated against, so
+the two can't drift.
+
+- **[`capabilities.contract.json`](./capabilities.contract.json)** — the source of truth
+- **[`capabilities.v0.1.schema.json`](./capabilities.v0.1.schema.json)** — its JSON Schema
+- **[`INVARIANTS.md`](./INVARIANTS.md)** — invariants I1–I5 as predicates (Lean-ready)
+- Validators: [`tests/contract.test.ts`](../tests/contract.test.ts) (TS) + the
+  `*_match_the_capability_contract` parity tests in `launcherd-rs` (Rust)
+
 ## References
 
 - [SLSA Specification v1.0](https://slsa.dev/spec/v1.0/)

@@ -120,4 +120,42 @@ mod tests {
         assert!(resolve_all("/d", &["net", "auth"]).is_ok());
         assert!(resolve_all("/d", &["net", "nope"]).is_err());
     }
+
+    /// Parity with the declarative capability contract (contract/INVARIANTS.md).
+    /// The contract's *mountable* doors must equal this `DOORS` table exactly
+    /// (name, socket, env, bootRequired); its non-mountable control doors
+    /// (launcher/dispatch) must NOT appear here. Drift → this test goes red.
+    #[test]
+    fn doors_match_the_capability_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../contract/capabilities.contract.json"))
+                .expect("contract JSON parses");
+        let doors = contract["doors"].as_array().expect("doors[] present");
+
+        // Every mountable contract door ↔ a DOORS row with matching fields.
+        for d in doors {
+            let name = d["name"].as_str().unwrap();
+            let mountable = d["mountable"].as_bool().unwrap();
+            let row = DOORS.iter().find(|(n, _, _, _)| *n == name);
+            if mountable {
+                let (_, socket, env, boot) = row
+                    .unwrap_or_else(|| panic!("contract mountable door {name} missing from DOORS"));
+                assert_eq!(*socket, d["socket"].as_str().unwrap(), "{name} socket");
+                assert_eq!(*env, d["env"].as_str().unwrap(), "{name} env");
+                assert_eq!(*boot, d["bootRequired"].as_bool().unwrap(), "{name} bootRequired");
+            } else {
+                assert!(row.is_none(), "control door {name} must not be in DOORS");
+            }
+        }
+
+        // ...and no DOORS row is absent from the contract (both directions).
+        let mountable_names: Vec<&str> = doors
+            .iter()
+            .filter(|d| d["mountable"].as_bool().unwrap())
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        for (n, _, _, _) in DOORS {
+            assert!(mountable_names.contains(n), "DOORS door {n} missing from contract");
+        }
+    }
 }

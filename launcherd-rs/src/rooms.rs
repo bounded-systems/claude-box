@@ -116,4 +116,42 @@ mod tests {
         let nets = ro.door_specs().iter().filter(|d| **d == "net").count();
         assert_eq!(nets, 1);
     }
+
+    /// Parity with the declarative capability contract (contract/INVARIANTS.md).
+    /// The contract's *dispatchable* rooms must equal this `DISPATCHABLE` table
+    /// exactly (name + base doors); its non-dispatchable rooms (dev-spawn,
+    /// bootstrap) must NOT appear here. Drift → this test goes red.
+    #[test]
+    fn dispatchable_rooms_match_the_capability_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../contract/capabilities.contract.json"))
+                .expect("contract JSON parses");
+        let rooms = contract["rooms"].as_array().expect("rooms[] present");
+
+        let mut contract_dispatchable = Vec::new();
+        for r in rooms {
+            let name = r["name"].as_str().unwrap();
+            let is_dispatchable = r["dispatchable"].as_bool().unwrap();
+            let found = dispatchable(name);
+            if is_dispatchable {
+                contract_dispatchable.push(name);
+                let room = found
+                    .unwrap_or_else(|| panic!("contract dispatchable room {name} missing"));
+                let doors: Vec<&str> =
+                    r["doors"].as_array().unwrap().iter().map(|d| d.as_str().unwrap()).collect();
+                assert_eq!(room.base_doors, doors.as_slice(), "{name} base doors");
+            } else {
+                assert!(found.is_none(), "non-dispatchable room {name} must not be dispatchable");
+            }
+        }
+
+        // ...and every DISPATCHABLE room is present-and-dispatchable in the contract.
+        for r in DISPATCHABLE {
+            assert!(
+                contract_dispatchable.contains(&r.name),
+                "DISPATCHABLE room {} missing from contract",
+                r.name
+            );
+        }
+    }
 }

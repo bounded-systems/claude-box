@@ -37,6 +37,47 @@ into a box):
 beadsd/repod/ghappd; add the `planning` room + per-room `permissionMode`; the
 `/request-repo` command; grant caveats) is tracked in **beads** — no more ADRs.
 
+## 2026-07-05 — Capability contract, single-writer, interface layer
+
+The doors/rooms surface gained a **declarative, drift-proof spec** and the
+door-method **interface layer** landed its first door.
+
+**Landed (merged):**
+- `beadsd`/`dolt` as claude-box **Quadlet door units**, off the flaky prx-pod
+  (#219); the dispatchable **`planning`** room + the `beads` door in launcherd-rs,
+  with the beads door **decoupled** from the boot gate so a beadsd outage degrades
+  only planning, never all dispatch (#221).
+- The **capability contract** — `contract/capabilities.contract.json` as the one
+  topology source (doors/rooms/stores), validated against BOTH the TS
+  (`knownDoors`/`ROOMS`) and Rust (`doors.rs`/`rooms.rs`) impls; invariants I1–I6
+  in `contract/INVARIANTS.md` (#223, #226, #227).
+- **Single-writer (I5)** enforced on both owners of `prx-dolt-data`: the
+  `dolt.container` `ExecStartPre` guard + `doctor` check + deployment validator
+  (#225), and the `prx pod up` preflight (prx#989).
+- The **interface layer (I6)**: `beadsd`'s methods published as a **verbspec**
+  Registry + committed **OpenRPC** doc (prx#990), referenced from the contract
+  and enforced (`beads@0.1.0`, #227). Topology (which doors) and interface (what
+  you say to them) are separate levels that compose by reference — see
+  `CONCIERGE.md §10`.
+- Decision recorded: **pod stays, `kube play` retires to Quadlet**
+  (`ADR-POD-ORCHESTRATION.md`).
+
+**Next phase — door interface layer, phase 2** (→ a beads epic once beadsd is
+reachable; recorded here so it isn't lost):
+- **Coverage** — give `keeper`/`net`/`scout`/`auth` verbspec interfaces the way
+  `beadsd` got one (registry + OpenRPC + drift guards); each adds its `interface`
+  ref, and I6 tightens from "beads wired" to *every mountable door*.
+- **Resolution** — make I6 assert the `interface` ref resolves to the *real*
+  published OpenRPC doc (name + version), not just presence + shape. Needs the
+  cross-repo artifact decision: **vendor** the OpenRPC docs into claude-box vs
+  **publish** verbspec interfaces as a package claude-box depends on.
+- **Transport swap** — move `beadsd` off its bespoke `{kind}` envelope onto
+  verbspec's `dispatchNdjson` (JSON-RPC 2.0), so the daemon transport is one more
+  projection of the same spec. Breaking; coordinated with the host client. (prx.)
+- **Pod convergence** — execute the ADR: migrate prx's per-repo pod off
+  `kube play` onto Quadlet units, collapsing the two-runtime split and merging the
+  duplicated single-writer guard into one. (prx-asr.)
+
 ## The model in one line
 
 A **room** is a credential-free container; its authority is exactly the **doors**

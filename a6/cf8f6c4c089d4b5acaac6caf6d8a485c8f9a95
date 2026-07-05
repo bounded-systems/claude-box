@@ -1,0 +1,19 @@
+flake.lock
+  s_247a50e4d32eae::t_b353a6b3e3e2e5 21-24,26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "a6cf8f6c4c089d4b5acaac6caf6d8a485c8f9a95",
+  "prompts": {},
+  "sessions": {
+    "s_247a50e4d32eae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8dc305b-bdb8-484d-9a77-d8972a757dd8",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

@@ -23,7 +23,7 @@ describe("lib/spawn types", () => {
       repoRw: false,
       doors: ["keeper", "net"],
       netOpen: false,
-      guestArgs: ["--resume"],
+      claudeArgs: ["--resume"],
       depth: 1,
     };
 
@@ -36,6 +36,7 @@ describe("lib/spawn types", () => {
       launchId: "box-123",
       pid: 12345,
       manifest: {
+        account: "personal",
         repo: "/work",
         doors: ["keeper"],
         denied: ["beads"],
@@ -53,6 +54,7 @@ describe("lib/spawn types", () => {
       launchId: "box-456",
       pid: 67890,
       manifest: {
+        account: "personal",
         doors: [],
         denied: [],
         netOpen: false,
@@ -100,6 +102,7 @@ describe("lib/spawn types", () => {
   test("BoxInfo has expected shape", () => {
     const box: BoxInfo = {
       launchId: "box-test",
+      account: "personal",
       pid: 1234,
       startedAt: "2024-01-01T00:00:00Z",
       doors: ["keeper"],

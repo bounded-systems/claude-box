@@ -2438,6 +2438,21 @@ async function runningBoxes(): Promise<RunningBox[]> {
   });
 }
 
+/** Containers (other than our own `dolt`) currently holding the prx-dolt-data
+ *  volume — a violation of the single-writer invariant (capability contract I5).
+ *  A second dolt sql-server can't corrupt the store (dolt's own working-set lock
+ *  stops it), but it wedges it; beads writers must go through beadsd, never open
+ *  their own server. Empty in the healthy single-writer case. */
+async function competingDoltWriters(): Promise<string[]> {
+  const proc = Bun.spawn(
+    ["podman", "ps", "--format", "{{.Names}}", "--filter", "volume=prx-dolt-data"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const out = (await new Response(proc.stdout).text()).trim();
+  if ((await proc.exited) !== 0 || !out) return [];
+  return out.split("\n").map((s) => s.trim()).filter((n) => n && n !== "dolt");
+}
+
 async function cmdDoctor(): Promise<number> {
   const cur = await currentImageId();
   if (!cur) {
@@ -2448,6 +2463,19 @@ async function cmdDoctor(): Promise<number> {
     return 1;
   }
 
+  // Single-writer check (contract I5): flag any competing holder of the beads
+  // store, independent of box/image state.
+  const doltIntruders = await competingDoltWriters();
+  const doltBad = doltIntruders.length > 0;
+  if (doltBad) {
+    console.error(
+      `⚠ single-writer violation (I5): prx-dolt-data is held by ${doltIntruders.join(", ")} ` +
+        `besides the 'dolt' door backend.\n` +
+        `  The beads store must have exactly ONE writer; other actors reach beads through\n` +
+        `  beadsd. Stop the competing writer:  podman stop ${doltIntruders.join(" ")}\n`,
+    );
+  }
+
   const boxes = await runningBoxes();
   const stale = findStaleBoxes(boxes, cur);
 
@@ -2456,7 +2484,7 @@ async function cmdDoctor(): Promise<number> {
 
   if (boxes.length === 0) {
     console.log("no running boxes — nothing to check.");
-    return 0;
+    return doltBad ? 1 : 0;
   }
 
   for (const b of boxes) {
@@ -2469,7 +2497,7 @@ async function cmdDoctor(): Promise<number> {
 
   if (stale.length === 0) {
     console.log("\nall boxes are on the current image. ✓");
-    return 0;
+    return doltBad ? 1 : 0;
   }
 
   // Detection only — never auto-kill. A box may hold a live session or unsaved

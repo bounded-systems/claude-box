@@ -350,9 +350,9 @@ export async function fetchIssue(options: IssueOptions): Promise<IssueResult> {
  * Fetch items from a GitHub Projects v2 board (e.g. Front Desk,
  * bounded-systems project #2). Read-only — the box can SEE the board but
  * cannot set Status/Score/etc. through this door (that stays a host-side,
- * App-token write — see GHAPPD.md). The board's own ranked-view sort isn't
- * queryable through this API, so sort `items` client-side (e.g. by
- * `fields.Score`) once fetched.
+ * App-token write via a lease-token door, e.g. prx's forge-d). The board's
+ * own ranked-view sort isn't queryable through this API, so sort `items`
+ * client-side (e.g. by `fields.Score`) once fetched.
  *
  * Requires the `--scout` door.
  */

@@ -102,3 +102,11 @@ export async function list(): Promise<CapabilityRow[]> {
   const { capabilities } = await call<{ capabilities: CapabilityRow[] }>(conciergeSocket(), "list");
   return capabilities;
 }
+
+/** Concierge daemon health/introspection. */
+export type ConciergeStatus = { version: string; uptime: number; providers: number };
+
+/** Query the concierge daemon's status (version/uptime/providers served). */
+export async function status(): Promise<ConciergeStatus> {
+  return call<ConciergeStatus>(conciergeSocket(), "status");
+}

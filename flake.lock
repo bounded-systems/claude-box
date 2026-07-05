@@ -33,17 +33,17 @@
     "door-kit": {
       "flake": false,
       "locked": {
-        "lastModified": 1782611947,
-        "narHash": "sha256-EFuIAWuMxTuG3G9q5JIy4QSA01BcCYw/waNCFWJ2OFI=",
+        "lastModified": 1783223765,
+        "narHash": "sha256-oh5fm3x9EsYO2Horo/r6oNNtpcwFO2O8MqKwfLPjMbc=",
         "owner": "bounded-systems",
         "repo": "door-kit",
-        "rev": "3499484e3d1d4f390030d3f5dd355b9071843d78",
+        "rev": "22ee030841dd6b4ea334a7963297d962161f3359",
         "type": "github"
       },
       "original": {
         "owner": "bounded-systems",
         "repo": "door-kit",
-        "rev": "3499484e3d1d4f390030d3f5dd355b9071843d78",
+        "rev": "22ee030841dd6b4ea334a7963297d962161f3359",
         "type": "github"
       }
     },
@@ -80,12 +80,12 @@
     "door-scout": {
       "flake": false,
       "locked": {
-        "lastModified": 1782611195,
-        "narHash": "sha256-feL1C8tzMMQ5hPdymuxz9EGDdCPUlAShuxEX88rNA5w=",
-        "rev": "fd6fc1c4723bc4902062ba0946c62b6daffaa673",
-        "revCount": 13,
+        "lastModified": 1783224065,
+        "narHash": "sha256-MUBXX8AwfTGvIek55MaS/qtc0BOASWXffSDSg/RWfKg=",
+        "rev": "4592f4f16780dead7792472c4f9dfb2516043c71",
+        "revCount": 17,
         "type": "tarball",
-        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-scout/0.1.13%2Brev-fd6fc1c4723bc4902062ba0946c62b6daffaa673/019f0be8-d0a8-7713-b594-7cd975ef4814/source.tar.gz"
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-scout/0.1.17%2Brev-4592f4f16780dead7792472c4f9dfb2516043c71/019f3070-771f-7753-83fe-b3166b56e4a3/source.tar.gz"
       },
       "original": {
         "type": "tarball",

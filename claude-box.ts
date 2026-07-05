@@ -35,6 +35,7 @@ import {
   grantedDoorLines,
   deniedDoorSection,
   transportString,
+  transportToEndpoint,
   unix,
   tcp,
   attenuate,
@@ -267,7 +268,10 @@ function planDoorMounts(doors: DoorGrant[], tcpMode: boolean): string[] {
   const argv: string[] = [];
   for (const d of doors) {
     if (tcpMode) {
-      argv.push("--env", `${d.env}=${transportString(d.guest)}`);
+      // transportToEndpoint (bare "host:port"), NOT transportString ("tcp:host:port"
+      // — meant for logs): the env var's value is what door-kit's call()/connectTarget
+      // parses client-side, and the "tcp:" prefix doesn't match its host:port regex.
+      argv.push("--env", `${d.env}=${transportToEndpoint(d.guest)}`);
     } else {
       const guestPath = unixPath(d.guest);
       argv.push("-v", `${unixPath(d.host)}:${guestPath}`);

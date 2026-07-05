@@ -61,3 +61,15 @@ test("TCP mode: no socket mounts (door rides the host gateway), env only", () =>
   expect(argv).not.toContain("-v"); // nothing bind-mounted
   expect(argv.some((a) => a.startsWith("SCOUTD_SOCK="))).toBe(true);
 });
+
+test("TCP mode: the env value is a bare host:port, NOT tcp:host:port", () => {
+  // door-kit's call()/connectTarget parses a bare "host:port" (or a "unix://"-
+  // /leading-"/" path); a "tcp:" prefix doesn't match its host:port regex and
+  // gets misread as part of the hostname — this is the exact "scout dead in
+  // TCP mode" bug (DOORS.md), so the value shape itself must be pinned down.
+  const argv = planDoorMounts(grants(["scout"], TCP_ENV), true);
+  const envIdx = argv.indexOf("--env");
+  const value = argv[envIdx + 1];
+  expect(value).toMatch(/^SCOUTD_SOCK=[^:/\s]+:\d+$/);
+  expect(value).not.toContain("tcp:");
+});

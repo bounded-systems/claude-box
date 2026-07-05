@@ -2,10 +2,10 @@
 //!
 //! `dispatch` accepts only a room *name* off this list (plus a label); it can
 //! never name a door, repo, or escape flag (see `protocol::DispatchParams`).
-//! Mirrors `launcherd.ts`'s `ROOMS`: exactly `dev`, `readonly`, and `offline`
-//! are dispatchable. `dev-spawn` (holds `launcher`) and `bootstrap` (full
-//! egress) are deliberately absent, so a dispatched box structurally cannot
-//! itself dispatch or spawn further.
+//! Mirrors `launcherd.ts`'s `ROOMS`: exactly `dev`, `readonly`, `offline`, and
+//! `planning` are dispatchable. `dev-spawn` (holds `launcher`) and `bootstrap`
+//! (full egress) are deliberately absent, so a dispatched box structurally
+//! cannot itself dispatch or spawn further.
 
 /// A dispatchable room: its base door set. Every dispatched box additionally
 /// gets `net` + `auth` (it runs its own RC server and leases its own
@@ -29,6 +29,13 @@ pub const DISPATCHABLE: &[Room] = &[
     Room {
         name: "offline",
         base_doors: &[],
+    },
+    // Plan a ticket into a beads epic — reads the work unit (scout/beads), writes
+    // the plan (beads). No `keeper`: planning writes no code. See
+    // ADR-DISPATCH-PLANNING-FROM-TICKET.
+    Room {
+        name: "planning",
+        base_doors: &["scout", "beads"],
     },
 ];
 
@@ -68,10 +75,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dev_readonly_offline_are_dispatchable() {
+    fn dev_readonly_offline_planning_are_dispatchable() {
         assert!(dispatchable("dev").is_some());
         assert!(dispatchable("readonly").is_some());
         assert!(dispatchable("offline").is_some());
+        assert!(dispatchable("planning").is_some());
     }
 
     #[test]
@@ -90,6 +98,15 @@ mod tests {
         assert_eq!(ro.door_specs(), vec!["net", "scout", "auth"]);
         let off = dispatchable("offline").unwrap();
         assert_eq!(off.door_specs(), vec!["net", "auth"]);
+    }
+
+    #[test]
+    fn planning_gets_scout_beads_plus_net_auth_but_no_keeper() {
+        let plan = dispatchable("planning").unwrap();
+        // scout + beads (read the ticket, write the plan), then net + auth.
+        assert_eq!(plan.door_specs(), vec!["scout", "beads", "net", "auth"]);
+        // planning writes no code — it must never carry the keeper (write) door.
+        assert!(!plan.door_specs().contains(&"keeper"));
     }
 
     #[test]

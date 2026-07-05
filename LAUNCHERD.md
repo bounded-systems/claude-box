@@ -176,7 +176,7 @@ the delegation edge in the capability-provenance chain
 - Socket server (NDJSON over unix socket or TCP for VM relay)
 - Methods: `status`, `list`, `kill`, `attach`, `launch`, `rooms`
 - Daemon-internal room presets: `dev`, `dev-spawn`, `readonly`, `offline`,
-  `bootstrap`
+  `planning`, `bootstrap`
 - Door prerequisite checking (fail-fast if keeperd/netd not reachable)
 - L2 launch attestation (Ed25519 signing, `CapabilityProvenance/v0.1` statements)
 - Key management (auto-generate at `~/.claude-box/launcherd.key`)

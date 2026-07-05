@@ -8,19 +8,29 @@
 
 use crate::path::{DoorSocket, HostPath, InBoxPath};
 
-/// (door name, daemon socket filename, in-box env var). Mirrors the door
-/// presets in `claude-box.ts`.
-const DOORS: &[(&str, &str, &str)] = &[
-    ("keeper", "keeperd.sock", "KEEPERD_SOCK"),
-    ("net", "netd.sock", "NETD_SOCK"),
-    ("scout", "scoutd.sock", "SCOUTD_SOCK"),
-    ("auth", "authd.sock", "AUTHD_SOCK"),
+/// (door name, daemon socket filename, in-box env var, boot_required). Mirrors
+/// the door presets in `claude-box.ts`.
+///
+/// `boot_required` marks a door as part of the always-on **core** fleet that
+/// [`boot_required`] asserts present before launcherd-rs will serve. A non-core
+/// door (e.g. `beads`, used only by the `planning` room) is still fully
+/// resolvable for dispatch — but launcher startup does NOT hinge on it, so a
+/// beadsd outage fails only `planning` (cleanly, at dispatch time, via
+/// [`resolve_all`] + the reachability check in `dispatch`), never the whole
+/// dispatch lane. Capability-scoped degradation, not all-or-nothing.
+const DOORS: &[(&str, &str, &str, bool)] = &[
+    ("keeper", "keeperd.sock", "KEEPERD_SOCK", true),
+    ("net", "netd.sock", "NETD_SOCK", true),
+    ("scout", "scoutd.sock", "SCOUTD_SOCK", true),
+    ("auth", "authd.sock", "AUTHD_SOCK", true),
+    ("beads", "beadsd.sock", "BEADSD_SOCK", false),
 ];
 
 /// Resolve one door name against a host doors directory. `None` if the name
-/// isn't a known door.
+/// isn't a known door. Searches the *full* table (core and non-core alike) —
+/// resolvability is independent of whether a door gates boot.
 pub fn resolve(dir: &str, name: &str) -> Option<DoorSocket> {
-    DOORS.iter().find(|(n, _, _)| *n == name).map(|(n, file, env)| DoorSocket {
+    DOORS.iter().find(|(n, _, _, _)| *n == name).map(|(n, file, env, _)| DoorSocket {
         name: (*n).to_string(),
         host: HostPath::new(format!("{dir}/{file}")),
         in_box: InBoxPath::new(format!("/run/doors/{file}")),
@@ -46,9 +56,20 @@ pub fn resolve_all(dir: &str, names: &[&str]) -> Result<Vec<DoorSocket>, String>
     }
 }
 
-/// The full door table (every known door) for the boot assertion.
+/// Every known door — for enumeration/introspection, NOT the boot gate.
 pub fn all(dir: &str) -> Vec<DoorSocket> {
-    DOORS.iter().filter_map(|(n, _, _)| resolve(dir, n)).collect()
+    DOORS.iter().filter_map(|(n, _, _, _)| resolve(dir, n)).collect()
+}
+
+/// The core doors whose host paths the boot assertion requires present before
+/// launcherd-rs will serve. Excludes non-core doors (e.g. `beads`) so that a
+/// single room's optional daemon can't block the whole dispatch lane at boot.
+pub fn boot_required(dir: &str) -> Vec<DoorSocket> {
+    DOORS
+        .iter()
+        .filter(|(_, _, _, req)| *req)
+        .filter_map(|(n, _, _, _)| resolve(dir, n))
+        .collect()
 }
 
 #[cfg(test)]
@@ -61,6 +82,31 @@ mod tests {
         assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/keeperd.sock");
         assert_eq!(d.in_box.to_string(), "/run/doors/keeperd.sock");
         assert_eq!(d.env, "KEEPERD_SOCK");
+    }
+
+    #[test]
+    fn resolves_beads_door() {
+        // The beads door (beadsd) — required by the `planning` room. Its socket
+        // must resolve or dispatch of `planning` fails with "unknown door(s): beads".
+        let d = resolve("/var/home/core/.claude-box/run", "beads").unwrap();
+        assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/beadsd.sock");
+        assert_eq!(d.in_box.to_string(), "/run/doors/beadsd.sock");
+        assert_eq!(d.env, "BEADSD_SOCK");
+    }
+
+    #[test]
+    fn beads_is_resolvable_but_not_boot_required() {
+        // The decoupling invariant: beads resolves for dispatch (so `planning`
+        // works), but is NOT in the boot gate — a beadsd outage must not stop
+        // launcherd-rs from serving dev/readonly/offline dispatch.
+        assert!(resolve("/d", "beads").is_some());
+        let boot: Vec<String> = boot_required("/d").iter().map(|d| d.name.clone()).collect();
+        assert!(!boot.contains(&"beads".to_string()), "beads must not gate boot");
+        // The core fleet is exactly keeper/net/scout/auth.
+        assert_eq!(boot, vec!["keeper", "net", "scout", "auth"]);
+        // ...while `all` still enumerates beads alongside the core doors.
+        let every: Vec<String> = all("/d").iter().map(|d| d.name.clone()).collect();
+        assert!(every.contains(&"beads".to_string()));
     }
 
     #[test]

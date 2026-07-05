@@ -32,9 +32,11 @@ fn dispatch_sock(doors_dir: &str) -> String {
     std::env::var("DISPATCH_SOCK").unwrap_or_else(|_| format!("{doors_dir}/dispatch.sock"))
 }
 
-/// The ADR boot assertion: every door host path must be stat-able now.
+/// The ADR boot assertion: every *core* door host path must be stat-able now.
+/// Non-core doors (e.g. `beads`) are checked per-dispatch instead (see
+/// `dispatch`), so a single room's optional daemon can't block the lane at boot.
 fn assert_doors_present(dir: &str) -> Result<(), String> {
-    let table = doors::all(dir);
+    let table = doors::boot_required(dir);
     let missing: Vec<String> = table
         .iter()
         .filter(|d| !d.host.exists())

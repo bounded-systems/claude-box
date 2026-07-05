@@ -548,6 +548,11 @@ const ROOMS: Record<string, Room> = {
     description: "air-gapped: no network, no external access",
     dispatchable: true,
   },
+  planning: {
+    doors: ["scout", "beads"],
+    description: "plan a ticket into a beads epic: read the work unit (scout/beads), write the plan (beads) — no code writes (no keeper)",
+    dispatchable: true,
+  },
   bootstrap: {
     doors: [],
     netOpen: true,

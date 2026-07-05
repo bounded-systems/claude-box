@@ -16,9 +16,7 @@
  *   console.log(`Spawned ${result.launchId} (pid ${result.pid})`);
  */
 
-// Bun.connect via the global (no `import … from "bun"`) so the package resolves
-// on JSR/Deno publish — the same way the guest-room protocol uses Bun globals.
-const connect = Bun.connect;
+import { call, DoorCallError } from "../guest-room/protocol.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,8 +102,10 @@ export class LauncherdError extends Error {
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
-/** Get the launcherd socket path from environment or default. */
-function getSocketPath(): string {
+/** Get launcherd's connection endpoint — a unix path or a `host:port` TCP
+ *  target (either shape parses through call()'s connectTarget). LAUNCHERD_SOCK
+ *  may hold either, depending on transport mode. */
+function launcherdEndpoint(): string {
   // In-box: the socket is mounted at /run/launcherd.sock
   const envPath = process.env.LAUNCHERD_SOCK;
   if (envPath) return envPath;
@@ -129,77 +129,14 @@ export function getCurrentDepth(): number {
   }
 }
 
-type RequestEnvelope = {
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-};
-
-type ResponseEnvelope = {
-  id: string;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-};
-
 /** Send a request to launcherd and wait for response. */
 async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const socketPath = getSocketPath();
-  const id = crypto.randomUUID();
-
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    let resolved = false;
-
-    connect({
-      unix: socketPath,
-      socket: {
-        open(sock) {
-          const req: RequestEnvelope = { id, method, params };
-          sock.write(JSON.stringify(req) + "\n");
-        },
-        data(sock, data) {
-          buffer += data.toString();
-          const newline = buffer.indexOf("\n");
-          if (newline >= 0 && !resolved) {
-            resolved = true;
-            const line = buffer.slice(0, newline);
-            sock.end();
-            try {
-              const resp = JSON.parse(line) as ResponseEnvelope;
-              if (resp.ok) {
-                resolve(resp.result as T);
-              } else {
-                reject(new LauncherdError(
-                  resp.error?.code ?? "UNKNOWN",
-                  resp.error?.message ?? "launcherd error"
-                ));
-              }
-            } catch (e) {
-              reject(new LauncherdError("PARSE_ERROR", "invalid response from launcherd"));
-            }
-          }
-        },
-        error(_sock, err) {
-          if (!resolved) {
-            resolved = true;
-            reject(new LauncherdError("CONNECTION_ERROR", `failed to connect to launcherd: ${err}`));
-          }
-        },
-        close() {
-          if (!resolved) {
-            resolved = true;
-            reject(new LauncherdError("CONNECTION_CLOSED", "connection closed before response"));
-          }
-        },
-      },
-    }).catch((err) => {
-      if (!resolved) {
-        resolved = true;
-        reject(new LauncherdError("CONNECTION_ERROR", `failed to connect to launcherd: ${err}`));
-      }
-    });
-  });
+  try {
+    return await call<T>(launcherdEndpoint(), method, params);
+  } catch (e) {
+    if (e instanceof DoorCallError) throw new LauncherdError(e.code, e.message);
+    throw e;
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

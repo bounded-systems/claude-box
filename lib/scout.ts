@@ -18,12 +18,8 @@
  *   console.log(content.body);
  */
 
-// Bun.connect via the global (no `import … from "bun"`) so the package resolves
-// on JSR/Deno publish — the same way the guest-room protocol uses Bun globals.
-const connect = Bun.connect;
-
 import { heldGrant } from "./concierge.ts";
-import type { SignedGrant } from "../guest-room/mod.ts";
+import { call, DoorCallError } from "../guest-room/protocol.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -196,113 +192,36 @@ export class ScoutError extends Error {
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
-type ScoutTarget =
-  | { type: "unix"; path: string }
-  | { type: "tcp"; host: string; port: number };
-
-/** Get scoutd connection target from environment or default. */
-function getTarget(): ScoutTarget {
-  // TCP mode: SCOUTD_HOST=host:port
+/** Get scoutd's connection endpoint — a unix path or a `host:port` TCP
+ *  target (either shape parses through call()'s connectTarget). */
+function scoutEndpoint(): string {
+  // Back-compat: SCOUTD_HOST=host:port is still honored if set explicitly.
+  // claude-box itself only ever sets SCOUTD_SOCK, whose value may be a unix
+  // path OR a host:port TCP endpoint (TCP mode).
   const tcpHost = process.env.SCOUTD_HOST;
-  if (tcpHost) {
-    const [host, portStr] = tcpHost.split(":");
-    return { type: "tcp", host: host || "127.0.0.1", port: Number(portStr) || 3129 };
-  }
+  if (tcpHost) return tcpHost;
 
-  // Unix socket mode: SCOUTD_SOCK=/path/to/socket
   const sockPath = process.env.SCOUTD_SOCK;
-  if (sockPath) return { type: "unix", path: sockPath };
+  if (sockPath) return sockPath;
 
   // In-box default: socket at /run/scoutd.sock
-  if (Bun.file("/run/scoutd.sock").size !== undefined) {
-    return { type: "unix", path: "/run/scoutd.sock" };
-  }
+  if (Bun.file("/run/scoutd.sock").size !== undefined) return "/run/scoutd.sock";
 
   // Fallback for testing outside a box
   const runtime = process.env.XDG_RUNTIME_DIR;
-  if (runtime) return { type: "unix", path: `${runtime}/scoutd.sock` };
+  if (runtime) return `${runtime}/scoutd.sock`;
   const home = process.env.HOME ?? "/tmp";
-  return { type: "unix", path: `${home}/.claude-box/scoutd.sock` };
+  return `${home}/.claude-box/scoutd.sock`;
 }
-
-type RequestEnvelope = {
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-  /** The signed grant this box holds for "scout", presented so a tcp/vsock
-   *  serving room can verify it (no-op on a unix door). */
-  grant?: SignedGrant;
-};
-
-type ResponseEnvelope = {
-  id: string;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-};
 
 /** Send a request to scoutd and wait for response. */
 async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const target = getTarget();
-  const id = crypto.randomUUID();
-
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    let resolved = false;
-
-    const socketHandler = {
-      open(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never) {
-        const grant = heldGrant("scout"); // present it iff resolved (tcp/vsock gate)
-        const req: RequestEnvelope = { id, method, params, ...(grant ? { grant } : {}) };
-        sock.write(JSON.stringify(req) + "\n");
-      },
-      data(sock: ReturnType<typeof connect> extends Promise<infer S> ? S : never, data: Buffer) {
-        buffer += data.toString();
-        const newline = buffer.indexOf("\n");
-        if (newline >= 0 && !resolved) {
-          resolved = true;
-          const line = buffer.slice(0, newline);
-          sock.end();
-          try {
-            const resp = JSON.parse(line) as ResponseEnvelope;
-            if (resp.ok) {
-              resolve(resp.result as T);
-            } else {
-              reject(new ScoutError(
-                resp.error?.code ?? "UNKNOWN",
-                resp.error?.message ?? "scoutd error"
-              ));
-            }
-          } catch (e) {
-            reject(new ScoutError("PARSE_ERROR", "invalid response from scoutd"));
-          }
-        }
-      },
-      error(_sock: unknown, err: Error) {
-        if (!resolved) {
-          resolved = true;
-          reject(new ScoutError("CONNECTION_ERROR", `failed to connect to scoutd: ${err}`));
-        }
-      },
-      close() {
-        if (!resolved) {
-          resolved = true;
-          reject(new ScoutError("CONNECTION_CLOSED", "connection closed before response"));
-        }
-      },
-    };
-
-    const connectPromise = target.type === "unix"
-      ? connect({ unix: target.path, socket: socketHandler })
-      : connect({ hostname: target.host, port: target.port, socket: socketHandler });
-
-    connectPromise.catch((err) => {
-      if (!resolved) {
-        resolved = true;
-        reject(new ScoutError("CONNECTION_ERROR", `failed to connect to scoutd: ${err}`));
-      }
-    });
-  });
+  try {
+    return await call<T>(scoutEndpoint(), method, params, { grant: heldGrant("scout") });
+  } catch (e) {
+    if (e instanceof DoorCallError) throw new ScoutError(e.code, e.message);
+    throw e;
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

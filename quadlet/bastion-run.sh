@@ -18,7 +18,7 @@ exec sh -c "printf 'y\n' | podman run -i --rm --name claude-box-remote-serve \
   -e AUTHD_SOCK=/run/doors/authd.sock -e DISPATCH_SOCK=/run/doors/dispatch.sock \
   --env-file $RT/claude-box-rc-grant.env \
   -v /var/home/core/.claude-box/run:/run/doors \
-  --tmpfs /home/claude/.config/claude:rw,mode=1777 \
+  -v claude-dispatch-config:/home/claude/.config/claude:U \
   -v $RT/claude-box-rc-boot.sh:/rc-boot.sh:ro \
   --entrypoint sh localhost/claude-personal:dev \
   /rc-boot.sh remote-control --name dispatch --remote-control-session-name-prefix claude-box --spawn session"

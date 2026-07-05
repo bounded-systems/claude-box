@@ -15,6 +15,7 @@ ExecStartPre=/bin/sh -c 'podman run --rm -v claude-box-bundle:/app:ro --entrypoi
 # got drained by the ExecStartPre pipes).
 ExecStart=/var/home/core/.claude-box/bin/bastion-run.sh
 ExecStopPost=-/usr/bin/podman rm -f claude-box-remote-serve
+ExecStopPost=-/usr/bin/podman run --rm -v claude-dispatch-config:/cfg docker.io/library/busybox rm -f /cfg/.credentials.json
 Restart=always
 RestartSec=10
 

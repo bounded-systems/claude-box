@@ -49,8 +49,23 @@ if [ "$skip_build" = "0" ]; then
     rm -f "$REPO_ROOT/result-$pkg"
   done
 
-  say "2/6  Build the claude-box CLI bundle (for remote-serve's boot script)"
+  say "2/6  Build the claude-box CLI bundle (for the RC boot script)"
   ( cd "$REPO_ROOT" && nix build .#claude-box-bundle -o "$(basename "$BUNDLE_RESULT")" )
+
+  say "2b  Build + deploy launcherd-rs (the Rust dispatch control plane)"
+  # Static aarch64-musl binary — runs VM-native on CoreOS (no JS runtime there).
+  ( cd "$REPO_ROOT" && nix build .#launcherd-rs -o result-launcherd-rs )
+  podman machine ssh -- "mkdir -p $VM_HOME/.claude-box/bin"
+  cat "$REPO_ROOT/result-launcherd-rs/bin/launcherd" \
+    | podman machine ssh -- "cat > $VM_HOME/.claude-box/bin/launcherd.new && chmod +x $VM_HOME/.claude-box/bin/launcherd.new && mv -f $VM_HOME/.claude-box/bin/launcherd.new $VM_HOME/.claude-box/bin/launcherd"
+  rm -f "$REPO_ROOT/result-launcherd-rs"
+  # The SNI gateway allowlist config (nginx ssl_preread) — see ADR-RC-EGRESS-SNI.
+  podman machine ssh -- "cat > $VM_HOME/.claude-box/sni-gw.conf" < "$SCRIPT_DIR/sni-gw.conf"
+  # The bastion's foreground runner (see remote-serve.service).
+  cat "$SCRIPT_DIR/bastion-run.sh" \
+    | podman machine ssh -- "cat > $VM_HOME/.claude-box/bin/bastion-run.sh && chmod +x $VM_HOME/.claude-box/bin/bastion-run.sh"
+  # Persistent config volume so the dispatcher RESUMES one stable session.
+  podman machine ssh -- 'podman volume create claude-dispatch-config >/dev/null 2>&1 || true'
 else
   say "1-2/6  Skipped (--skip-build): reusing images + bundle already present"
   if [ ! -e "$BUNDLE_RESULT/claude-box.js" ]; then
@@ -109,12 +124,22 @@ podman rm -f claude-box-bundle-seed >/dev/null
 [ "$skip_build" = "0" ] && rm -f "$BUNDLE_RESULT"
 echo "  claude-box-bundle volume refreshed from the current bundle"
 
-say "6/6  Quadlet units"
-podman machine ssh -- "mkdir -p $VM_HOME/.config/containers/systemd"
-for f in "$SCRIPT_DIR"/*.volume "$SCRIPT_DIR"/*.container; do
+say "6/6  Quadlet units (.volume / .network / .container) + plain .service units"
+podman machine ssh -- "mkdir -p $VM_HOME/.config/containers/systemd $VM_HOME/.config/systemd/user"
+# Quadlet-generated units (keeperd/netd/scoutd/authd/launcherd/sni-*).
+for f in "$SCRIPT_DIR"/*.volume "$SCRIPT_DIR"/*.network "$SCRIPT_DIR"/*.container; do
+  [ -e "$f" ] || continue
   name="$(basename "$f")"
-  echo "  $name"
+  echo "  quadlet: $name"
   podman machine ssh -- "cat > $VM_HOME/.config/containers/systemd/$name" < "$f"
+done
+# Plain systemd user services (the RC dispatcher + Rust launcher are foreground
+# processes, NOT Quadlet's detached containers — see remote-serve.service).
+for f in "$SCRIPT_DIR"/*.service; do
+  [ -e "$f" ] || continue
+  name="$(basename "$f")"
+  echo "  service: $name"
+  podman machine ssh -- "cat > $VM_HOME/.config/systemd/user/$name" < "$f"
 done
 podman machine ssh -- systemctl --user daemon-reload
 
@@ -126,15 +151,25 @@ Still-manual step (needs a real browser login — cannot be scripted):
   claude-box check-in > ~/.claude-box/authd-cred.json
   podman machine ssh -- systemctl --user restart authd
 
-Bring the fleet up:
-  podman machine ssh -- systemctl --user enable --now keeperd netd scout-netd scoutd launcherd authd remote-serve
+Bring the fleet up (doors, egress gateway, both launchers, dispatcher):
+  podman machine ssh -- systemctl --user enable --now \
+    keeperd netd scout-netd scoutd authd launcherd \
+    sni-gateway launcherd-rs remote-serve
+
+  - launcherd (bun) serves the LAUNCH lane; launcherd-rs (Rust, VM-native)
+    serves the DISPATCH lane on the real dispatch.sock and spawns RC boxes
+    onto the SNI egress (ADR-RC-EGRESS-SNI) so they register.
+  - remote-serve is the dispatcher ("dispatch" in the Claude app) — a
+    foreground .service (RC only registers interactively), on the SNI egress,
+    resuming one stable session across restarts.
 
 Status / logs:
-  podman machine ssh -- systemctl --user status keeperd netd scout-netd scoutd launcherd authd remote-serve
+  podman machine ssh -- systemctl --user status remote-serve launcherd-rs sni-gateway
   podman machine ssh -- journalctl --user -u <name> -f
 
-Known gap this script does not fix: launcherd's own launch/dispatch RPCs
-need the HOST's real podman socket to spawn sibling containers — reachable
-but permission-denied as of this writing (see launcherd.container's header
-comment). Re-run with --skip-build after only editing a .container file.
+Machine autostart on macOS login: a launchd agent starts the podman machine
+(with VM linger, the whole fleet + dispatcher then come up). See the
+com.claude-box.machine LaunchAgent / the home-manager launchd.agents entry.
+
+Re-run with --skip-build after only editing a .container/.service file.
 EOF

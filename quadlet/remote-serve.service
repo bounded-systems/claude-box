@@ -1,7 +1,7 @@
 [Unit]
 Description=remote-serve — singleton claude-box RC dispatcher bastion (foreground, SNI egress)
-Requires=claude-doors-volume.service launcherd.service sni-gateway.service
-After=claude-doors-volume.service launcherd.service sni-gateway.service
+Requires=claude-doors-volume.service launcherd-rs.service sni-gateway.service
+After=claude-doors-volume.service launcherd-rs.service sni-gateway.service
 
 [Service]
 Type=simple

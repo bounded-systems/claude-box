@@ -26,6 +26,11 @@
           "bootRequired": {
             "description": "Part of the always-on core fleet asserted before launcherd-rs will serve. Only meaningful for mountable doors (I4).",
             "type": "boolean"
+          },
+          "interface": {
+            "description": "Reference to this door's verbspec interface (the method surface / IDL), as `name@version` — e.g. `beadsd@0.1.0`, whose OpenRPC doc is published by that daemon's package. Present on doors that have been given a verbspec interface (I6). Resolution against the published doc is a cross-repo follow-up; presence + shape are enforced here.",
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*@[0-9]+\\.[0-9]+\\.[0-9]+$"
           }
         }
       }

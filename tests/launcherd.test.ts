@@ -47,6 +47,12 @@ describe("launcherd", () => {
       expect(ROOMS.bootstrap.netOpen).toBe(true);
     });
 
+    test("planning room has scout + beads but no keeper (plans, never writes code)", () => {
+      expect(ROOMS.planning.doors).toEqual(["scout", "beads"]);
+      expect(ROOMS.planning.doors).not.toContain("keeper");
+      expect(ROOMS.planning.netOpen).toBeUndefined();
+    });
+
     test("all rooms have descriptions", () => {
       for (const [name, room] of Object.entries(ROOMS)) {
         expect(room.description).toBeTruthy();
@@ -54,10 +60,11 @@ describe("launcherd", () => {
       }
     });
 
-    test("dev, readonly, offline are dispatchable; dev-spawn and bootstrap are not", () => {
+    test("dev, readonly, offline, planning are dispatchable; dev-spawn and bootstrap are not", () => {
       expect(ROOMS.dev.dispatchable).toBe(true);
       expect(ROOMS.readonly.dispatchable).toBe(true);
       expect(ROOMS.offline.dispatchable).toBe(true);
+      expect(ROOMS.planning.dispatchable).toBe(true);
       expect(ROOMS["dev-spawn"].dispatchable).toBeFalsy();
       expect(ROOMS.bootstrap.dispatchable).toBeFalsy();
     });

@@ -15,6 +15,7 @@ const DOORS: &[(&str, &str, &str)] = &[
     ("net", "netd.sock", "NETD_SOCK"),
     ("scout", "scoutd.sock", "SCOUTD_SOCK"),
     ("auth", "authd.sock", "AUTHD_SOCK"),
+    ("beads", "beadsd.sock", "BEADSD_SOCK"),
 ];
 
 /// Resolve one door name against a host doors directory. `None` if the name
@@ -61,6 +62,16 @@ mod tests {
         assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/keeperd.sock");
         assert_eq!(d.in_box.to_string(), "/run/doors/keeperd.sock");
         assert_eq!(d.env, "KEEPERD_SOCK");
+    }
+
+    #[test]
+    fn resolves_beads_door() {
+        // The beads door (beadsd) — required by the `planning` room. Its socket
+        // must resolve or dispatch of `planning` fails with "unknown door(s): beads".
+        let d = resolve("/var/home/core/.claude-box/run", "beads").unwrap();
+        assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/beadsd.sock");
+        assert_eq!(d.in_box.to_string(), "/run/doors/beadsd.sock");
+        assert_eq!(d.env, "BEADSD_SOCK");
     }
 
     #[test]

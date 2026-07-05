@@ -527,7 +527,7 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   --issue owner/repo#N or a GitHub issue URL
                       implies --scout; seeds the guest with a prompt to read
                       and work that issue (no token in the box — read via
-                      scoutd's `issue` method)
+                      scoutd's issue method)
   --launcher          forward the launcherd door (spawn sub-boxes)
   --room NAME         forward a door bundle (tool | read | dev)
   --door NAME[:CAV...][@SOCK]  attach door with optional caveats

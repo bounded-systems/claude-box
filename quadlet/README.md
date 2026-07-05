@@ -10,10 +10,22 @@ quadlet/
 ├── netd.container         # the box's egress door (claude-netd: Anthropic allowlist)
 ├── scout-netd.container   # scoutd's egress door (a netd instance: GitHub allowlist)
 ├── scoutd.container       # external reads — runs --network=none, egress via scout-netd
-├── launcherd.container    # launch + dispatch doors — image builds and runs; host-podman-socket access still unresolved, see its header comment
-├── authd.container        # Remote Control auth door — ephemeral credential, human check-in step required per restart, see its header comment
-└── remote-serve.container # the singleton RC dispatcher bastion — unvalidated against a real host, see its header comment
+├── launcherd.container    # the bun LAUNCH lane only (dispatch lane moved to launcherd-rs; see the Exec= override)
+├── authd.container        # Remote Control auth door — ephemeral credential, human check-in step required per restart
+├── sni-egress.network     # internal egress network for RC boxes (only route out is the SNI gateway) — ADR-RC-EGRESS-SNI
+├── sni-gateway.container  # transparent SNI-passthrough allowlist egress (nginx ssl_preread; no MITM)
+├── sni-gw.conf            # the SNI allowlist config, deployed to ~/.claude-box/sni-gw.conf
+│
+│  # plain systemd --user services (foreground; NOT Quadlet .container units) —
+│  # RC only registers with a foreground `podman run -i`, so these can't be detached:
+├── launcherd-rs.service   # the Rust DISPATCH control plane (VM-native static binary), on the real dispatch.sock
+├── remote-serve.service   # the singleton RC dispatcher ("dispatch" in the app) — SNI egress, resumes one session
+└── bastion-run.sh         # the dispatcher's foreground runner (called by remote-serve.service)
 ```
+
+`./install.sh` builds + deploys all of the above (including the launcherd-rs
+static binary and the SNI config) and installs both the Quadlet units and the
+plain `.service` units to the VM.
 
 ## Schema
 

@@ -43,6 +43,14 @@ After=claude-doors-volume.service
 Image=localhost/launcherd:dev
 ContainerName=launcherd
 
+# The DISPATCH lane is now served by the Rust launcherd (launcherd-rs.service,
+# ADR-RC-EGRESS-SNI: it spawns dispatched RC boxes onto the SNI egress so they
+# actually register). This bun launcherd keeps only the LAUNCH lane
+# (launcherd.sock) until launcherd-rs grows one — so point its dispatch socket
+# at an unused path, freeing the real /run/doors/dispatch.sock for launcherd-rs.
+Entrypoint=bun
+Exec=/app/launcherd.js serve --socket /run/doors/launcherd.sock --dispatch-socket /run/doors/dispatch-legacy.sock --key /keys/launcherd.key
+
 # Same numeric uid/gid as every other socket-creating door daemon — see
 # keeperd.container's comment for why (shared doors dir, no world-writable).
 # Confirmed live: without this, launcherd's OWN assertSocketDir check

@@ -1,0 +1,25 @@
+# launcherd-rs.service — the Rust dispatch control plane (ADR-RC-EGRESS-SNI).
+# Runs VM-native (systemd --user), serving the dispatch lane on the real
+# dispatch.sock; spawns dispatched RC boxes onto the SNI egress so they register.
+# Installs to ~/.config/systemd/user/ (NOT the Quadlet dir). The bun launcherd
+# keeps only the launch lane (see launcherd.container's Exec= override).
+[Unit]
+Description=launcherd-rs — Rust dispatch control plane (SNI egress, VM-native)
+Requires=claude-doors-volume.service sni-gateway.service
+After=claude-doors-volume.service sni-gateway.service authd.service netd.service keeperd.service scoutd.service launcherd.service
+
+[Service]
+Type=simple
+Environment=CLAUDE_BOX_DOORS_DIR=/var/home/core/.claude-box/run
+Environment=DISPATCH_SOCK=/var/home/core/.claude-box/run/dispatch.sock
+ExecStartPre=-/usr/bin/rm -f /var/home/core/.claude-box/run/dispatch.sock
+ExecStart=/var/home/core/.claude-box/bin/launcherd
+# Relabel the socket to container_file_t so confined boxes can even see the
+# file. (The bastion additionally needs label-disable to `connectto` this
+# VM-native/unconfined_t listener — see bastion-run.sh.)
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6; do [ -S /var/home/core/.claude-box/run/dispatch.sock ] && chcon system_u:object_r:container_file_t:s0 /var/home/core/.claude-box/run/dispatch.sock && exit 0; sleep 1; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

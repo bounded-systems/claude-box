@@ -77,10 +77,15 @@ ever handing a box his repos or credentials.
    (e.g. a `repo=` field); inferred from the ticket; or the model asks
    `/request-repo <repo> <ref>` explicitly. Anchored-chain tickets may span
    several repos. **Needs a decision — likely the planner records it.**
-2. **PR creation mechanism.** Keeper signs commits, but opening a GitHub PR needs
-   `gh`/an API call with a token the box must not hold. Does keeper (or a new
-   "forge" door) open the PR on the box's behalf? **Needs design — a door, not a
-   token in the box.**
+2. **PR creation mechanism — ALREADY DESIGNED (`GHAPPD.md`, draft).** Keeper
+   signs commits, but opening/merging a GitHub PR needs an API token the box must
+   not hold. The **ghappd door** covers this (the authd "lend a short-lived
+   token" pattern): ghappd holds the GitHub App key on the host and lends the box
+   a scoped, ≤1h **installation token** to open the PR — the box never holds the
+   App key. So this is not undesigned; the open work is **deploying ghappd + which
+   execution rooms grant it** (git-push via keeper vs PR-open via ghappd are two
+   distinct doors). Remaining question: is opening a PR a keeper responsibility
+   (it already pushes) or strictly ghappd's?
 3. **Planning box repo read.** Does the planner need a read-only worktree (via
    repod) to plan against real code, or is the ticket + `bd` enough? (ADR-DISPATCH-
    PLANNING-FROM-TICKET leans "add readonly repod to the `planning` room.")
@@ -101,9 +106,14 @@ ever handing a box his repos or credentials.
 | Dispatcher + labeled workers (AC1, AC6, AC7) | path-namespaces, RC-egress-SNI | **done, live** |
 | Planning box from a ticket (AC2) | ADR-DISPATCH-PLANNING-FROM-TICKET / #23 | designed |
 | Repo via repod (AC4, AC5) | ADR-DISPATCH-REPO-ACCESS / #22 | designed |
-| PR creation without a token (unknown #2) | — | **undesigned** |
+| PR creation without a token (AC4) | GHAPPD.md (ghappd door) | **designed (draft), not deployed** |
+| Git commit/push (AC4) | KEEPERD.md (keeper door) | designed |
 | Approval gates (unknown #4) | — | **undesigned** |
 
-The story surfaces two genuinely-new design gaps (PR-via-door, approval gates)
-that the current ADRs don't cover — those are the next specs to write before the
-build closes.
+Net: the substrate is **live**; the ticket→plan→repo→commit→PR capability path is
+**designed across four docs** (planning, repod, keeper, ghappd) but **not yet
+deployed/wired into dispatch**. The one genuinely-new design gap the story
+surfaces is **human-in-the-loop approval gates** (plan-before-execute,
+PR-before-merge, per-room `permission-mode`) — plus the **ticket→repo mapping**
+(likely recorded on the beads task by the planner). Those are the next specs;
+everything else is deployment + wiring of already-designed doors.

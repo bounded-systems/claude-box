@@ -18,12 +18,12 @@
     "door-keeper": {
       "flake": false,
       "locked": {
-        "lastModified": 1782611898,
-        "narHash": "sha256-Z2NP3638WNO0cGvVCRzXIcWtDsdAtKfYGiLgkb5pbco=",
-        "rev": "79ef70ae95a0d37318e8ef467e78e6d92f03a052",
-        "revCount": 22,
+        "lastModified": 1783263267,
+        "narHash": "sha256-FVmSdzaWh7ZryVPxeWl5NYC5JuAMJwr4qR3lBRupDjM=",
+        "rev": "de5a0741d62d715e2d7093939289755a807101d2",
+        "revCount": 27,
         "type": "tarball",
-        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-keeper/0.1.22%2Brev-79ef70ae95a0d37318e8ef467e78e6d92f03a052/019f0bf3-83e8-7ed0-a622-a0543cd29547/source.tar.gz"
+        "url": "https://api.flakehub.com/f/pinned/bounded-systems/door-keeper/0.1.27%2Brev-de5a0741d62d715e2d7093939289755a807101d2/019f32c6-b309-7c00-b654-e62f5c6efe49/source.tar.gz"
       },
       "original": {
         "type": "tarball",

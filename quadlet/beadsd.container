@@ -1,0 +1,70 @@
+# beadsd.container — the beads door (--beads).
+#
+# Boxes read/write work units (bd show / create / update) through
+# /run/doors/beadsd.sock. beadsd holds the connection to the dolt store; boxes
+# hold nothing but the socket. This is what makes the `planning` room's
+# ["scout","beads"] doors resolve for real (ADR-DISPATCH-PLANNING-FROM-TICKET):
+# a planning box writes its epic + TDD subtasks to beads THROUGH this socket, so
+# the plan outlives the session and later `bd ready` execution boxes can read it.
+#
+# Provenance: reproduces prx's beadsd-box (same sha-pinned image) as a
+# claude-box door, replacing the prx-pod dependency. Same socket-only invariant
+# as every other door — the box never touches dolt or the beads files directly.
+#
+# Install:
+#   cp *.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now dolt beadsd
+#
+# Logs:
+#   journalctl --user -u beadsd -f
+
+[Unit]
+Description=beadsd — beads work-unit door for claude-box
+# dolt must be up first: beadsd shares dolt's network namespace to reach the
+# sql-server at 127.0.0.1:3307. Requires (not Wants): beadsd is useless without
+# its store, and Network=container:dolt cannot start until dolt exists.
+Requires=dolt.service
+After=dolt.service claude-doors-volume.service
+
+[Container]
+# sha-pinned to prx's beadsd-box. Its entrypoint takes `--socket <path>`; Exec
+# appends that arg to the image Entrypoint.
+Image=ghcr.io/bounded-systems/prx/beadsd-box@sha256:38f44cf0040d6f74f09d46bbc79ab9e64b28e4919146e4aed93fd917f964ea9d
+ContainerName=beadsd
+Exec=--socket /run/doors/beadsd.sock
+
+# Same keep-id mapping as every other socket-creating door daemon
+# (keeperd/netd/scout-netd/scoutd/launcherd): all must map to the SAME numeric
+# uid/gid that owns the shared /run/doors dir (1000:1000, mode 0770), or bind()
+# EACCESes. VERIFY on first deploy that beadsd's process runs as uid 1000
+# inside the image; if the beadsd-box image runs as a different internal uid,
+# adjust this mapping so the bound socket lands owned by 1000.
+UserNS=keep-id:uid=1000,gid=1000
+
+# The shared door directory (host ~/.claude-box/run), same mount every door
+# daemon uses. %h keeps it host-agnostic.
+Volume=%h/.claude-box/run:/run/doors
+
+# Share dolt's network namespace: beadsd reaches the sql-server at
+# 127.0.0.1:3307 exactly as it did inside the prx pod — no dolt-host env needed,
+# and dolt stays unreachable by anything else. beadsd itself needs NO internet
+# (it only talks to dolt), so this also gives it zero egress.
+Network=container:dolt
+
+# Door daemons that bind into the shared /run/doors are label-disabled (the
+# established fleet pattern — see keeperd.container): a confined container_t
+# cannot bind/connect the shared socket dir consistently across daemons.
+NoNewPrivileges=true
+DropCapability=all
+SecurityLabelDisable=true
+
+PidsLimit=256
+Memory=512m
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

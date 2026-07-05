@@ -1,0 +1,57 @@
+# dolt.container — the beads storage backend (dolt sql-server).
+#
+# This is the storage half of the beads door. It is NOT a door itself: it holds
+# no socket in /run/doors and is never mounted into a box. It serves a dolt
+# sql-server on 127.0.0.1:3307, reachable ONLY by beadsd, which shares this
+# container's network namespace (see beadsd.container's Network=container:dolt).
+#
+# Provenance: this reproduces prx's own dolt-box (same sha-pinned image and data
+# volume) as a claude-box-managed door backend, so the beads store stops
+# depending on the prx-pod and joins the guest-room/door fleet. It serves the
+# ONE canonical GH-NNN beads store (the owner's decision: one data store now;
+# org→repo-scoped identity later, to draw cross-repo edges across the anchored
+# chain).
+#
+# Data: the EXISTING prx-dolt-data volume is adopted as-is (no :U — the image's
+# default uid already owns the data, so we must not chown it out from under prx).
+
+[Unit]
+Description=dolt — beads storage backend (sql-server) for the beadsd door
+
+[Container]
+# sha-pinned to the exact image prx's dolt-box runs, for reproducibility.
+Image=ghcr.io/bounded-systems/prx/dolt-box@sha256:71fa665e3d8f1b2152f3538c5c1922ed532fa9cf801b78974637a48e0d7ebf22
+ContainerName=dolt
+
+# Adopt the canonical beads store. This named volume already exists in the VM
+# with prx's data; referencing it here hands it to the claude-box-managed
+# daemon WITHOUT copying or re-owning it (deliberately no :U).
+Volume=prx-dolt-data:/var/lib/dolt
+
+# Match the image's expected runtime (same values prx's dolt-box runs with).
+Environment=DOLT_PORT=3307
+Environment=DOLT_DATA_DIR=/var/lib/dolt
+Environment=TMPDIR=/var/lib/dolt
+
+# Loopback only — no bridge, no egress. dolt is reachable exclusively from
+# within its own network namespace, which ONLY beadsd joins. Nothing else on
+# the VM (no box, no other door) can reach :3307.
+Network=none
+
+# Security floor. dolt holds no door socket, so — unlike the door daemons — it
+# stays SELinux-confined (SecurityLabelDisable is NOT set here). Root fs is
+# read-only; all writes go to the writable data volume (TMPDIR is inside it).
+NoNewPrivileges=true
+ReadOnly=true
+ReadOnlyTmpfs=true
+DropCapability=all
+
+PidsLimit=512
+Memory=1g
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

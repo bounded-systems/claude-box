@@ -154,8 +154,12 @@ Still-manual step (needs a real browser login — cannot be scripted):
 Bring the fleet up (doors, egress gateway, both launchers, dispatcher):
   podman machine ssh -- systemctl --user enable --now \
     keeperd netd scout-netd scoutd authd launcherd \
-    sni-gateway launcherd-rs remote-serve
+    dolt beadsd sni-gateway launcherd-rs remote-serve
 
+  - dolt is the beads storage backend (loopback-only, no egress); beadsd is
+    the --beads door (/run/doors/beadsd.sock) sharing dolt's netns. Together
+    they replace the prx-pod dependency and make the `planning` room's beads
+    door resolve. dolt/beadsd images are pulled from ghcr (sha-pinned).
   - launcherd (bun) serves the LAUNCH lane; launcherd-rs (Rust, VM-native)
     serves the DISPATCH lane on the real dispatch.sock and spawns RC boxes
     onto the SNI egress (ADR-RC-EGRESS-SNI) so they register.

@@ -456,13 +456,6 @@ async function gitPush(params: {
     throw { code: "GIT_PUSH_FAILED", message: pushResult.stderr };
   }
 
-  // Best-effort: push git-ai attribution notes so they survive container
-  // teardown. In --repo-rw boxes the checkpoint hook writes refs/notes/ai;
-  // this carries them to the remote alongside the branch. In hardened
-  // (read-only .git) boxes no notes exist — git push errors out silently and
-  // the keeperd-attestation path remains the attribution record.
-  await gitExec(repo, ["push", remote, "refs/notes/ai"]);
-
   return {
     pushed: `${remote}/${targetBranch}`,
     commits,
@@ -666,6 +659,101 @@ async function handleImportAndPush(params: Record<string, unknown>): Promise<unk
   };
 }
 
+// ── pr ───────────────────────────────────────────────────────────────────────
+// Open a GitHub PR for a branch keeperd already pushed. keeperd holds NO standing
+// GitHub API token: it leases a scoped, short-lived installation token from prx's
+// forge-d (host-to-host, over the same guest-room door protocol as the concierge
+// `keys` call above), uses it for exactly one POST .../pulls, and discards it. The
+// token lives in memory only for that call — never persisted, never logged, never
+// returned. `openPr` is pure over its deps (the lease + fetch seams) so it unit-
+// tests without a live forge-d or the network; `handlePr` wires the real ones.
+
+/** forge-d's `lease` reply — a subset of its wire contract. We depend on the
+ *  shape, not the package, to keep keeperd's dep graph git-only. */
+type ForgeLease =
+  | { status: "ok"; token: string; expiresAt: string; permissions: Record<string, string> }
+  | { status: "error"; code: string; message: string };
+
+/** Seams handlePr injects; tests replace both with in-memory fakes. */
+export interface PrDeps {
+  /** Lease a token scoped to `repositories` (short repo names) + `permissions`. */
+  lease: (req: { repositories: string[]; permissions: Record<string, string> }) => Promise<ForgeLease>;
+  fetch: typeof fetch;
+}
+
+/** forge-d door endpoint. Host-to-host: keeperd and forge-d both run on the
+ *  trusted host, so the box is never on this leg. Override with FORGE_D_SOCK (or
+ *  prx's own PRX_FORGE_DOOR); defaults to prx's local forge-d socket. */
+function forgeDoorSocket(): string {
+  return process.env.FORGE_D_SOCK ?? process.env.PRX_FORGE_DOOR ?? "/tmp/prx-forge-d.sock";
+}
+
+const realPrDeps = (): PrDeps => ({
+  lease: (req) => call<ForgeLease>(forgeDoorSocket(), "lease", req),
+  fetch: globalThis.fetch,
+});
+
+/**
+ * Open a PR via a leased, scoped token. Pure over `deps`. The token is used for
+ * exactly one POST and never leaves this function — not logged, not returned.
+ */
+export async function openPr(
+  params: Record<string, unknown>,
+  deps: PrDeps = realPrDeps(),
+): Promise<{ number: number; url: string }> {
+  const repo = params.repo as string;
+  const head = params.head as string;
+  const title = params.title as string;
+  const base = (params.base as string | undefined) ?? "main";
+  const body = params.body as string | undefined;
+
+  if (!repo || !head || !title) {
+    throw { code: "INVALID_PARAMS", message: "repo, head and title required" };
+  }
+  const slash = repo.indexOf("/");
+  if (slash <= 0 || slash === repo.length - 1) {
+    throw { code: "INVALID_PARAMS", message: `repo must be owner/name, got: ${repo}` };
+  }
+  const owner = repo.slice(0, slash);
+  const name = repo.slice(slash + 1);
+
+  // Least privilege: a token scoped to just this repo, with just pull_requests
+  // write — the minimal grant that can open a PR.
+  const lease = await deps.lease({
+    repositories: [name],
+    permissions: { pull_requests: "write" },
+  });
+  if (lease.status !== "ok") {
+    throw { code: "LEASE_FAILED", message: `forge-d lease: ${lease.code}: ${lease.message}` };
+  }
+
+  const res = await deps.fetch(`https://api.github.com/repos/${owner}/${name}/pulls`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${lease.token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "keeperd",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title, head, base, ...(body !== undefined ? { body } : {}) }),
+  });
+
+  if (res.status !== 201) {
+    // The GitHub error body is safe to surface — the token is only in the request
+    // header, never echoed back — but bound it so a huge body can't flood logs.
+    const detail = await res.text().catch(() => "");
+    throw { code: "PR_FAILED", message: `github pulls ${res.status}: ${detail.slice(0, 500)}` };
+  }
+
+  const pr = (await res.json()) as { number: number; html_url: string };
+  return { number: pr.number, url: pr.html_url };
+}
+
+async function handlePr(params: Record<string, unknown>): Promise<unknown> {
+  return openPr(params);
+}
+
 /**
  * L2 launch attestation: a guest acting through its signer door attests that a
  * room was launched holding exactly these doors. The launch key never leaves the
@@ -699,6 +787,7 @@ const METHODS: Record<string, MethodHandler> = {
   commit: handleCommit,
   push: handlePush,
   "import-and-push": handleImportAndPush,
+  pr: handlePr,
   "attest-launch": handleAttestLaunch,
   sign: handleSign,
   verify: handleVerify,
@@ -749,6 +838,54 @@ async function gateGrant(req: RequestEnvelope): Promise<{ ok: boolean; reason?: 
   return v;
 }
 
+// ── wire-contract shadow validation (log-only) ───────────────────────────────
+// The published keeper-wire agreement, bundled next to keeperd in the image
+// (${keeper-wire}/manifest.json). When absent — e.g. running the source in
+// tests — it's null and the check is skipped. It NEVER rejects: a mismatch is
+// LOGGED (surfacing spec↔handler drift), signing is unaffected. This is the
+// first, safe step of dispatching through the contract; enforcing (+ full Zod)
+// comes once the daemon adopts the spec package as a dependency.
+interface WireManifest {
+  methods: string[];
+  params: Record<string, string[]>;
+}
+let wireManifest: WireManifest | null = (() => {
+  try {
+    const p = new URL("./keeper-wire.manifest.json", import.meta.url).pathname;
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+})();
+
+/** Test seam: inject (or clear) the agreement manifest. */
+export function __setWireManifest(m: WireManifest | null): void {
+  wireManifest = m;
+}
+
+/**
+ * Shadow-validate a request's params against the published agreement — LOG ONLY.
+ * Warns on params the contract doesn't declare (drift); never rejects. `kind` is
+ * the request-envelope discriminator, not a verb param.
+ */
+export function shadowCheckParams(
+  method: string,
+  params: Record<string, unknown>,
+): void {
+  if (!wireManifest) return;
+  const declared = wireManifest.params[method];
+  if (!declared) return;
+  const allow = new Set([...declared, "kind"]);
+  const unexpected = Object.keys(params).filter((k) => !allow.has(k));
+  if (unexpected.length) {
+    console.warn(
+      `keeper-wire: request "${method}" sends undeclared param(s): ${
+        unexpected.join(", ")
+      } — spec/handler drift`,
+    );
+  }
+}
+
 async function handleRequest(line: string): Promise<ResponseEnvelope> {
   let req: RequestEnvelope;
   try {
@@ -772,6 +909,8 @@ async function handleRequest(line: string): Promise<ResponseEnvelope> {
   if (!handler) {
     return err(id, "UNKNOWN_METHOD", `unknown method: ${method}`);
   }
+
+  shadowCheckParams(method, params ?? {});
 
   try {
     const result = await handler(params ?? {});

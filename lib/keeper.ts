@@ -83,6 +83,27 @@ export type PushResult = {
   commits: string[];
 };
 
+/** Options for opening a GitHub PR via keeperd. */
+export type PrOptions = {
+  /** The GitHub repository as `owner/name` — the REST target, NOT a filesystem
+   *  path, so it is passed through verbatim (no /work translation). */
+  repo: string;
+  /** The head branch keeperd already pushed (via `push`/`import-and-push`). */
+  head: string;
+  /** The base branch to open the PR against (default: "main"). */
+  base?: string;
+  /** PR title. */
+  title: string;
+  /** PR body (optional). */
+  body?: string;
+};
+
+/** Result of opening a PR via keeperd: the created PR's number and URL. */
+export type PrResult = {
+  number: number;
+  url: string;
+};
+
 /** Result of a sign operation via keeperd. */
 export type SignResult = {
   signature: string;
@@ -289,6 +310,23 @@ export async function push(options: PushOptions): Promise<PushResult> {
   });
 }
 
+/**
+ * Open a GitHub PR via keeperd.
+ *
+ * Requires the `--keeper` door. The box holds **no** GitHub API token: keeperd
+ * leases a scoped, short-lived one from forge-d internally, opens the PR, and
+ * discards it. `repo` is a GitHub `owner/name` slug (not path-translated).
+ */
+export async function pr(options: PrOptions): Promise<PrResult> {
+  return request<PrResult>("pr", {
+    repo: options.repo,
+    head: options.head,
+    base: options.base ?? "main",
+    title: options.title,
+    ...(options.body !== undefined ? { body: options.body } : {}),
+  });
+}
+
 /** Options for import-and-push: the host builds commits locally (keyless) and keeperd signs the push. */
 export type ImportAndPushOptions = {
   /** The repo keeperd imports the bundle into and pushes from (the daemon-side
@@ -485,6 +523,16 @@ async function main(): Promise<number> {
       console.log(`commits: ${result.commits.join(", ") || "(none)"}`);
       return 0;
     }
+    case "pr": {
+      const [repo, head, base, title, body] = args;
+      if (!repo || !head || !base || !title) {
+        console.error("usage: keeper pr <repo> <head> <base> <title> [body]");
+        return 1;
+      }
+      const result = await pr({ repo, head, base, title, ...(body ? { body } : {}) });
+      console.log(`opened #${result.number}: ${result.url}`);
+      return 0;
+    }
     case "key": {
       const key = await getPublicKey();
       console.log(key.publicKey);
@@ -497,6 +545,8 @@ Usage:
   keeper status              show keeperd status
   keeper commit [REPO] [MSG] create a signed commit
   keeper push [REPO]         push to remote
+  keeper pr <repo> <head> <base> <title> [body]
+                             open a GitHub PR (repo = owner/name)
   keeper key                 show signing public key
 
 This command only works inside a box with the --keeper door.`);

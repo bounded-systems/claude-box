@@ -40,7 +40,7 @@
   # door-kit's lib/, kept honest by the `door-kit-mirror` check below. Bump with
   # `nix flake update door-kit` + `nix run .#sync-door-kit`. (door-kit itself pins
   # the SAME guest-room rev as this flake — keep them in lockstep.)
-  inputs.door-kit.url = "github:bounded-systems/door-kit/22ee030841dd6b4ea334a7963297d962161f3359";
+  inputs.door-kit.url = "github:bounded-systems/door-kit/b0e1a39084f11e03889117ce92462b335a1d16d7";
   inputs.door-kit.flake = false;
 
   # door-keeper — the keeperd git-signing door, extracted to its own public repo.

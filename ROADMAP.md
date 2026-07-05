@@ -155,11 +155,13 @@ whole door model):
 | edit | filesystem | ✅ |
 | commit (signed) | keeperd `commit` (+ L3 attestation) | ✅ |
 | push branch | keeperd `push` (holds the write cred) | ✅ |
-| **open the PR** | `POST /repos/.../pulls` | ❌ **no capability** — scoutd only *reads* PRs; keeperd has no pr-create. A **write**, so it belongs on keeperd (a `pr` op). |
+| **open the PR** | `POST /repos/.../pulls` | ✅ keeperd `pr` op (door-keeper#21) — leases a scoped, short-lived GitHub App token from prx's forge-d internally (host-to-host), opens the PR, discards it; the box never holds a token. In-box client: door-kit `pr()`. Contract: keeper-wire#2 (`@0.2.0`). |
 | box → keeper transport | in-box client dials the door | ❌ **`prx-o92`** (transport-agnostic client, in `prx`) — the linchpin |
 
-So the loop is gated on two things: a keeperd **`pr` op** (buildable here) and
-**`prx-o92`** (the in-box client, in `prx`). Until `prx-o92` lands, the full loop
+The loop is now gated on the **one** remaining rung: **`prx-o92`** (the in-box
+transport-agnostic client, in `prx`). The keeperd **`pr` op** is done — contract
+(keeper-wire#2), daemon (door-keeper#21), and in-box client (door-kit#25) have all
+landed and are synced into this repo. Until `prx-o92` lands, the full loop still
 can't be dogfooded from claude-box alone.
 
 ## Suggested order

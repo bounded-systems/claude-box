@@ -1,0 +1,52 @@
+CAPABILITIES.md
+  s_22a6eff3b99fbe::t_34ca61f59c143c 252-254
+  s_22a6eff3b99fbe::t_c70b76ea234fee 280-298
+flake.nix
+  s_22a6eff3b99fbe::t_87545919918430 245-247
+  s_22a6eff3b99fbe::t_296e3e51e0fc63 131-140
+launcherd.ts
+  s_22a6eff3b99fbe::t_9aca100908bfc2 955
+  s_22a6eff3b99fbe::t_4d3ed2aeb43219 1232
+tests/pathbase.test.ts
+  s_22a6eff3b99fbe::t_d3c0329a640c3f 1-61
+NETD.md
+  s_22a6eff3b99fbe::t_b31c233fc1a9a4 74,83-90
+  s_ba65769c14892c::t_96ca20ffec5001 91
+claude-box.ts
+  s_22a6eff3b99fbe::t_f38468fe4ade7e 2160-2163
+  s_22a6eff3b99fbe::t_cbb60fe3eec72b 538-541
+  s_22a6eff3b99fbe::t_a8b2cdd215a858 737-744
+  s_22a6eff3b99fbe::t_fc9396d00139a9 909-916
+  s_22a6eff3b99fbe::t_bb474a747bf2b7 152-162
+  s_22a6eff3b99fbe::t_6255688e3aa374 1076-1084
+  s_22a6eff3b99fbe::t_36f5d2a10e59ce 1839-1850,1853,1857,1859
+  s_22a6eff3b99fbe::t_deece34ab2ce97 1872
+  s_22a6eff3b99fbe::t_9c48e73bb96cf6 791
+  s_22a6eff3b99fbe::t_5479de9b8aff00 1015
+tests/launcherd.test.ts
+  s_22a6eff3b99fbe::t_c8e54038fbca37 601
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "bec3f2d159ef3dcb13ee263cde57522b1aa1e1ae",
+  "prompts": {},
+  "sessions": {
+    "s_22a6eff3b99fbe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8d419d0c-c352-435a-9d1f-96c6ad26c62f",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    },
+    "s_ba65769c14892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f0f2dc4e-052a-4105-9d7b-c28b0fa181c5",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

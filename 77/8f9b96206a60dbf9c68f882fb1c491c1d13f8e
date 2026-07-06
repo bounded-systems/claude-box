@@ -1,0 +1,19 @@
+tests/ocap.test.ts
+  s_22a6eff3b99fbe::t_2974e8d5c62cfe 251-283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "778f9b96206a60dbf9c68f882fb1c491c1d13f8e",
+  "prompts": {},
+  "sessions": {
+    "s_22a6eff3b99fbe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8d419d0c-c352-435a-9d1f-96c6ad26c62f",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

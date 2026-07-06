@@ -118,6 +118,35 @@
         };
       };
 
+      # toolpath (`path` binary, github.com/empathic/toolpath) — a provenance
+      # CLI: derives a step/path/graph DAG from git history and agent logs
+      # (Claude, Gemini, Codex, opencode…) with actor attribution and dead-end
+      # tracking. Pinned per-arch release tarball (path-cli v0.14.0), same
+      # pin-a-release-asset shape as prxAssets above. UNLIKE prx, this is a
+      # plain Rust binary (no appended blob), so autoPatchelf is safe here —
+      # no manual loader wrapper needed. aarch64 ships dynamically linked
+      # (glibc/openssl/zlib); x86_64 ships a static musl build (autoPatchelf
+      # no-ops on it, nothing to patch).
+      #
+      # Scope: LOCAL provenance only. `path p import git` / `render md|dot`
+      # read this box's own .git + agent logs and write nothing external —
+      # safe to ship by default. `path auth login` / `path p export pathbase`
+      # / `path p import github` need outbound network and hold a Pathbase
+      # credential; those are deliberately NOT wired here (see NETD.md and
+      # the toolchain comment below) — same posture that keeps `gh` out
+      # (GH-5): a write-capable credential path is a named, reviewed grant,
+      # never an ambient default.
+      toolpathAssets = {
+        "aarch64-linux" = {
+          url = "https://github.com/empathic/toolpath/releases/download/v0.14.0/path-aarch64-unknown-linux-gnu.tar.gz";
+          sha256 = "1d5f74nd2j26ilczm9y0cmixqp6dcn2vkd7c4jvdsbcnpln97bki";
+        };
+        "x86_64-linux" = {
+          url = "https://github.com/empathic/toolpath/releases/download/v0.14.0/path-x86_64-unknown-linux-musl.tar.gz";
+          sha256 = "1jxr089hran8l9x0hs30vcyg350jf6ysb4kbi71aqp6pcg6hj0vy";
+        };
+      };
+
       user = "claude";
       uid = 1000;
       home = "/home/${user}";
@@ -185,6 +214,24 @@
               --set LD_LIBRARY_PATH "${prxLibs}"
           '';
 
+          # toolpath — pinned release tarball for this arch (see toolpathAssets
+          # above for why autoPatchelf is safe here, unlike prx's manual wrapper).
+          toolpathAsset = toolpathAssets.${system};
+          toolpath = pkgs.stdenv.mkDerivation {
+            pname = "toolpath";
+            version = "0.14.0";
+            src = pkgs.fetchurl { inherit (toolpathAsset) url sha256; };
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.openssl pkgs.zlib ];
+            # tarball is a single bare `path` file, not a directory — sourceRoot
+            # "." keeps genericBuild from trying to cd into a non-existent dir.
+            sourceRoot = ".";
+            dontBuild = true;
+            installPhase = ''
+              install -Dm755 path $out/bin/path
+            '';
+          };
+
           # Everything the agent needs in the box. prx is THE tool (prx-0wc) —
           # it reaches OUT to the keeperd/beadsd boxes; the rest support it.
           toolchain = with pkgs; [
@@ -192,6 +239,10 @@
             claude-code        # the star — pinned by the locked nixpkgs rev
             git                # local VCS ops (read/diff/status); pushes go via keeperd
             git-ai-flake.packages.${system}.git-ai  # AI/human edit provenance — `git ai checkpoint` (writes local .git only; no creds, no egress)
+            toolpath           # `path` — provenance DAG over git/agent-log history (pinned v0.14.0).
+                               # LOCAL-only: `path p import git`/`render md|dot`. Pathbase auth/export
+                               # is deliberately unwired (see toolpathAssets comment above) — it needs
+                               # a named netd grant + credential handling, not an ambient default.
             # NB: `gh` is deliberately ABSENT (GH-5). It was a latent direct-push
             # credential path — `gh auth login` + a token bypasses keeperd. With it
             # gone, the box has no tool that can establish push rights; writes go

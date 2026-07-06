@@ -248,6 +248,39 @@ boxTest("credential-free: a direct push cannot authenticate (keeperd is the only
   expect(r.out).not.toContain("exit=0"); // the push did not succeed
 });
 
+// ── toolpath: provenance CLI, local-only by design ──
+// `path` ships in the toolchain for LOCAL git/agent-log provenance only (see
+// flake.nix's toolpathAssets comment). These probes assert both halves of
+// that claim: the tool is really present and functional (positive), and it
+// holds no Pathbase credential and needs no egress to do its job (negative —
+// same shape as the gh-absence probes above).
+
+boxTest("toolpath: `path` is present and really is toolpath (not a patchelf regression)", () => {
+  expect(box("path --version").out).toBe("path 0.14.0");
+});
+
+boxTest("toolpath: `path p import git` works fully offline against a real repo", () => {
+  withTempRepo((repo) => {
+    const r = boxRepo(
+      repo,
+      "branch=$(git branch --show-current) && " +
+      "path p import git --repo . --branch \"$branch\" --no-cache",
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('"graph"');
+    expect(r.out).toContain('"paths"');
+  });
+});
+
+boxTest("toolpath: no ambient Pathbase credential (auth is NOT wired in this box)", () => {
+  // We never call `path auth login` anywhere in the image build, so a fresh
+  // box must report logged-out — there is no ambient Pathbase push/pull
+  // credential sitting in the image or its config volume.
+  const r = box("path auth whoami 2>&1; echo exit=$?");
+  expect(r.out).not.toContain("exit=0");
+  expect(r.out.toLowerCase()).toContain("not logged in");
+});
+
 // ── door grant profiles ──
 // These require the actual daemons to be running and accessible via socket.
 // We check for the socket and skip if not available.

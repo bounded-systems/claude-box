@@ -952,6 +952,7 @@ async function handleLaunch(params: Record<string, unknown>): Promise<unknown> {
     netOpen: (params.netOpen as boolean) ?? netOpen,
     remoteControl: false,
     remoteServe: false,
+    pathbase: false,
     guestArgs,
   };
   const manifest = buildManifest(launch, process.env, depth);
@@ -1228,6 +1229,7 @@ async function handleDispatch(params: Record<string, unknown>): Promise<unknown>
     netOpen: room.netOpen ?? false,
     remoteControl: false,
     remoteServe: true,
+    pathbase: false,
     guestArgs: [],
   };
   const manifest = buildManifest(launch, process.env, 0);

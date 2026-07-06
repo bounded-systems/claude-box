@@ -249,9 +249,9 @@ can only narrow from there.
 ## The `--remote-control` profile — an honest, scoped relaxation
 
 `--remote-control` (and its server form `--remote-serve`) lets the Claude app
-drive a *boxed* session. It is the **one** profile that relaxes the default
-posture, and every relaxation is **scoped to that launch** — the default box is
-byte-for-byte unchanged (pinned by `tests/remote-control.test.ts`).
+drive a *boxed* session. Every relaxation it makes is **scoped to that
+launch** — the default box is byte-for-byte unchanged (pinned by
+`tests/remote-control.test.ts`).
 
 What it relaxes, and the boundary that stays:
 
@@ -276,6 +276,25 @@ What it relaxes, and the boundary that stays:
 So the relaxation is legible and contained: a wider-but-still-enumerated egress
 allowlist and a full-scope login, for one opt-in profile, with the default
 hardened box untouched.
+
+## The `--pathbase` profile — the same egress-only shape, for toolpath
+
+`--pathbase` is a second, narrower opt-in profile with the same shape as RC's
+egress relaxation (minus the auth/feature-flag gates — it touches *only*
+egress): it lets toolpath (`path`) reach Pathbase for session push/pull and
+`path auth login`. It gets its own scoped netd allowlisting
+`DEFAULT_ALLOW + PATHBASE_NETD_ALLOW` (the anthropic hosts plus
+`pathbase.dev`) — never `--net-open`, never the shared netd, never folded
+into a default profile (pathbase.dev is a write-capable host, so it follows
+the same "fetch hosts only in defaults" hygiene as NETD.md's GH-6 rule).
+Without `--pathbase`, `path` still ships in every box (see the toolchain in
+`flake.nix`) for fully local, zero-egress use: `path p import git` /
+`render md|dot` over the box's own `.git` and agent logs.
+
+Both profiles' scoped allowlists are unioned into ONE scoped netd when more
+than one applies to a launch (`scopedAllow` in `claude-box.ts`'s `run()`), so
+a launch that somehow combined them would still get every host either one
+needs — never silently lose one to the other.
 
 ## Why this matters
 

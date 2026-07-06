@@ -149,6 +149,17 @@ const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
 // 403" — easy to misread as a credentials problem when it's an egress block.
 export const RC_NETD_ALLOW = ["statsig.anthropic.com", "claude.ai", "platform.claude.com"];
 
+// Extra egress host the --pathbase profile needs: toolpath's `path auth
+// login` / `path p export|import pathbase` talk to a single origin
+// (https://pathbase.dev by default, overridable client-side via
+// $PATHBASE_URL — see empathic/toolpath's cmd_auth.rs `resolve_url`). This is
+// a WRITE-capable host (session push/pull + an auth token), so — same as
+// GH-6's "fetch hosts only" hygiene for the default profile — it is never
+// folded into DEFAULT_ALLOW; a box only reaches it via the explicit,
+// named --pathbase profile, through its OWN scoped netd (never the shared
+// one), exactly like --remote-control's statsig/claude.ai widening below.
+export const PATHBASE_NETD_ALLOW = ["pathbase.dev"];
+
 
 /** Detect if we're in TCP mode (daemons running on TCP ports, not sockets).
  *  Pure/env-driven only (no ambient process.platform read) so every caller —
@@ -524,6 +535,10 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   --remote-serve      boot straight into RC SERVER mode: entrypoint becomes
                       'claude remote-control', so the box is a headless RC server
                       (no manual /remote-control). Same posture as --remote-control.
+  --pathbase          opt-in: let toolpath ('path') reach Pathbase (implies --net;
+                      routed through its own scoped netd allowlisting pathbase.dev —
+                      never the shared netd; local git/agent-log provenance needs
+                      no egress at all and works without this flag)
   --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
@@ -719,6 +734,14 @@ type Launch = {
    *  claude re-read an authd-refreshed credential mid-session — resolve with
    *  prx-6194 (authd). claude guest only. See prx-v9wn. */
   remoteServe: boolean;
+  /** --pathbase: opt-in profile to let toolpath (`path`) talk to Pathbase
+   *  (session push/pull, `path auth login`). Implies the net door, routed
+   *  through its OWN scoped netd allowlisting pathbase.dev on top of the
+   *  default anthropic hosts (pathbaseEgressAllow) — never the shared netd,
+   *  and never folded into a default profile (GH-6: it's a write-capable
+   *  host). Any guest may set this, not just claude — toolpath runs under
+   *  tool guests too. */
+  pathbase: boolean;
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
 
@@ -765,6 +788,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
   let netOpen = false;
   let remoteControl = false;
   let remoteServe = false;
+  let pathbase = false;
   const writable: string[] = [];
   const doors = new Map<string, DoorGrant>();
   const guestArgs: string[] = [];
@@ -882,6 +906,14 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       add(resolveDoor("dispatch", undefined, env));
       continue;
     }
+    if (t === "--pathbase") {
+      // Opt-in: let toolpath reach Pathbase. Imply the net door (Map dedupes
+      // if --net is also given) — the actual host widening happens via
+      // pathbaseEgressAllow's OWN scoped netd, same shape as --remote-control.
+      pathbase = true;
+      add(resolveDoor("net", undefined, env));
+      continue;
+    }
     if (t === "--keeper") {
       add(resolveDoor("keeper", undefined, env));
       continue;
@@ -980,6 +1012,7 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
     netOpen,
     remoteControl,
     remoteServe,
+    pathbase,
     guestArgs,
   };
 }
@@ -1038,6 +1071,15 @@ function authEnvArgs(launch: Launch, env: Env = process.env): string[] {
 export function rcEgressAllow(launch: Launch): string[] {
   if (!(launch.remoteControl || launch.remoteServe)) return [];
   return [...DEFAULT_ALLOW, ...RC_NETD_ALLOW];
+}
+
+/** Pure: the --pathbase profile's scoped-netd allowlist — same shape as
+ *  rcEgressAllow (PATHBASE_NETD_ALLOW's comment has the "why"). Every other
+ *  launch returns [] — toolpath's local-only usage (`path p import git` /
+ *  `render md|dot`) needs no egress at all and is unaffected. */
+export function pathbaseEgressAllow(launch: Launch): string[] {
+  if (!launch.pathbase) return [];
+  return [...DEFAULT_ALLOW, ...PATHBASE_NETD_ALLOW];
 }
 
 /** Pure: the claude SERVER-mode entrypoint prefix for --remote-serve. The image
@@ -1794,24 +1836,27 @@ async function run(
     );
   }
 
-  // --remote-control: route this box's egress through its OWN scoped netd whose
-  // allowlist adds the RC feature-flag/telemetry hosts (rcEgressAllow), so the
-  // GrowthBook flag fetch the RC posture re-enables (authEnvArgs) can actually
-  // reach — without widening the shared netd every other box uses. Like
-  // --repo-origin, it needs TCP mode (the box reaches the scoped netd over the
-  // host gateway). The scoped netd opts out of the grant gate (it's local).
-  let rcNetd: { port: number; stop: () => void } | undefined;
-  const rcAllow = rcEgressAllow(launch);
-  if (rcAllow.length > 0 && !netOpen) {
+  // Profiles that need MORE than the shared netd's default anthropic-only
+  // allowlist (--remote-control/--remote-serve's statsig/claude.ai widening,
+  // --pathbase's pathbase.dev widening) each route through this ONE scoped
+  // netd instead of the shared one — its allowlist is the union of whichever
+  // profiles this launch actually set (rcEgressAllow / pathbaseEgressAllow
+  // both return [] unless their own flag is set, so a plain launch never
+  // widens anything). Like --repo-origin, it needs TCP mode (the box reaches
+  // the scoped netd over the host gateway). The scoped netd opts out of the
+  // grant gate (it's local).
+  let scopedNetd: { port: number; stop: () => void } | undefined;
+  const scopedAllow = [...new Set([...rcEgressAllow(launch), ...pathbaseEgressAllow(launch)])];
+  if (scopedAllow.length > 0 && !netOpen) {
     if (!tcpMode) {
       console.error(
-        "claude-box: --remote-control needs TCP mode for its scoped egress door — automatic on macOS; on Linux set DOORS_TCP=1.",
+        "claude-box: --remote-control/--remote-serve/--pathbase need TCP mode for their scoped egress door — automatic on macOS; on Linux set DOORS_TCP=1.",
       );
       process.exit(2);
     }
-    rcNetd = await startScopedNetd(rcAllow);
+    scopedNetd = await startScopedNetd(scopedAllow);
     console.error(
-      `claude-box: --remote-control — egress door allowlists [${rcAllow.join(", ")}] (netd :${rcNetd.port})`,
+      `claude-box: scoped egress door allowlists [${scopedAllow.join(", ")}] (netd :${scopedNetd.port})`,
     );
   }
 
@@ -1824,7 +1869,7 @@ async function run(
     // netd's allowlist is the security boundary (HTTPS_PROXY → netd). For an RC
     // launch, point at its OWN scoped netd (wider allowlist) instead of the shared.
     if (netDoor) {
-      const proxy = rcNetd ? `http://host.containers.internal:${rcNetd.port}` : NETD_TCP_PROXY;
+      const proxy = scopedNetd ? `http://host.containers.internal:${scopedNetd.port}` : NETD_TCP_PROXY;
       argv.push(
         "--env",
         `HTTPS_PROXY=${proxy}`,
@@ -2112,10 +2157,10 @@ async function run(
     gitDoor.stop();
   }
 
-  // Tear down the per-launch RC egress door.
-  if (rcNetd) {
-    console.error(`claude-box: stopping --remote-control egress door (netd :${rcNetd.port})`);
-    rcNetd.stop();
+  // Tear down the per-launch scoped egress door (RC and/or --pathbase).
+  if (scopedNetd) {
+    console.error(`claude-box: stopping scoped egress door (netd :${scopedNetd.port})`);
+    scopedNetd.stop();
   }
 
   // Clean up the isolated clone on exit (a plain temp dir, not a worktree).

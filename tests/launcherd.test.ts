@@ -598,6 +598,7 @@ describe("caller-based policy (SO_PEERCRED)", () => {
       netOpen: false,
       remoteControl: false,
       remoteServe: true,
+      pathbase: false,
       guestArgs: [],
     };
     const manifest: Manifest = {

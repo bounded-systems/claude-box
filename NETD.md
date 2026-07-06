@@ -71,6 +71,7 @@ needs to *function*, and workloads widen it explicitly.
 | `registry.npmjs.org`, `.npmjs.org` | `npm`/`bun` installs | off (per task) |
 | `github.com`, `codeload.github.com`, `objects.githubusercontent.com` | clone/fetch | off (per task) |
 | `pypi.org`, `files.pythonhosted.org` | `pip`/`uv` | off (per task) |
+| `pathbase.dev` | toolpath's `path auth login` / Pathbase push-pull — a **write**-capable host (GH-6 hygiene), never a default | off (`--pathbase`) |
 
 Profiles widen the set per launch (design, not yet wired):
 
@@ -78,6 +79,15 @@ Profiles widen the set per launch (design, not yet wired):
 claude-box work --net                 # default profile (anthropic only)
 claude-box work --net --net-profile js   # + npm/github (a JS workload)
 ```
+
+Two profiles ARE wired today, each via its own boolean flag rather than the
+generic `--net-profile NAME` above — `--remote-control`/`--remote-serve`
+(RC_NETD_ALLOW) and `--pathbase` (PATHBASE_NETD_ALLOW). Neither widens the
+*shared* netd: each spins up its own short-lived, per-launch scoped netd
+(`startScopedNetd` in `claude-box.ts`) allowlisting `DEFAULT_ALLOW` plus its
+own extra hosts, reached over the host gateway in TCP mode. See
+CAPABILITIES.md's "`--remote-control` profile" / "`--pathbase` profile"
+sections.
 
 `--net-open` bypasses netd entirely (full ambient egress) — the loud, explicit,
 **unsafe** escape hatch, for when no netd is running.

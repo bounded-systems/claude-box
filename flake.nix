@@ -128,14 +128,16 @@
       # (glibc/openssl/zlib); x86_64 ships a static musl build (autoPatchelf
       # no-ops on it, nothing to patch).
       #
-      # Scope: LOCAL provenance only. `path p import git` / `render md|dot`
-      # read this box's own .git + agent logs and write nothing external —
-      # safe to ship by default. `path auth login` / `path p export pathbase`
-      # / `path p import github` need outbound network and hold a Pathbase
-      # credential; those are deliberately NOT wired here (see NETD.md and
-      # the toolchain comment below) — same posture that keeps `gh` out
-      # (GH-5): a write-capable credential path is a named, reviewed grant,
-      # never an ambient default.
+      # Scope: LOCAL provenance ships by default. `path p import git` /
+      # `render md|dot` read this box's own .git + agent logs and write
+      # nothing external — no egress, no credential, on in every box. `path
+      # auth login` / `path p export pathbase` / `path p import github` need
+      # outbound network and hold a Pathbase credential, so they are gated
+      # behind the explicit `--pathbase` launch profile (claude-box.ts's
+      # PATHBASE_NETD_ALLOW/pathbaseEgressAllow, CAPABILITIES.md's "--pathbase
+      # profile" section) — never the default, same posture that keeps `gh`
+      # out entirely (GH-5): a write-capable credential path is a named,
+      # reviewed grant, never ambient.
       toolpathAssets = {
         "aarch64-linux" = {
           url = "https://github.com/empathic/toolpath/releases/download/v0.14.0/path-aarch64-unknown-linux-gnu.tar.gz";
@@ -240,9 +242,9 @@
             git                # local VCS ops (read/diff/status); pushes go via keeperd
             git-ai-flake.packages.${system}.git-ai  # AI/human edit provenance — `git ai checkpoint` (writes local .git only; no creds, no egress)
             toolpath           # `path` — provenance DAG over git/agent-log history (pinned v0.14.0).
-                               # LOCAL-only: `path p import git`/`render md|dot`. Pathbase auth/export
-                               # is deliberately unwired (see toolpathAssets comment above) — it needs
-                               # a named netd grant + credential handling, not an ambient default.
+                               # LOCAL-only by default: `path p import git`/`render md|dot`. Pathbase
+                               # auth/export needs the explicit `--pathbase` launch profile (its own
+                               # scoped netd grant — see toolpathAssets comment above), not an ambient default.
             # NB: `gh` is deliberately ABSENT (GH-5). It was a latent direct-push
             # credential path — `gh auth login` + a token bypasses keeperd. With it
             # gone, the box has no tool that can establish push rights; writes go

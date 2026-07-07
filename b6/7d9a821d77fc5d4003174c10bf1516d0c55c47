@@ -1,0 +1,25 @@
+claude-box.ts
+  s_ba65769c14892c::t_1ea25c2cec9416 3001-3011,3014-3015,3019
+  s_ba65769c14892c::t_1ce59b54121be6 62
+  s_ba65769c14892c::t_f2b4321e94c04e 231
+  s_ba65769c14892c::t_24f4ccc448622d 2621-2648,2653-2660
+  s_ba65769c14892c::t_a9577b07d200fb 2649-2652
+  s_ba65769c14892c::t_6ecb76505ccf71 2721
+  s_ba65769c14892c::t_06eceef2d90883 2952-2955,2960,2971,2985,2990-3000,3012-3013,3016-3018,3020-3024
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "b67d9a821d77fc5d4003174c10bf1516d0c55c47",
+  "prompts": {},
+  "sessions": {
+    "s_ba65769c14892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f0f2dc4e-052a-4105-9d7b-c28b0fa181c5",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

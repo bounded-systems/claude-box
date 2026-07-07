@@ -60,6 +60,7 @@ const TCP_PORTS: Record<string, number> = {
   scoutd: 3002,
   authd: 3003, // RC credential-broker door (prx-6194)
   pathbased: 3004, // Pathbase broker door (PATHBASED.md)
+  beadsd: 3005, // beads read/write door — forwarded from the VM, see doors serve
 };
 
 // ── Guest catalog ─────────────────────────────────────────────────────────────
@@ -228,6 +229,7 @@ const DAEMON_HINTS: Record<string, string> = {
   scout: "nix run .#scoutd -- serve",
   launcher: "nix run .#launcherd -- serve",
   auth: "bun authd.ts serve", // RC credential-broker door (prx-6194; .#authd image is Phase 2)
+  beads: "claude-box doors serve", // forwards the VM's beadsd.sock to 127.0.0.1:TCP_PORTS.beadsd
 };
 /** A door socket's dir must not be world-writable, or another host user can
  *  pre-create the socket and MITM the door. Enforced at launch (fail closed),
@@ -2642,6 +2644,46 @@ async function runOnDoorHost(
   return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
+/** SSH connection details for the podman machine VM, pulled from `podman
+ *  machine inspect` (Port/RemoteUsername/IdentityPath). Unlike the other TCP-
+ *  mode daemons (keeperd/netd/scoutd), beadsd has no macOS-native mode of its
+ *  own — it only ever runs inside the VM's Quadlet fleet, sharing dolt's
+ *  network namespace. Reaching it from the host means a real ssh port-forward
+ *  to its unix socket, not a locally-spawned process; `podman machine ssh`
+ *  itself doesn't expose raw ssh flags (no `-L`), so this builds the `ssh`
+ *  invocation directly. */
+async function podmanMachineSshArgs(machine = "podman-machine-default"): Promise<string[]> {
+  const proc = Bun.spawn(["podman", "machine", "inspect", machine], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  if ((await proc.exited) !== 0) {
+    throw new Error(`podman machine inspect ${machine} failed: ${stderr.trim()}`);
+  }
+  const parsed = JSON.parse(stdout) as Array<{
+    SSHConfig?: { Port?: number; RemoteUsername?: string; IdentityPath?: string };
+  }>;
+  const ssh = parsed[0]?.SSHConfig;
+  if (!ssh?.Port || !ssh.RemoteUsername || !ssh.IdentityPath) {
+    throw new Error(`podman machine inspect ${machine}: missing SSHConfig`);
+  }
+  return [
+    "-p", String(ssh.Port),
+    "-i", ssh.IdentityPath,
+    // Without this, ssh-agent's other keys (GitHub, etc.) get offered first
+    // and can exhaust the VM sshd's MaxAuthTries before the real identity is
+    // ever tried ("Too many authentication failures") — force just this one.
+    "-o", "IdentitiesOnly=yes",
+    // The VM is a loopback, single-tenant dev machine recreated on every
+    // `podman machine rm`/`init` — its host key isn't worth pinning.
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    `${ssh.RemoteUsername}@127.0.0.1`,
+  ];
+}
+
 /** Get the quadlet directory (relative to this script). */
 function getQuadletDir(): string {
   return `${import.meta.dir}/quadlet`;
@@ -2702,7 +2744,7 @@ TCP Mode (automatic on macOS):
   reach daemons via host.containers.internal:PORT. On Linux (no VM, plain
   unix sockets work) set DOORS_TCP=1 to force it on anyway if ever needed.
 
-  TCP ports: keeperd=${TCP_PORTS.keeperd}, netd=${TCP_PORTS.netd}, scoutd=${TCP_PORTS.scoutd}
+  TCP ports: keeperd=${TCP_PORTS.keeperd}, netd=${TCP_PORTS.netd}, scoutd=${TCP_PORTS.scoutd}, beadsd=${TCP_PORTS.beadsd}
 
 Examples:
   claude-box doors serve      run daemons on TCP (Ctrl+C to stop)
@@ -2933,15 +2975,15 @@ Examples:
       // Use the current bun executable (works inside nix run)
       const bunPath = process.execPath;
 
-      for (const d of daemons) {
-        const scriptPath = `${scriptDir}/${d.script}`;
-        // Start daemon in TCP mode with --port
-        const proc = Bun.spawn([bunPath, scriptPath, "serve", "--port", String(d.port)], {
+      /** Spawn one daemon process, stream its stdout/stderr with a `[name]`
+       *  prefix, and register it for the shared SIGINT/exit cleanup below. */
+      function startDaemon(name: string, argv: string[], port: number): void {
+        const proc = Bun.spawn(argv, {
           stdout: "pipe",
           stderr: "pipe",
           env: { ...process.env },
         });
-        children.push({ name: d.name, proc });
+        children.push({ name, proc });
 
         // Stream stdout with prefix
         (async () => {
@@ -2952,7 +2994,7 @@ Examples:
             if (done) break;
             const lines = decoder.decode(value).split("\n");
             for (const line of lines) {
-              if (line.trim()) console.log(`[${d.name}] ${line}`);
+              if (line.trim()) console.log(`[${name}] ${line}`);
             }
           }
         })();
@@ -2966,12 +3008,46 @@ Examples:
             if (done) break;
             const lines = decoder.decode(value).split("\n");
             for (const line of lines) {
-              if (line.trim()) console.error(`[${d.name}] ${line}`);
+              if (line.trim()) console.error(`[${name}] ${line}`);
             }
           }
         })();
 
-        console.log(`  ${d.name}: started on port ${d.port} (pid ${proc.pid})`);
+        console.log(`  ${name}: started on port ${port} (pid ${proc.pid})`);
+      }
+
+      for (const d of daemons) {
+        const scriptPath = `${scriptDir}/${d.script}`;
+        startDaemon(d.name, [bunPath, scriptPath, "serve", "--port", String(d.port)], d.port);
+      }
+
+      // beadsd has no macOS-native TCP mode of its own (unlike keeperd/netd/
+      // scoutd) — it only runs inside the VM's Quadlet fleet. Bridge it with a
+      // real ssh port-forward to its unix socket instead of spawning a script.
+      //
+      // The forward target must be the socket's HOST-side path on the VM
+      // filesystem (%h/.claude-box/run/beadsd.sock, the Quadlet bind-mount
+      // SOURCE) — NOT /run/doors/beadsd.sock, which only exists inside the
+      // beadsd container's own mount namespace. ssh's direct-streamlocal
+      // forwarding runs on the bare VM host, so a container-internal path
+      // resolves to nothing there: the local TCP side still accepts the
+      // connection (that part is pure host-local), then the remote connect
+      // fails and ssh resets it — which looks exactly like "connects, then
+      // closes instantly, no matter what's written" from the client. Confirmed
+      // live: the in-box path 404s the forward; the VM-host path works.
+      try {
+        const sshTarget = await podmanMachineSshArgs();
+        const home = (await podmanMachineExec(["printenv", "HOME"])).stdout.trim();
+        if (!home) throw new Error("could not resolve the VM's HOME directory");
+        startDaemon(
+          "beadsd",
+          ["ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+            "-L", `127.0.0.1:${TCP_PORTS.beadsd}:${home}/.claude-box/run/beadsd.sock`,
+            ...sshTarget],
+          TCP_PORTS.beadsd,
+        );
+      } catch (err) {
+        console.error(`  beadsd: not bridged — ${(err as Error).message}`);
       }
 
       console.log("\nAll daemons running on TCP. Press Ctrl+C to stop.");

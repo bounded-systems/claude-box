@@ -1,0 +1,51 @@
+PATHBASED.md
+  s_22a6eff3b99fbe::t_ecc29d04859242 3-8
+  s_22a6eff3b99fbe::t_d49e725658a42c 77-81,88,94-95,97-100,107,109,111-117,124-125
+  s_22a6eff3b99fbe::t_020a808913a0cd 178-226,229-230,234-240
+  s_22a6eff3b99fbe::t_5756a6a621279f 137-138,143,152-153,158-159,164-176
+  s_22a6eff3b99fbe::t_da6b1ed2f3b709 177
+CAPABILITIES.md
+  s_22a6eff3b99fbe::t_3f67fd25ad1edf 299,303,305-307
+claude-box.ts
+  s_22a6eff3b99fbe::t_1f97628f3e8c46 755-762
+  s_22a6eff3b99fbe::t_5022a5825e926e 929-937,939
+  s_22a6eff3b99fbe::t_544ff6087e7531 439-453
+  s_22a6eff3b99fbe::t_bb84f7e60ef9d7 62
+  s_22a6eff3b99fbe::t_5ce8e9a464e880 554-558
+tests/door.test.ts
+  s_22a6eff3b99fbe::t_72db6e896e09b8 170
+tests/pathbase.test.ts
+  s_22a6eff3b99fbe::t_ae1eab5d273014 23,26,32-37
+  s_22a6eff3b99fbe::t_4b94ae800da59e 47-60
+flake.nix
+  s_22a6eff3b99fbe::t_9af975c60f08ab 1221
+  s_22a6eff3b99fbe::t_a5f70629999238 777-861
+contract/capabilities.contract.json
+  s_22a6eff3b99fbe::t_5f0559f1be2439 11
+launcherd-rs/src/doors.rs
+  s_22a6eff3b99fbe::t_ca7ecff245f5a0 99-109
+  s_22a6eff3b99fbe::t_b17429461b1bca 27
+  s_22a6eff3b99fbe::t_97b064b62e36ed 98
+tests/pathbased.test.ts
+  s_22a6eff3b99fbe::t_067a5bb8367549 1-179
+NETD.md
+  s_22a6eff3b99fbe::t_2807d64609f8a0 92-96
+pathbased.ts
+  s_22a6eff3b99fbe::t_f775ddbd5eecf3 1-380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "a69c0fef1730836ea5282a9190de05d04040aa3b",
+  "prompts": {},
+  "sessions": {
+    "s_22a6eff3b99fbe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8d419d0c-c352-435a-9d1f-96c6ad26c62f",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

@@ -53,14 +53,16 @@ const IMAGE = "localhost/claude-personal:dev";
 
 // ── TCP mode ports (for macOS ↔ podman machine) ──────────────────────────────
 // When daemons run on the macOS host with --port, containers reach them via
-// host.containers.internal:PORT. These are the canonical ports for TCP mode.
+// host.containers.internal:PORT. Ports for TCP_PORT_NAMES auto-allocate
+// sequentially from TCP_PORT_BASE, in list order — add a new door by adding
+// its name here, never by picking a literal number. Two PRs picking the same
+// literal port is not hypothetical: pathbased and beadsd both independently
+// claimed 3004 and it surfaced only as a merge conflict, not a test failure.
+const TCP_PORT_BASE = 3001;
+const TCP_PORT_NAMES = ["keeperd", "scoutd", "authd", "pathbased", "beadsd"] as const;
 const TCP_PORTS: Record<string, number> = {
-  keeperd: 3001,
-  netd: 3128,  // HTTP proxy port
-  scoutd: 3002,
-  authd: 3003, // RC credential-broker door (prx-6194)
-  pathbased: 3004, // Pathbase broker door (PATHBASED.md)
-  beadsd: 3005, // beads read/write door — forwarded from the VM, see doors serve
+  ...Object.fromEntries(TCP_PORT_NAMES.map((name, i) => [name, TCP_PORT_BASE + i])),
+  netd: 3128, // HTTP proxy port — fixed by convention, not part of the sequence
 };
 
 // ── Guest catalog ─────────────────────────────────────────────────────────────

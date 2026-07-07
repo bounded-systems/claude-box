@@ -1,0 +1,21 @@
+tests/tcp-ports-unique.test.ts
+  s_ba65769c14892c::t_4a6d71d63806dc 1-20
+claude-box.ts
+  s_ba65769c14892c::t_a8c9325b375c06 56-62,64-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "a8c51223f1f9e6f0d919206a6bc6f23587eb5154",
+  "prompts": {},
+  "sessions": {
+    "s_ba65769c14892c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f0f2dc4e-052a-4105-9d7b-c28b0fa181c5",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Robert DeLanghe <1240090+bdelanghe@users.noreply.github.com>"
+    }
+  }
+}

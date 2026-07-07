@@ -1301,7 +1301,87 @@ type Manifest = {
   /** Spawn depth of THIS box (0 = root). Threaded so the in-box runtime can
    *  increment it on nested spawns and launcherd's maxDepth ceiling holds. */
   depth: number;
+  /** The box's network posture, derived once (see networkPosture) so the
+   *  manifest and the actual podman flags read ONE value and cannot drift. */
+  posture: NetworkPosture;
 };
+
+/** A box's network posture — ONE derived capability, two axes (see
+ *  ADR-NETWORK-POSTURE.md). `egress` is what the box can actually reach;
+ *  `boundary` is HOW that's enforced, so `policed` can't overclaim hard
+ *  isolation when the mechanism is only an advisory proxy. */
+export type NetworkPosture = {
+  /** What the box can reach on the internet, AS ENFORCED (never the intent). */
+  egress: "none" | "policed" | "open";
+  /** How egress is constrained:
+   *  - "route"   — kernel/netns level: no route to a non-granted host exists
+   *                (holds against a MALICIOUS in-box process). unix `--network=none`.
+   *  - "proxy"   — advisory: only HTTPS_PROXY-honoring clients are constrained;
+   *                a raw socket escapes (holds only vs a COOPERATIVE process).
+   *                TCP-mode default network + proxy env — the macOS reality.
+   *  - "ambient" — no constraint at all (`--net-open`, and the #236 hole). */
+  boundary: "route" | "proxy" | "ambient";
+};
+
+/** The ONE derivation of a launch's network posture. Pure; both the manifest
+ *  (`capabilityJson`) and the podman-flag decision (`run()`) read this, so they
+ *  cannot drift — the drift that let a `--keeper`-only TCP box report
+ *  `network: "none"` while actually having full internet egress (#236). Every
+ *  cell reproduces `run()`'s ACTUAL podman behavior (this is a deduplication of
+ *  the decision, not a change to what launches do — see the ADR's truth table).
+ *
+ *  The two axes are orthogonal: `doors` gives DOOR REACHABILITY (host:port for
+ *  each granted daemon); egress is a SEPARATE grant (the net door, or
+ *  `--net-open`). The bug being fixed is that TCP mode's transport granted door
+ *  reachability by handing the box podman's default network, which incidentally
+ *  carries internet NAT — widening egress as a side effect. Here we report that
+ *  reality honestly; real route-level enforcement in TCP mode is the ADR's
+ *  named follow-up. */
+export function networkPosture(launch: Launch, env: Env = process.env): NetworkPosture {
+  if (launch.netOpen) return { egress: "open", boundary: "ambient" };
+  const hasNetDoor = launch.doors.some((d) => d.name === "net");
+  const tcp = isTcpMode(env);
+  if (hasNetDoor) {
+    // Egress via netd. Hard (route) on unix (`--network=none` + socket relay);
+    // advisory (proxy) on TCP (default network + HTTPS_PROXY — a raw socket
+    // escapes netd). See the ADR's "netd is advisory on TCP" finding.
+    return { egress: "policed", boundary: tcp ? "proxy" : "route" };
+  }
+  // No egress grant. On unix (or TCP with zero doors) the box gets
+  // `--network=none` — truly no route. On TCP WITH ≥1 (non-net) door, run()
+  // hands it the default network for door reachability, which is full,
+  // unpoliced internet egress (#236) — reported honestly as open/ambient.
+  if (tcp && launch.doors.length > 0) return { egress: "open", boundary: "ambient" };
+  return { egress: "none", boundary: "route" };
+}
+
+/** Pure: the podman network/proxy argv for a posture — the other half of the
+ *  single source of truth (networkPosture derives it; this enforces it), so the
+ *  manifest and the flags cannot diverge. `proxyUrl` is the egress proxy for the
+ *  "proxy" boundary (the shared netd, or a scoped RC/pathbase netd — the one
+ *  runtime detail run() threads in). The "route" boundary's proxy is always the
+ *  fixed in-box loopback relay (NETD_PROXY); "ambient" gets no proxy at all. */
+export function networkArgv(posture: NetworkPosture, proxyUrl: string): string[] {
+  const proxyEnv = (url: string) => [
+    "--env", `HTTPS_PROXY=${url}`,
+    "--env", `HTTP_PROXY=${url}`,
+    "--env", `ALL_PROXY=${url}`,
+    "--env", "NO_PROXY=localhost,127.0.0.1",
+  ];
+  switch (posture.boundary) {
+    case "route":
+      // Hard isolation: no NIC. Egress (if policed) rides the mounted netd
+      // socket via the in-box loopback relay at NETD_PROXY.
+      return ["--network=none", ...(posture.egress === "policed" ? proxyEnv(NETD_PROXY) : [])];
+    case "proxy":
+      // Default network (for host.containers.internal door reachability) +
+      // advisory HTTPS_PROXY → netd.
+      return proxyEnv(proxyUrl);
+    case "ambient":
+      // Open egress, no proxy nudge.
+      return [];
+  }
+}
 
 /** The honest surface for THIS launch: what's granted AND what's denied. Built
  *  from the actual grants, so it cannot drift from reality. `--net-open` opens
@@ -1317,22 +1397,27 @@ function buildManifest(
   // denial — the manifest must not claim there's no network when there is.
   const suppress = launch.netOpen ? new Set(["net"]) : new Set<string>();
   const denied = deniedDoors(knownDoors(env), granted, suppress);
-  return { guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied, depth };
+  return { guest: launch.guest, repo: launch.repo, repoRw: launch.repoRw, repoEphemeral: launch.repoEphemeral, repoClone: launch.repoClone ?? false, repoOrigin: launch.repoOrigin, writable: launch.writable ?? [], doors: launch.doors, netOpen: launch.netOpen, denied, depth, posture: networkPosture(launch, env) };
 }
 
 /** Machine-readable manifest (exported into the box as $CLAUDE_BOX_CAPABILITIES)
  *  — the surface the in-box runtime (prx) will gate its tools on. */
 function capabilityJson(m: Manifest): string {
-  const netDoor = m.doors.some((d) => d.name === "net");
   return JSON.stringify({
     workcell: "claude-box",
     guest: m.guest,
     // Spawn depth of this box (0 = root). lib/spawn.ts reads this to increment
     // the child's depth so launcherd's maxDepth ceiling holds across nesting.
     depth: m.depth,
-    // Network posture is explicit: policed (netd door), open (unsafe escape), or
-    // none (--network=none, the default). Egress is a capability, not ambient.
-    network: m.netOpen ? "open" : netDoor ? "policed" : "none",
+    // Network posture, from the ONE derivation (networkPosture) that also drives
+    // run()'s podman flags — so this reports what is actually ENFORCED, never a
+    // symbolic intent that drifts from it (ADR-NETWORK-POSTURE.md / #236).
+    //   network: none | policed | open  (what the box can reach)
+    network: m.posture.egress,
+    //   networkBoundary: route | proxy | ambient  (HOW — so "policed" can't
+    //   overclaim: "proxy" is advisory-only, a raw socket escapes it; "route"
+    //   is a real kernel-level boundary. On macOS/TCP mode netd is "proxy".)
+    networkBoundary: m.posture.boundary,
     granted: {
       config: true,
       repo: m.repo ?? null,
@@ -1842,7 +1927,8 @@ async function run(
   // bridges 127.0.0.1:3128 → the netd socket. This provides hard network
   // isolation but doesn't work over virtiofs (macOS ↔ podman machine).
   const tcpMode = isTcpMode(env);
-  const netDoor = doors.find((d) => d.name === "net");
+  // Egress/network flags now derive from manifest.posture (networkPosture +
+  // networkArgv), not an ad-hoc netDoor check here — see the network block below.
 
   // The git-pull door is SEPARATE from the guest's egress: a per-launch netd
   // scoped to ONLY the origin host (never anthropic), used SOLELY for the clone.
@@ -1890,42 +1976,29 @@ async function run(
     );
   }
 
-  if (netOpen) {
+  // Network flags derive from the SAME posture the manifest reports
+  // (networkPosture / ADR-NETWORK-POSTURE.md) — one source of truth, so what the
+  // box is TOLD (capabilityJson.network) is exactly what it gets. networkArgv()
+  // is the pure posture→podman-flags map (tested against the truth table); the
+  // scoped-netd proxy URL (RC/pathbase) is the one runtime detail threaded in.
+  argv.push(
+    ...networkArgv(
+      manifest.posture,
+      scopedNetd ? `http://host.containers.internal:${scopedNetd.port}` : NETD_TCP_PROXY,
+    ),
+  );
+  // Surface an open box at the launch site — deliberate (--net-open) or the #236
+  // hole (a TCP box with a non-net door inherits the default network's full NAT
+  // as a side effect of door reachability). An unasked-for open box is exactly
+  // what the operator must not learn about only by reading the manifest JSON.
+  if (manifest.posture.boundary === "ambient") {
     console.error(
-      "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)",
+      netOpen
+        ? "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)"
+        : "claude-box: WARNING — this box has OPEN, unpoliced internet egress despite\n" +
+            "  holding no --net door: on macOS (TCP mode) a non-net door still gets the\n" +
+            "  default network's full NAT (issue #236). Egress is NOT restricted to netd.",
     );
-  } else if (tcpMode && doors.length > 0) {
-    // TCP mode: use default network so container can reach host.containers.internal
-    // netd's allowlist is the security boundary (HTTPS_PROXY → netd). For an RC
-    // launch, point at its OWN scoped netd (wider allowlist) instead of the shared.
-    if (netDoor) {
-      const proxy = scopedNetd ? `http://host.containers.internal:${scopedNetd.port}` : NETD_TCP_PROXY;
-      argv.push(
-        "--env",
-        `HTTPS_PROXY=${proxy}`,
-        "--env",
-        `HTTP_PROXY=${proxy}`,
-        "--env",
-        `ALL_PROXY=${proxy}`,
-        "--env",
-        "NO_PROXY=localhost,127.0.0.1",
-      );
-    }
-  } else {
-    // Unix socket mode: hard network isolation, relay via mounted socket
-    argv.push("--network=none");
-    if (netDoor) {
-      argv.push(
-        "--env",
-        `HTTPS_PROXY=${NETD_PROXY}`,
-        "--env",
-        `HTTP_PROXY=${NETD_PROXY}`,
-        "--env",
-        `ALL_PROXY=${NETD_PROXY}`,
-        "--env",
-        "NO_PROXY=localhost,127.0.0.1",
-      );
-    }
   }
 
   // Forward doors: preflight (side effects: existence / reachability / hijack

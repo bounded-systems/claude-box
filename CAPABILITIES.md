@@ -66,6 +66,20 @@ egress) exists only as a loud, explicit fallback for when no netd is running.
 netd's contract — socket protocol, default allowlist, no-MITM destination
 gating, audit log — is [NETD.md](./NETD.md).
 
+> **Transport caveat (macOS / TCP mode).** The `--network=none` hard boundary
+> above is the **unix-socket** transport (Linux / native hosts). On macOS,
+> virtiofs can't share a unix socket across the host↔podman-machine boundary, so
+> doors run on TCP ports and the box uses podman's **default network** to reach
+> them — which carries full internet NAT. There, netd is enforced only as an
+> **advisory `HTTPS_PROXY`** (a raw socket escapes it), and — until the fix in
+> [ADR-NETWORK-POSTURE.md](./ADR-NETWORK-POSTURE.md)'s follow-up lands — a box
+> holding a **non-`net` door still gets open egress** as a side effect of door
+> reachability ([#236](https://github.com/bounded-systems/claude-box/issues/236)).
+> The manifest reports this honestly: `capabilityJson` emits a `networkBoundary`
+> of `route` (hard), `proxy` (advisory), or `ambient` (open) alongside
+> `network`, from the single `networkPosture()` derivation that also sets the
+> podman flags — so what the box is told always matches what it gets.
+
 **One primitive, named presets.** A *door* is the whole capability mechanism: a
 single `(name, socket)` pair. `--keeper` / `--beads` are just **named presets**
 over the generic `--door` — canonical in-box path + a rulebook — and any other

@@ -774,6 +774,91 @@
               };
             };
 
+          # pathbased-image — the Pathbase broker daemon as a container
+          # (PATHBASED.md). Unlike keeperd/netd/scoutd it holds NO signing key
+          # or read token of its own — its "credential" is whatever Pathbase
+          # session the operator's own `path auth login` leaves under
+          # $HOME/.toolpath, mounted in from a volume the operator seeds
+          # out-of-band (same custody shape as keeperd's SSH key volume).
+          # Reuses the SAME pinned `toolpath` derivation the box toolchain
+          # ships (see toolpathAssets above) — one pin, two consumers.
+          #   nix build .#pathbased-image && podman load -i result
+          #   podman run -v doors:/run/doors -v pathbase-session:/app/.toolpath pathbased
+          # Unlike scoutd (which proxies its OWN egress through scout-netd),
+          # pathbased needs ORDINARY, direct egress to pathbase.dev to do its
+          # job at all — it's the credential-holding broker itself, the same
+          # posture keeperd has reaching GitHub with a real SSH key. No
+          # --network=none here; that's a box's posture, not a broker's.
+          pathbased-image =
+            let
+              pathbasedTools = with pkgs; [
+                bun
+                toolpath
+                cacert
+                coreutils
+                bashInteractive
+              ];
+
+              pathbasedEnv = pkgs.buildEnv {
+                name = "pathbased-image-root";
+                paths = pathbasedTools;
+                pathsToLink = [ "/bin" "/etc" "/share" "/lib" ];
+              };
+
+              pathbasedSrc = pkgs.runCommand "pathbased-src" {} ''
+                mkdir -p $out/app/lib $out/app/guest-room
+                cp ${./pathbased.ts} $out/app/pathbased.ts
+                cp ${./lib/runtime.ts} $out/app/lib/runtime.ts
+                cp ${./guest-room/mod.ts} $out/app/guest-room/mod.ts
+                cp ${./guest-room/daemon.ts} $out/app/guest-room/daemon.ts
+                cp ${./guest-room/protocol.ts} $out/app/guest-room/protocol.ts
+              '';
+
+              pathbasedEntrypoint = pkgs.writeShellScript "pathbased-entrypoint" ''
+                exec bun /app/pathbased.ts serve --socket /run/doors/pathbased.sock "$@"
+              '';
+            in
+            pkgs.dockerTools.buildLayeredImage {
+              name = "pathbased";
+              tag = "dev";
+
+              contents = [ pathbasedEnv pathbasedSrc ];
+
+              extraCommands = ''
+                mkdir -p etc tmp run/doors
+                chmod 1777 tmp
+                cat > etc/passwd <<EOF
+                root:x:0:0:root:/root:/bin/bash
+                pathbase:x:${toString uid}:${toString uid}:pathbase:/app:/bin/bash
+                EOF
+                cat > etc/group <<EOF
+                root:x:0:
+                pathbase:x:${toString uid}:
+                EOF
+              '';
+
+              fakeRootCommands = ''
+                mkdir -p app/.toolpath
+                chown -R ${toString uid}:${toString uid} run/doors app/.toolpath
+              '';
+
+              config = {
+                Entrypoint = [ "${pathbasedEntrypoint}" ];
+                WorkingDir = "/app";
+                User = "pathbase";
+                Env = [
+                  "HOME=/app"
+                  "PATH=/bin"
+                  "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                  "LANG=C.UTF-8"
+                ];
+                Volumes = {
+                  "/run/doors" = {};
+                  "/app/.toolpath" = {};
+                };
+              };
+            };
+
           # launcherd-image — the launch-controller daemon as a container.
           # Unlike keeperd/netd/scoutd, launcherd needs to reach the HOST's
           # container runtime (it shells out to `podman run`/`inspect`/`kill`
@@ -1133,6 +1218,7 @@
             keeperd-image = self.packages.aarch64-linux.keeperd-image;
             netd-image = self.packages.aarch64-linux.netd-image;
             scoutd-image = self.packages.aarch64-linux.scoutd-image;
+            pathbased-image = self.packages.aarch64-linux.pathbased-image;
             launcherd-image = self.packages.aarch64-linux.launcherd-image;
             authd-image = self.packages.aarch64-linux.authd-image;
             claude-box-bundle = self.packages.aarch64-linux.claude-box-bundle;

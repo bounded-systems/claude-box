@@ -8,6 +8,7 @@
     { "name": "scout", "socket": "scoutd.sock", "env": "SCOUTD_SOCK", "mountable": true, "bootRequired": true },
     { "name": "auth", "socket": "authd.sock", "env": "AUTHD_SOCK", "mountable": true, "bootRequired": true },
     { "name": "beads", "socket": "beadsd.sock", "env": "BEADSD_SOCK", "mountable": true, "bootRequired": false, "interface": "beadsd@0.1.0" },
+    { "name": "pathbase", "socket": "pathbased.sock", "env": "PATHBASED_SOCK", "mountable": true, "bootRequired": false },
     { "name": "launcher", "socket": "launcherd.sock", "env": "LAUNCHERD_SOCK", "mountable": false, "bootRequired": false },
     { "name": "dispatch", "socket": "dispatch.sock", "env": "DISPATCH_SOCK", "mountable": false, "bootRequired": false }
   ],

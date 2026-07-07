@@ -59,6 +59,7 @@ const TCP_PORTS: Record<string, number> = {
   netd: 3128,  // HTTP proxy port
   scoutd: 3002,
   authd: 3003, // RC credential-broker door (prx-6194)
+  pathbased: 3004, // Pathbase broker door (PATHBASED.md)
 };
 
 // ── Guest catalog ─────────────────────────────────────────────────────────────
@@ -435,6 +436,21 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       use: "Send exactly {room, label} to /run/doors/dispatch.sock ($DISPATCH_SOCK), one JSON line at a time: {\"id\":\"1\",\"method\":\"dispatch\",\"params\":{\"room\":\"dev\",\"label\":\"fix-auth-bug\"}}. `room` must be one of launcherd's dispatchable rooms (ask via a normal launcherd `rooms` call if unsure, or default to \"dev\"/\"readonly\"/\"offline\"). You will NEVER see, attach to, or manage what comes back — a new, independently-credentialed remote-control session appears as its OWN entry in the Claude app's session list, named for `label`. One task, one box: dispatch a fresh one per task rather than trying to reuse one.",
       deny: "No dispatch authority in this box. Do not attempt to request sub-sessions or claim one was started; relaunch with --remote-serve (which grants this automatically) if the task needs it.",
     },
+    // The Pathbase door (PATHBASED.md) — a keeperd-shaped broker, not an
+    // egress grant: pathbased execs the OPERATOR's own already-authenticated
+    // `path` binary host-side and relays the result. The box asks for
+    // whoami/export/import; it never holds a Pathbase session token, and
+    // (unlike --pathbase's netd-gated fallback) never needs to reach
+    // pathbase.dev itself at all.
+    pathbase: {
+      flag: "--pathbase",
+      inBox: "/run/doors/pathbased.sock",
+      env: "PATHBASED_SOCK",
+      hostDefault: env.PATHBASED_SOCK ?? defaultHostSock("pathbased", env),
+      grants: "toolpath provenance export/import via pathbased (you hold no Pathbase token)",
+      use: "Route `path p export pathbase` / `path p import pathbase` through pathbased at /run/doors/pathbased.sock ($PATHBASED_SOCK) — send {method:'whoami'|'export'|'import', params:...}. You hold NO Pathbase session; request the effect and pathbased performs it host-side. Local git/agent-log provenance (`path p import git`, `render md|dot`) needs no door at all and always works.",
+      deny: "No Pathbase door in this box. `path auth login`/`export`/`import` will fail — there is no session to use here. Local provenance (`path p import git`) still works unconditionally; relaunch with --pathbase if Pathbase push/pull is needed.",
+    },
   };
 }
 
@@ -535,10 +551,11 @@ const HELP = `claude-box [flags…] [-- guest-args…] — pinned, isolated work
   --remote-serve      boot straight into RC SERVER mode: entrypoint becomes
                       'claude remote-control', so the box is a headless RC server
                       (no manual /remote-control). Same posture as --remote-control.
-  --pathbase          opt-in: let toolpath ('path') reach Pathbase (implies --net;
-                      routed through its own scoped netd allowlisting pathbase.dev —
-                      never the shared netd; local git/agent-log provenance needs
-                      no egress at all and works without this flag)
+  --pathbase          opt-in: let toolpath ('path') reach Pathbase. Mounts the
+                      pathbased broker door (you hold no Pathbase token — see
+                      PATHBASED.md) AND a scoped netd fallback allowlisting
+                      pathbase.dev, never the shared netd; local git/agent-log
+                      provenance needs no egress at all and works without this flag
   --pod               run the box + its netd door in an isolated pod (off-host)
   --keeper            forward the keeperd door (signed git writes)
   --beads             forward the beadsd door (beads reads/writes)
@@ -735,12 +752,14 @@ type Launch = {
    *  prx-6194 (authd). claude guest only. See prx-v9wn. */
   remoteServe: boolean;
   /** --pathbase: opt-in profile to let toolpath (`path`) talk to Pathbase
-   *  (session push/pull, `path auth login`). Implies the net door, routed
-   *  through its OWN scoped netd allowlisting pathbase.dev on top of the
-   *  default anthropic hosts (pathbaseEgressAllow) — never the shared netd,
-   *  and never folded into a default profile (GH-6: it's a write-capable
-   *  host). Any guest may set this, not just claude — toolpath runs under
-   *  tool guests too. */
+   *  (session push/pull, `path auth login`). Mounts BOTH avenues: (1) the
+   *  `pathbase` door (pathbased.ts) — a zero-knowledge broker, the box holds
+   *  no Pathbase token at all, see PATHBASED.md; (2) the net door + its OWN
+   *  scoped netd allowlisting pathbase.dev on top of the default anthropic
+   *  hosts (pathbaseEgressAllow) — the direct fallback for an operator
+   *  without pathbased running. Neither is folded into a default profile
+   *  (GH-6: pathbase.dev is a write-capable host). Any guest may set this,
+   *  not just claude — toolpath runs under tool guests too. */
   pathbase: boolean;
   guestArgs: string[];  // renamed: args passed to the guest (claude or tool)
 };
@@ -907,10 +926,17 @@ function planLaunch(tail: string[], env: Env = process.env): Launch {
       continue;
     }
     if (t === "--pathbase") {
-      // Opt-in: let toolpath reach Pathbase. Imply the net door (Map dedupes
-      // if --net is also given) — the actual host widening happens via
-      // pathbaseEgressAllow's OWN scoped netd, same shape as --remote-control.
+      // Opt-in: let toolpath reach Pathbase. Mounts BOTH avenues rather than
+      // probing which is live at plan time (planLaunch stays sync/pure, and
+      // every other profile in this file mounts unconditionally too — RC
+      // mounts the auth door whether or not authd is actually running):
+      //   1. the pathbase door (pathbased.ts) — zero-knowledge broker, PREFER
+      //      this once pathbased is deployed (PATHBASED.md).
+      //   2. the net door + pathbaseEgressAllow's scoped netd — the direct,
+      //      netd-gated fallback for an operator without pathbased running.
+      // Map dedupes if --net is also given.
       pathbase = true;
+      add(resolveDoor("pathbase", undefined, env));
       add(resolveDoor("net", undefined, env));
       continue;
     }

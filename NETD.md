@@ -89,10 +89,11 @@ own extra hosts, reached over the host gateway in TCP mode. See
 CAPABILITIES.md's "`--remote-control` profile" / "`--pathbase` profile"
 sections.
 
-`--pathbase`'s netd-gated egress is itself an interim posture: PATHBASED.md
-designs a keeperd-style broker (`pathbased`) that removes the box's need to
-reach `pathbase.dev` at all — the box asks the door, the door (host-side)
-performs the export/import. Not yet built.
+`--pathbase`'s netd-gated egress is a fallback, not the only path: PATHBASED.md
+(implemented) built a keeperd-style broker (`pathbased`) that removes the
+box's need to reach `pathbase.dev` at all — the box asks the door, the door
+(host-side) performs the export/import. `--pathbase` mounts both; `--door
+pathbase` alone gets the broker with no netd widening.
 
 `--net-open` bypasses netd entirely (full ambient egress) — the loud, explicit,
 **unsafe** escape hatch, for when no netd is running.

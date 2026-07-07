@@ -167,7 +167,7 @@ test("a no-grant box still names its denials (knows what it cannot do)", () => {
   const m = buildManifest(planLaunch([], EMPTY), EMPTY);
   expect(m.doors).toEqual([]);
   expect(m.denied.map((d) => d.name).sort()).toEqual([
-    "auth", "beads", "dispatch", "keeper", "launcher", "net", "scout",
+    "auth", "beads", "dispatch", "keeper", "launcher", "net", "pathbase", "scout",
   ]);
 });
 

@@ -24,6 +24,7 @@ const DOORS: &[(&str, &str, &str, bool)] = &[
     ("scout", "scoutd.sock", "SCOUTD_SOCK", true),
     ("auth", "authd.sock", "AUTHD_SOCK", true),
     ("beads", "beadsd.sock", "BEADSD_SOCK", false),
+    ("pathbase", "pathbased.sock", "PATHBASED_SOCK", false),
 ];
 
 /// Resolve one door name against a host doors directory. `None` if the name
@@ -92,6 +93,18 @@ mod tests {
         assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/beadsd.sock");
         assert_eq!(d.in_box.to_string(), "/run/doors/beadsd.sock");
         assert_eq!(d.env, "BEADSD_SOCK");
+    }
+
+    #[test]
+    fn resolves_pathbase_door() {
+        // The pathbase door (pathbased) — the Pathbase broker (PATHBASED.md).
+        // Opt-in only (--pathbase), so not boot-required.
+        let d = resolve("/var/home/core/.claude-box/run", "pathbase").unwrap();
+        assert_eq!(d.host.to_string(), "/var/home/core/.claude-box/run/pathbased.sock");
+        assert_eq!(d.in_box.to_string(), "/run/doors/pathbased.sock");
+        assert_eq!(d.env, "PATHBASED_SOCK");
+        let boot: Vec<String> = boot_required("/d").iter().map(|d| d.name.clone()).collect();
+        assert!(!boot.contains(&"pathbase".to_string()), "pathbase must not gate boot");
     }
 
     #[test]

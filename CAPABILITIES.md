@@ -296,14 +296,15 @@ than one applies to a launch (`scopedAllow` in `claude-box.ts`'s `run()`), so
 a launch that somehow combined them would still get every host either one
 needs — never silently lose one to the other.
 
-This netd-gated design is the shipping interim state, not the ceiling: unlike
+This netd-gated design was the shipping interim state; unlike
 `--remote-control` (which *must* hold some credential in the box — Remote
 Control is a live session, not a discrete effect), every Pathbase interaction
 (`login`/`whoami`/`export`/`import`) is discrete, exactly like a git push —
-so a keeperd-style broker can achieve **zero-knowledge brokering** (the box
+so a keeperd-style broker achieves **zero-knowledge brokering** (the box
 holds no token at all, not even a short-lived one). See
-[PATHBASED.md](PATHBASED.md) (design only, not yet built) for that hardening
-move.
+[PATHBASED.md](PATHBASED.md) — **implemented**: `--pathbase` now mounts the
+`pathbased` broker door alongside the netd fallback above, and `--door
+pathbase` alone gets the zero-egress ideal (broker only, no netd widening).
 
 ## Why this matters
 

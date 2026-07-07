@@ -20,20 +20,41 @@ describe("--pathbase: planLaunch", () => {
     expect(planLaunch(["--remote-control"], EMPTY).pathbase).toBe(false);
   });
 
-  test("implies the net door", () => {
+  test("implies both the net door AND the pathbase broker door", () => {
     const doors = planLaunch(["--pathbase"], EMPTY).doors;
     expect(doors.some((d) => d.name === "net")).toBe(true);
+    expect(doors.some((d) => d.name === "pathbase")).toBe(true);
   });
 
   test("composes with an explicit --net without doubling the door", () => {
     const doors = planLaunch(["--net", "--pathbase"], EMPTY).doors;
     expect(doors.filter((d) => d.name === "net").length).toBe(1);
+    expect(doors.filter((d) => d.name === "pathbase").length).toBe(1);
+  });
+
+  test("a default launch has no pathbase door and it is named among the denials", () => {
+    const doors = planLaunch([], EMPTY).doors;
+    expect(doors.some((d) => d.name === "pathbase")).toBe(false);
   });
 
   test("does not consume the next token as an argument", () => {
     const launch = planLaunch(["--pathbase", "--repo", "."], EMPTY);
     expect(launch.pathbase).toBe(true);
     expect(launch.repo).toBe(".");
+  });
+});
+
+describe("--door pathbase: the zero-egress path (broker only, no netd widening)", () => {
+  test("mounts the pathbase door WITHOUT implying the net door or setting the pathbase flag", () => {
+    const launch = planLaunch(["--door", "pathbase"], EMPTY);
+    expect(launch.pathbase).toBe(false); // only the --pathbase sugar flag sets this
+    expect(launch.doors.some((d) => d.name === "pathbase")).toBe(true);
+    expect(launch.doors.some((d) => d.name === "net")).toBe(false);
+  });
+
+  test("pathbaseEgressAllow stays [] — the box gets the broker with zero egress of its own", () => {
+    const launch = planLaunch(["--door", "pathbase"], EMPTY);
+    expect(pathbaseEgressAllow(launch)).toEqual([]);
   });
 });
 

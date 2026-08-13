@@ -25,6 +25,34 @@ clients at it.
   host:443` for HTTPS (the common case), absolute-URI `GET http://…` for plain
   HTTP. So netd is just "an HTTP forward proxy listening on a unix socket."
 
+### `claude` in that diagram includes WebFetch (verified)
+
+`git` and `curl` honoring `HTTPS_PROXY` is uncontroversial; **Claude Code's
+built-in `WebFetch` tool** was the open question (#199), because it is the one
+tool whose network calls don't shell out to a subprocess netd could intercept.
+Answer: **WebFetch issues a `CONNECT` through `HTTPS_PROXY` and has no direct
+fallback** — so it is inside the door, not beside it.
+
+Measured behaviorally (not inferred from strings in the binary), by pointing
+`HTTPS_PROXY` at a local proxy that logs every request:
+
+| `HTTPS_PROXY` points at | Proxy log | WebFetch result |
+|---|---|---|
+| a proxy that logs, then refuses | `CONNECT example.com:443` | fails — `Socket is closed` |
+| nothing (`127.0.0.1:1`) | — | fails — `connect ECONNREFUSED 127.0.0.1:1` |
+| a proxy that logs, then tunnels | `CONNECT raw.githubusercontent.com:443` | **succeeds** |
+
+The middle row is the load-bearing one: with the proxy unreachable WebFetch
+**fails** rather than falling back to a direct connection, which is what would
+have made it an egress bypass. Note the env var must be set in **both** cases —
+some clients read lowercase `https_proxy` first, and overriding only the
+uppercase name silently leaves the original proxy in effect.
+
+Caveat, in the spirit of `docs/agentic-code-hygiene.md` rule 3: this was
+measured on **claude-code 2.1.231**, while `flake.nix` pins **2.1.198**. The
+proxy path is not a documented API, so a version bump could change it; re-run
+the three rows above if a bump ever needs to be trusted here.
+
 ## The contract
 
 1. **Transport.** A stream (`AF_UNIX`, `SOCK_STREAM`) socket carrying the HTTP

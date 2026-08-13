@@ -20,6 +20,8 @@ import {
   sha256,
   loadOrCreateKey,
   buildL2Attestation,
+  __seedLaunch,
+  __clearLaunches,
 } from "../launcherd";
 import type { RequestEnvelope, ResponseEnvelope, SigningKey } from "../launcherd";
 import { PREDICATE_TYPE, IN_TOTO_STATEMENT_TYPE } from "../contract/types";
@@ -178,12 +180,38 @@ describe("launcherd", () => {
       expect(result.rooms.bootstrap.netOpen).toBe(true);
     });
 
+    // Asserts EMPTY, not merely "is an array" — the weaker assertion is what let
+    // claude-box#252 through: another file's seeded records leaked into `launches`
+    // and this test still passed, while `status`/`list` were already crashing on
+    // them. Empty is also what the test name has always claimed.
     test("list returns empty when no launches", async () => {
       const resp = await handleRequest(JSON.stringify({ id: "test-3", method: "list" }));
       expect(resp.ok).toBe(true);
 
       const result = resp.result as { launches: unknown[] };
       expect(Array.isArray(result.launches)).toBe(true);
+      expect(result.launches).toHaveLength(0);
+    });
+
+    // The order-independent half of the claude-box#252 guard. The assertion
+    // above only catches a leak if bun happens to run the leaking file first,
+    // which is not a property any test can rely on; this one reproduces the
+    // leak deliberately and pins the seam that undoes it.
+    test("a seeded record is visible to list, and __clearLaunches removes it", async () => {
+      const read = async () => {
+        const resp = await handleRequest(JSON.stringify({ id: "seam", method: "list" }));
+        expect(resp.ok).toBe(true);
+        return (resp.result as { launches: unknown[] }).launches;
+      };
+
+      __seedLaunch({
+        launchId: "L-seam", pid: 1, startedAt: new Date(), doors: [], depth: 1,
+        proc: { exitCode: null },
+      } as unknown as Parameters<typeof __seedLaunch>[0]);
+      expect(await read()).toHaveLength(1);
+
+      __clearLaunches();
+      expect(await read()).toHaveLength(0);
     });
 
     test("kill fails for nonexistent launch", async () => {

@@ -614,6 +614,15 @@ function __seedLaunch(rec: LaunchRecord): void {
   launches.set(rec.launchId, rec);
 }
 
+/** Test seam: drop every seeded record. `launches` is module state and bun runs
+ *  the whole suite in ONE process, so a file that seeds and never clears leaks
+ *  its records into every file that runs after it — and which file that is comes
+ *  down to bun's ordering, not to anything the tests declare. Pair every
+ *  __seedLaunch with this (cf. __clearCallerContainerId, __resetDispatchLimits). */
+function __clearLaunches(): void {
+  launches.clear();
+}
+
 // Test seam for the caller cgroup read (real /proc isn't available for fake pids).
 let __testCallerCid: { set: boolean; value: string | undefined } = { set: false, value: undefined };
 function __setCallerContainerId(value: string | undefined): void { __testCallerCid = { set: true, value }; }
@@ -1515,6 +1524,7 @@ export {
   containerIdFromCgroup,
   resolveLaunchDoors,
   __seedLaunch,
+  __clearLaunches,
   __setCallerContainerId,
   __clearCallerContainerId,
   __resetDispatchLimits,

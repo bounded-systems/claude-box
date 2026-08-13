@@ -23,6 +23,7 @@ import {
 } from "../launcherd";
 import type { RequestEnvelope, ResponseEnvelope, SigningKey } from "../launcherd";
 import { PREDICATE_TYPE, IN_TOTO_STATEMENT_TYPE } from "../contract/types";
+import { capabilityPrompt, buildManifest, planLaunch } from "../claude-box";
 import type { Launch, Manifest } from "../claude-box";
 
 describe("launcherd", () => {
@@ -645,6 +646,34 @@ describe("caller-based policy (SO_PEERCRED)", () => {
       ]);
       expect(typeof argv[cIdx + 1]).toBe("string");
       expect((argv[cIdx + 1] as string).length).toBeGreaterThan(0);
+    });
+
+    test("the dispatched session is told its doors too — as user memory, not a flag (#193)", async () => {
+      // An ordinary launch gets the rulebook on the command line. RC server
+      // mode has no --append-system-prompt, so the same manifest has to reach
+      // the guest as $CLAUDE_CONFIG_DIR/CLAUDE.md instead — a dispatched
+      // session is no less entitled to know what it holds.
+      // Built by the real planner, not hand-rolled: the rulebook's whole claim
+      // is that it is generated from the actual mounts.
+      const withDoors = buildManifest(
+        planLaunch(["--keeper"], { HOME: "/tmp" }),
+        { HOME: "/tmp" },
+      );
+      const argv = await buildPodmanArgv(launch, withDoors, "box-fix-auth-bug-abc123", {
+        leaseCmd: "echo lease",
+        remoteControlArgs: ["remote-control", "--spawn", "session"],
+      });
+      const script = argv[argv.indexOf("-c") + 1] as string;
+      expect(script).toContain('d+"/CLAUDE.md"');
+      // Base64-carried, so the door text itself never appears raw in the shell.
+      const payload = script.match(/Buffer\.from\("([^"]*)","base64"\)/)?.[1];
+      expect(payload).toBeTruthy();
+      const decoded = Buffer.from(payload!, "base64").toString("utf-8");
+      expect(decoded).toContain("GRANTED:");
+      expect(decoded).toContain("keeper: signed git writes");
+      expect(decoded).toBe(capabilityPrompt(withDoors));
+      // Written before claude starts reading memory.
+      expect(script.indexOf("CLAUDE.md")).toBeLessThan(script.indexOf("exec claude"));
     });
   });
 });

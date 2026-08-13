@@ -1233,19 +1233,78 @@ export function authLeaseFromEnvCmd(envVar: string): string {
   );
 }
 
+/** In-box `bun -e` one-liner: install the capability rulebook
+ *  (capabilityPrompt) as the box's USER memory file, $CLAUDE_CONFIG_DIR/CLAUDE.md.
+ *
+ *  This is how a `claude remote-control` guest learns its doors AT ALL. Every
+ *  other launch mode hands the rulebook over on the command line
+ *  (`--append-system-prompt capabilityPrompt(manifest)`), but RC server mode has
+ *  no equivalent flag — see lib/remote-control-flags.ts for its whole surface —
+ *  so a bastion used to run for hours or days as the ONLY guest never told what
+ *  it holds (#193, confirmed live: asked for its capabilities, it recited
+ *  Claude Code's generic tool list and never mentioned the door model). A file
+ *  reaches it without needing a flag: `claude` reads user memory itself, every
+ *  session, whatever the cwd, and `userSettings` is an on-by-default source.
+ *
+ *  It goes in the CONFIG dir, NOT the workspace, because when a repo is mounted
+ *  the RC cwd IS the user's real worktree (/work) — a project CLAUDE.md dropped
+ *  there would litter the host repo with an untracked file it never asked for.
+ *
+ *  Written truncating on EVERY boot, so it always describes THIS launch. The
+ *  config dir is a throwaway tmpfs for run()'s and launcherd's bastions, but a
+ *  persistent named volume for the Quadlet one (quadlet/bastion-run.sh), where
+ *  a rulebook left behind by a launch with different doors would be an actively
+ *  false claim of authority — worse than saying nothing.
+ *
+ *  The rulebook is passed base64-encoded. It is manifest-derived text (repo
+ *  paths, door caveats, deny strings) carrying quotes and newlines, and it is
+ *  being interpolated into a shell script; base64's alphabet has no shell
+ *  metacharacter, so the encoded form is inert inside single quotes. Decoded by
+ *  `bun` — which this script already depends on — rather than `base64`, which
+ *  the image is not guaranteed to carry.
+ *
+ *  The explicit try/catch + process.exit(1) is load-bearing, not defensive
+ *  habit: `bun -e` exits 0 on an UNCAUGHT synchronous fs error (verified on bun
+ *  1.3.11 — `fs.mkdirSync`/`fs.writeFileSync` failing with EEXIST/ENOTDIR both
+ *  yield status 0, while a plain `throw` correctly yields 1). Callers chain this
+ *  fragment with `&&` so a bastion cannot boot without its rulebook, and without
+ *  the explicit exit that `&&` would be inert — the launch would proceed exactly
+ *  as uninformed as #193 described, with nothing to show for it. */
+export function capabilityMemoryCmd(rulebook: string): string {
+  const b64 = Buffer.from(rulebook, "utf-8").toString("base64");
+  return (
+    `bun -e '` +
+    `const fs=require("fs"),d=process.env.CLAUDE_CONFIG_DIR;` +
+    `try{fs.mkdirSync(d,{recursive:true});` +
+    `fs.writeFileSync(d+"/CLAUDE.md",Buffer.from("${b64}","base64").toString("utf-8"))}` +
+    `catch(e){console.error("claude-box: could not install the capability rulebook: "+e);process.exit(1)}'`
+  );
+}
+
 /** The shell script that boots ANY box (the --remote-serve bastion, or a
  *  dispatched task session launched via launcherd's `dispatch` RPC) into a
  *  real, credentialed `claude remote-control` session: mkdir the workspace
  *  if nothing else already mounted one, lease the RC credential (and keep
  *  re-leasing it every 10 minutes for as long as the box stays up), pre-seed
- *  that workspace's trust-dialog acceptance, then exec claude with "$@" —
- *  the remote-control argv passed as this script's own positional params by
- *  the caller (never string-interpolated). Shared by claude-box.ts's own
- *  `run()` and launcherd.ts's `handleDispatch` so the two never drift. */
+ *  that workspace's trust-dialog acceptance, install the capability rulebook,
+ *  then exec claude with "$@" — the remote-control argv passed as this
+ *  script's own positional params by the caller (never string-interpolated).
+ *  Shared by claude-box.ts's own `run()` and launcherd.ts's `handleDispatch`
+ *  so the two never drift. */
 export function buildRemoteServeScript(opts: {
   repo?: string;
   rcWorkspace: string;
   leaseCmd: string;
+  /** The capability rulebook for THIS launch — `capabilityPrompt(manifest)`.
+   *  Installed as user memory by capabilityMemoryCmd, since RC server mode
+   *  cannot take it as a flag (#193). Optional only because one caller has no
+   *  manifest to derive it from: `internal-print-rc-boot-script` renders the
+   *  Quadlet bastion's boot script host-side, with the doors declared by the
+   *  unit file rather than by a Launch. Omitting it there keeps that bastion
+   *  exactly as uninformed as it is today; hand-writing a door list to fill
+   *  the gap would forfeit the one property the rulebook has — that it is
+   *  generated from the actual mounts, so it cannot lie. */
+  rulebook?: string;
   /** In unix-socket mode (no TCP relay to a host-exposed port), the box's
    *  own HTTPS_PROXY=http://127.0.0.1:3128 points at nothing unless
    *  SOMETHING bridges that loopback port to the mounted netd unix socket
@@ -1260,7 +1319,12 @@ export function buildRemoteServeScript(opts: {
 }): string {
   const rcCwd = opts.repo ? "/work" : opts.rcWorkspace;
   const relay = opts.netdRelay ? `${opts.netdRelay} ` : "";
-  return `${relay}${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; cd ${rcCwd} && exec claude "$@"`;
+  // Rulebook last, so it lands after the mkdir -p above guarantees the config
+  // dir exists and before claude ever starts reading memory. Joined with `&&`
+  // into the chain that ends in `exec`: a bastion that could not write its
+  // rulebook must not boot uninformed, which is #193 all over again.
+  const rulebook = opts.rulebook ? `${capabilityMemoryCmd(opts.rulebook)} && ` : "";
+  return `${relay}${opts.repo ? "" : `mkdir -p ${rcCwd}; `}${opts.leaseCmd}; (while true; do sleep 600; ${opts.leaseCmd}; done &); cfg="$CLAUDE_CONFIG_DIR/.claude.json"; mkdir -p "$(dirname "$cfg")"; bun -e 'const fs=require("fs"),p="${rcCwd}",c=process.env.CLAUDE_CONFIG_DIR+"/.claude.json";let j={};try{j=JSON.parse(fs.readFileSync(c,"utf8"))}catch{};j.projects=j.projects||{};j.projects[p]=j.projects[p]||{};j.projects[p].hasTrustDialogAccepted=true;fs.writeFileSync(c,JSON.stringify(j))'; ${rulebook}cd ${rcCwd} && exec claude "$@"`;
 }
 
 /** Pure planner for `claude-box login` — the auth front door. Synthesizes a
@@ -2125,6 +2189,17 @@ async function run(
     guestPreset.entrypoint?.[0] ?? (guest === "claude" ? "claude" : "sh"),
     ...remoteServeArgs(launch),
   ].join(" ");
+  // --repo-origin + --remote-serve boots RC through the clone script below
+  // rather than buildRemoteServeScript, so it needs its own copy of the
+  // rulebook-as-user-memory step (#193). Same reasoning as capabilityMemoryCmd's,
+  // and the same base64 encoding makes it safe to splice into that script.
+  // `&&`, not `;`: it joins the existing chain that ends in `exec`, so a failed
+  // `git config` still short-circuits exactly as before, and a bastion that
+  // could not write its rulebook does not boot uninformed — which is #193 again.
+  const originRcRulebook =
+    repoOrigin && launch.remoteServe && guest === "claude"
+      ? `${capabilityMemoryCmd(capabilityPrompt(manifest))} && `
+      : "";
   if (repoOrigin) {
     argv.push("--tmpfs", "/work:rw,mode=1777", "-w", "/work", "--entrypoint", "sh");
   } else if (launch.remoteServe && guest === "claude") {
@@ -2157,21 +2232,25 @@ async function run(
       // is tried first (shallow, fast, what a real smart-HTTP/SSH remote wants)
       // and falls back to a full clone if it fails — dumb-HTTP (a bare static
       // file server, no CGI) can't negotiate a shallow fetch at all.
-      `url="$1"; gp="$2"; shift 2; export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; export http_proxy="$gp" HTTP_PROXY="$gp" https_proxy="$gp" HTTPS_PROXY="$gp"; git clone --depth 1 "$url" /work 2>/dev/null || git clone "$url" /work || { echo "claude-box: clone failed — --repo-origin clones with NO credentials (works for PUBLIC repos). Private repos need the scout read-door. No TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && cd /work && exec ${guestCmd} "$@"`,
+      `url="$1"; gp="$2"; shift 2; export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true; export http_proxy="$gp" HTTP_PROXY="$gp" https_proxy="$gp" HTTPS_PROXY="$gp"; git clone --depth 1 "$url" /work 2>/dev/null || git clone "$url" /work || { echo "claude-box: clone failed — --repo-origin clones with NO credentials (works for PUBLIC repos). Private repos need the scout read-door. No TTY to prompt on." >&2; exit 1; }; git config --global --add safe.directory /work && ${originRcRulebook}cd /work && exec ${guestCmd} "$@"`,
       "claude-box",
       repoOrigin,
       gitDoorProxy,
     );
     // `claude remote-control` has no --append-system-prompt equivalent (see the
-    // matching skip in the non-origin branch below) — omit it for RC server mode.
+    // matching skip in the non-origin branch below), so RC server mode takes the
+    // rulebook as user memory instead — originRcRulebook, spliced into the clone
+    // script above. Only the flag is skipped here, not the rulebook (#193).
     if (guest === "claude" && !launch.remoteServe) {
       argv.push("--append-system-prompt", capabilityPrompt(manifest));
     }
     argv.push(...guestArgs);
   } else {
     // For claude guest, inject the honest surface into the agent's context
-    // (granted AND denied), so the box KNOWS its powers and limits. Tool guests
-    // don't need or parse system prompts — they just run their command.
+    // (granted AND denied), so the box KNOWS its powers and limits — via the
+    // flag for an ordinary launch, via user memory for RC server mode, which
+    // has no flag to take it (#193). Tool guests don't need or parse system
+    // prompts — they just run their command.
     // --remote-serve prepends the RC server-mode subcommand so the box boots as
     // `claude remote-control` (see remoteServeArgs); empty otherwise, leaving
     // the interactive entrypoint untouched.
@@ -2196,9 +2275,16 @@ async function run(
       const leaseCmd = authLeaseCmd(grant);
       // sh -c '<script>' claude-box <remoteServeArgs…> : "$@" is exactly the
       // remote-control invocation (remoteServeArgs), never string-interpolated.
+      // The rulebook rides along as user memory rather than
+      // --append-system-prompt, which RC server mode has no equivalent of (#193).
       argv.push(
         "-c",
-        buildRemoteServeScript({ repo, rcWorkspace: RC_WORKSPACE, leaseCmd }),
+        buildRemoteServeScript({
+          repo,
+          rcWorkspace: RC_WORKSPACE,
+          leaseCmd,
+          rulebook: capabilityPrompt(manifest),
+        }),
         "claude-box",
         ...remoteServeArgs(launch),
       );

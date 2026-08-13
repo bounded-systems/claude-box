@@ -1115,7 +1115,14 @@ async function buildPodmanArgv(
     // shape as claude-box.ts's own --remote-serve invocation.
     argv.push(
       "--entrypoint", "sh", IMAGE, "-c",
-      buildRemoteServeScript({ rcWorkspace: RC_WORKSPACE, leaseCmd: rcServe.leaseCmd }),
+      buildRemoteServeScript({
+        rcWorkspace: RC_WORKSPACE,
+        leaseCmd: rcServe.leaseCmd,
+        // The same manifest the `--append-system-prompt` below would carry: a
+        // dispatched session is as entitled to know its doors as an ordinary
+        // launch, and RC server mode can only take it as user memory (#193).
+        rulebook: capabilityPrompt(manifest),
+      }),
       "claude-box",
       ...rcServe.remoteControlArgs,
     );

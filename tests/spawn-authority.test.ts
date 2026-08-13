@@ -14,11 +14,19 @@ import {
   containerIdFromCgroup,
   resolveLaunchDoors,
   __seedLaunch,
+  __clearLaunches,
   __setCallerContainerId,
   __clearCallerContainerId,
 } from "../launcherd";
 
-afterEach(() => __clearCallerContainerId());
+// Both seams are module state shared with every other test file in the run.
+// Clearing the seeded launches is not housekeeping: `handleStatus`/`handleList`
+// walk `launches` and read `rec.proc.exitCode`, so a leaked record reaches them
+// as a crash in whichever file bun happens to run next (claude-box#252).
+afterEach(() => {
+  __clearCallerContainerId();
+  __clearLaunches();
+});
 import { unix, type DoorGrant } from "../guest-room/mod.ts";
 
 const door = (name: string, hostPath: string): DoorGrant => ({
@@ -30,6 +38,9 @@ const door = (name: string, hostPath: string): DoorGrant => ({
   use: `use ${name}`,
 });
 
+// A live record always carries `proc`; only the cast below let these pretend
+// otherwise. Stub it so a seeded record is shape-valid for every reader of
+// `launches`, not just the caller-lookup path these tests exercise.
 const seed = (over: Record<string, unknown> = {}) => {
   const rec = {
     launchId: "L-parent",
@@ -37,6 +48,7 @@ const seed = (over: Record<string, unknown> = {}) => {
     startedAt: new Date(),
     doors: [door("scout", "/run/scoutd.sock")],
     depth: 1,
+    proc: { exitCode: null },
     ...over,
   };
   __seedLaunch(rec as unknown as Parameters<typeof __seedLaunch>[0]);
@@ -156,6 +168,7 @@ describe("cgroup correlation — caller pid → container (prx-p4vb)", () => {
     __seedLaunch({
       launchId: "L-c", pid: 11, containerId: CID,
       startedAt: new Date(), doors: [door("scout", "/run/scoutd.sock")], depth: 1,
+      proc: { exitCode: null },
     } as unknown as Parameters<typeof __seedLaunch>[0]);
     expect(findLaunchByContainerId(CID)?.launchId).toBe("L-c");
     expect(findLaunchByContainerId("0".repeat(64))).toBeUndefined();

@@ -313,6 +313,28 @@ async function fetchIssuerKeys(force = false): Promise<IssuerKeys> {
 const grantVerifyWith = (data: string, signature: string, publicKeyPem: string): boolean =>
   verify(null, Buffer.from(data), createPublicKey(publicKeyPem), Buffer.from(signature, "base64"));
 
+/** Is a presented grant's audience one this room accepts?
+ *
+ *  `ROOM_ID` names the room, but a bastion's grant is minted per LAUNCH
+ *  (claude-box's `bastionInstanceAudience`) so that two launches never hold
+ *  the same bearer token (#191). Those audiences are scoped UNDER the room id
+ *  — `claude-box-remote-serve/<uuid>` — which is what lets this gate keep
+ *  recognizing them with nothing but its static `ROOM_ID`: no registration
+ *  channel, no Quadlet change, and a bare `ROOM_ID` still accepted so grants
+ *  minted before this stay valid.
+ *
+ *  What this does NOT establish: which instance is ENTITLED. Any audience
+ *  under the room's scope is accepted, so a grant captured from one launch
+ *  still verifies at another's lease. Closing that needs authd to learn the
+ *  live audience set, or the single-use nonce tracking noted on #191 — this
+ *  makes grants distinguishable, which is what both of those need first.
+ *
+ *  Fails closed on an unset `ROOM_ID`: no room id, no accepted audience. */
+export function audienceInScope(presented: string | undefined, roomId: string): boolean {
+  if (!roomId || !presented) return false;
+  return presented === roomId || presented.startsWith(`${roomId}/`);
+}
+
 /** Gate a request on a tcp/vsock door: the presented signed grant must verify
  *  against the concierge's published keys for this room and the "auth" door. */
 async function gateGrant(req: RequestEnvelope): Promise<{ ok: boolean; reason?: string }> {
@@ -320,7 +342,16 @@ async function gateGrant(req: RequestEnvelope): Promise<{ ok: boolean; reason?: 
   const grant = req.grant;
   if (!grant) return { ok: false, reason: "no-grant" };
   if (grant.name !== "auth") return { ok: false, reason: "wrong-door" };
-  const ctx = { audience: process.env.ROOM_ID ?? "", now: Date.now() };
+  const roomId = process.env.ROOM_ID ?? "";
+  // Checked here rather than by handing the engine a fixed `ctx.audience`,
+  // because the engine's check is exact equality and this room accepts a
+  // scope. An unsigned/binding-less grant falls through to the engine, which
+  // reports it as "unsigned" — don't pre-empt that with a scope verdict.
+  const presented = grant.binding?.audience;
+  if (presented !== undefined && !audienceInScope(presented, roomId)) {
+    return { ok: false, reason: "audience-mismatch" };
+  }
+  const ctx = { audience: presented ?? roomId, now: Date.now() };
   let v = verifyGrantWithKeys(grant, ctx, await fetchIssuerKeys(), grantVerifyWith);
   if (!v.ok && v.reason === "unknown-key") {
     v = verifyGrantWithKeys(grant, ctx, await fetchIssuerKeys(true), grantVerifyWith);
@@ -476,8 +507,12 @@ AUTHD_CRED_FILE=path          read the credential line from this file instead
                               not reliably deliver piped stdin content.
                               Otherwise: piped on stdin (the CLI/manual path).
 
-ROOM_ID=name                 the audience a presented grant must match (the
-                              gate checks grant.binding.audience === ROOM_ID).
+ROOM_ID=name                 the audience SCOPE a presented grant must fall in:
+                              the gate accepts grant.binding.audience equal to
+                              ROOM_ID, or anything under "ROOM_ID/" — which is
+                              where claude-box mints its per-launch audiences
+                              (ROOM_ID/<uuid>), so two launches never share a
+                              grant. Unset ROOM_ID accepts nothing.
                               For a direct \`claude-box --remote-serve\` launch
                               (no concierge, no real rooms), this must be the
                               fixed bastion name: ROOM_ID=claude-box-remote-serve.

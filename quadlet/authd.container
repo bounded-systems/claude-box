@@ -60,8 +60,11 @@ Environment=AUTHD_ISSUER_KEYS_PATH=/keys/issuer.pub.json
 Volume=%h/.claude-box/authd-cred.json:/keys/authd-cred.json:ro
 Environment=AUTHD_CRED_FILE=/keys/authd-cred.json
 
-# The audience a presented grant must match — fixed, since there's only
-# ever ONE direct --remote-serve bastion per machine (bastionName()).
+# The audience SCOPE a presented grant must fall in: this exact value, or
+# anything under "claude-box-remote-serve/" — where claude-box mints each
+# launch's own audience (#191). Still the fixed bastion name because there is
+# only ever ONE direct --remote-serve bastion per machine (bastionName());
+# what changed is that its grant is no longer interchangeable across starts.
 Environment=ROOM_ID=claude-box-remote-serve
 
 # authd needs egress for the live OAuth refresh path (AUTHD_REFRESH_LIVE=1)

@@ -28,6 +28,8 @@ import {
   rcEgressAllow,
   RC_NETD_ALLOW,
   bastionName,
+  bastionInstanceAudience,
+  authAudienceFor,
   bastionAlreadyRunning,
   authLeaseFromEnvCmd,
   cmdMintAuthGrant,
@@ -258,6 +260,28 @@ describe("bastionName: the one-persistent-bastion-per-machine guard", () => {
   });
 });
 
+describe("bastionInstanceAudience: one grant audience per launch (#191)", () => {
+  test("is scoped under the bastion name, so authd's ROOM_ID gate accepts it", () => {
+    expect(bastionInstanceAudience().startsWith(`${bastionName()}/`)).toBe(true);
+  });
+
+  test("is never the bare bastion name — that was the interchangeable-grant bug", () => {
+    expect(bastionInstanceAudience()).not.toBe(bastionName());
+  });
+
+  test("is unique per call, so two launches never present the same bearer token", () => {
+    const seen = new Set(Array.from({ length: 32 }, () => bastionInstanceAudience()));
+    expect(seen.size).toBe(32);
+  });
+
+  test("authAudienceFor scopes a caller's own instance id the same way", () => {
+    // launcherd passes its launchId through here; a bare one is outside
+    // authd's ROOM_ID scope and is refused however unique it is.
+    expect(authAudienceFor("box-label-abc123")).toBe(`${bastionName()}/box-label-abc123`);
+    expect(bastionInstanceAudience().startsWith(`${bastionName()}/`)).toBe(true);
+  });
+});
+
 describe("bastionAlreadyRunning: real podman liveness (skips without podman)", () => {
   const PODMAN_READY = Bun.spawnSync(["sh", "-c", "command -v podman >/dev/null 2>&1"]).exitCode === 0;
   const podmanTest = test.skipIf(!PODMAN_READY);
@@ -298,8 +322,24 @@ describe("cmdMintAuthGrant: internal-mint-auth-grant CLI verb", () => {
     }
   }
 
-  test("requires --audience", () => {
-    const { code, lines } = captureStdout(() => cmdMintAuthGrant([]));
+  test("defaults to a fresh per-launch audience when --audience is omitted (#191)", () => {
+    const first = captureStdout(() => cmdMintAuthGrant([]));
+    const second = captureStdout(() => cmdMintAuthGrant([]));
+    expect(first.code).toBe(0);
+    expect(second.code).toBe(0);
+    const audienceOf = (line: string): string =>
+      JSON.parse(Buffer.from(line, "base64").toString("utf-8")).binding.audience;
+    const a = audienceOf(first.lines[0]!);
+    const b = audienceOf(second.lines[0]!);
+    // Scoped under the bastion name so authd's ROOM_ID gate still recognizes
+    // it, but never the same twice — that is the whole point.
+    expect(a.startsWith(`${bastionName()}/`)).toBe(true);
+    expect(b.startsWith(`${bastionName()}/`)).toBe(true);
+    expect(a).not.toBe(b);
+  });
+
+  test("rejects --audience with no value (a caller mistake, not a default)", () => {
+    const { code, lines } = captureStdout(() => cmdMintAuthGrant(["--audience"]));
     expect(code).toBe(1);
     expect(lines).toEqual([]);
   });

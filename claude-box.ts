@@ -1899,6 +1899,42 @@ function bastionName(): string {
   return "claude-box-remote-serve";
 }
 
+/** The audience a bastion's `auth` grant is bound to, unique per LAUNCH.
+ *
+ *  A signed grant is a bearer token bound to an audience (`guest-room`'s
+ *  `GrantBinding`), so the audience is the only thing distinguishing one
+ *  holder's grant from another's. Minting every bastion's grant with the
+ *  fixed `bastionName()` made every launch's grant interchangeable — harmless
+ *  while exactly one persistent bastion exists by design (`run()` refuses a
+ *  second), but not a boundary that survives widening to "several RC-ish
+ *  launches may lease from authd" (#191). `launcherd.ts`'s dispatch flow
+ *  already had the per-launch instinct — it mints against its own `launchId`
+ *  — but a bare launchId falls outside authd's `ROOM_ID` scope and never
+ *  verified; both paths now go through `authAudienceFor`.
+ *
+ *  Scoped UNDER the bastion name rather than a bare UUID so authd can still
+ *  recognize it with only its static `ROOM_ID` to go on — it accepts
+ *  `ROOM_ID` itself or anything under `ROOM_ID/` (see authd's
+ *  `audienceInScope`). That keeps every deployment working with no new
+ *  registration channel, and it is what bounds this change: authd learns that
+ *  grants are per-instance, NOT which instances are entitled. A grant
+ *  captured from one launch still verifies at another's lease — closing that
+ *  needs authd to know the live audience set, or the single-use nonce
+ *  tracking #191 records as its own sub-task. */
+function bastionInstanceAudience(): string {
+  return authAudienceFor(crypto.randomUUID());
+}
+
+/** Scope an existing per-instance id (launcherd's `launchId`, say) as an
+ *  `auth`-door audience. The scoping is not cosmetic: authd has only its
+ *  static `ROOM_ID` to judge by, so an audience outside `ROOM_ID/` is refused
+ *  no matter how well-formed it is — which is why launcherd's bare `launchId`
+ *  never verified at the shared authd. One helper so both minting paths agree
+ *  on the shape authd accepts. */
+export function authAudienceFor(instanceId: string): string {
+  return `${bastionName()}/${instanceId}`;
+}
+
 /** Is a bastion already running? Real liveness, not just a stale name —
  *  `podman ps` (not `ps -a`) only lists running containers. */
 function bastionAlreadyRunning(): string | undefined {
@@ -2268,10 +2304,11 @@ async function run(
       // it fresh with a backgrounded re-lease every 10 minutes for as long as
       // this bastion stays up — see authLeaseCmd's doc comment for the one
       // open question (does claude re-read it mid-session). authd's tcp gate
-      // always requires a grant (no opt-out — see mintAuthGrant); audience is
-      // the fixed bastion name, since there's only ever ONE per machine.
+      // always requires a grant (no opt-out — see mintAuthGrant); the audience
+      // is minted fresh for THIS launch (bastionInstanceAudience), so no two
+      // launches ever present the same grant.
       const authDoor = doors.find((d) => d.name === "auth");
-      const grant = authDoor ? mintAuthGrant(authDoor, bastionName()) : undefined;
+      const grant = authDoor ? mintAuthGrant(authDoor, bastionInstanceAudience()) : undefined;
       const leaseCmd = authLeaseCmd(grant);
       // sh -c '<script>' claude-box <remoteServeArgs…> : "$@" is exactly the
       // remote-control invocation (remoteServeArgs), never string-interpolated.
@@ -3380,14 +3417,20 @@ async function cmdCheckIn(): Promise<number> {
   return 0;
 }
 
-/** `claude-box internal-mint-auth-grant --audience NAME` — host-only. Mints
+/** `claude-box internal-mint-auth-grant [--audience NAME]` — host-only. Mints
  *  a fresh signed "auth" door grant (same signing key + mechanism as the
  *  inline mint inside run()'s --remote-serve branch, mintAuthGrant) and
  *  prints it, base64-encoded, to stdout — nothing else on that line, so a
  *  shell can capture it directly:
  *
- *    echo "CLAUDE_BOX_RC_GRANT=$(claude-box internal-mint-auth-grant \
- *      --audience claude-box-remote-serve)" > grant.env
+ *    echo "CLAUDE_BOX_RC_GRANT=$(claude-box internal-mint-auth-grant)" \
+ *      > grant.env
+ *
+ *  `--audience` defaults to a fresh per-launch audience
+ *  (bastionInstanceAudience), matching the inline mint: a Quadlet-managed
+ *  bastion is one launch too, and passing the fixed bastion name explicitly
+ *  is what made every start's grant interchangeable (#191). Pass it only to
+ *  bind a grant to some other room id on purpose.
  *
  *  This is the missing piece for a systemd/Quadlet-managed bastion (see
  *  quadlet/remote-serve.container's header comment): there is no CLI
@@ -3399,11 +3442,13 @@ async function cmdCheckIn(): Promise<number> {
  *  exactly as when a CLI-invoked bastion mints one for itself. */
 function cmdMintAuthGrant(args: string[]): number {
   const audIdx = args.indexOf("--audience");
-  const audience = audIdx >= 0 ? args[audIdx + 1] : undefined;
-  if (!audience) {
-    console.error("claude-box: internal-mint-auth-grant requires --audience NAME");
+  // Present-but-empty is a caller mistake worth failing on; absent means
+  // "mint one for this launch", which is the shape every caller wants.
+  if (audIdx >= 0 && !args[audIdx + 1]) {
+    console.error("claude-box: internal-mint-auth-grant --audience needs a NAME");
     return 1;
   }
+  const audience = audIdx >= 0 ? args[audIdx + 1]! : bastionInstanceAudience();
   const authDoor = resolveDoor("auth", undefined, process.env);
   const grant = mintAuthGrant(authDoor, audience);
   console.log(Buffer.from(JSON.stringify(grant), "utf-8").toString("base64"));
@@ -3676,6 +3721,7 @@ export {
   resolveWritableSubtree,
   originHostOf,
   bastionName,
+  bastionInstanceAudience,
   bastionAlreadyRunning,
   cmdMintAuthGrant,
   cmdPrintRcBootScript,

@@ -8,6 +8,7 @@ import { generateKeyPairSync, sign as nodeSign } from "node:crypto";
 import { signGrant, unix, type DoorGrant, type IssuerKeys, type SignedGrant } from "../guest-room/mod.ts";
 import {
   gateGrant,
+  audienceInScope,
   handleRequest,
   handleLease,
   toAccessTokenOnly,
@@ -77,10 +78,86 @@ describe("authd gateGrant — door='auth' (the OIDC identity)", () => {
     expect(result.ok).toBe(false);
   });
 
+  // #191: a bastion's grant is minted per LAUNCH (claude-box's
+  // bastionInstanceAudience), scoped under the room id, so no two launches
+  // present the same bearer token. The gate accepts the scope, not one string.
+  test("accepts a per-launch audience scoped under ROOM_ID", async () => {
+    const perLaunch = signGrant(
+      door("auth"),
+      { audience: "room-A/6f1f0b6e-0f0a-4a7f-9b2e-1f6d5a3c2b10", exp: Date.now() + 60_000, nonce: "n4", keyId: "k1" },
+      sign,
+    );
+    expect(await gateGrant({ id: "1", method: "lease", grant: perLaunch })).toEqual({ ok: true });
+  });
+
+  test("a room id that merely PREFIXES ROOM_ID is not in scope", async () => {
+    // "room-Attacker" starts with "room-A" as a string but is a different
+    // room — only the "room-A/" separator boundary counts.
+    const impostor = signGrant(
+      door("auth"),
+      { audience: "room-Attacker", exp: Date.now() + 60_000, nonce: "n5", keyId: "k1" },
+      sign,
+    );
+    expect((await gateGrant({ id: "1", method: "lease", grant: impostor })).reason).toBe("audience-mismatch");
+  });
+
+  test("another room's per-launch audience is rejected", async () => {
+    const otherRoom = signGrant(
+      door("auth"),
+      { audience: "room-B/6f1f0b6e-0f0a-4a7f-9b2e-1f6d5a3c2b10", exp: Date.now() + 60_000, nonce: "n6", keyId: "k1" },
+      sign,
+    );
+    expect((await gateGrant({ id: "1", method: "lease", grant: otherRoom })).reason).toBe("audience-mismatch");
+  });
+
+  test("an in-scope audience does not excuse a bad signature", async () => {
+    const forged = {
+      ...signGrant(
+        door("auth"),
+        { audience: "room-A/6f1f0b6e-0f0a-4a7f-9b2e-1f6d5a3c2b10", exp: Date.now() + 60_000, nonce: "n7", keyId: "k1" },
+        sign,
+      ),
+      caveats: ["tampered"],
+    };
+    expect((await gateGrant({ id: "1", method: "lease", grant: forged })).reason).toBe("bad-signature");
+  });
+
+  test("an in-scope audience does not excuse expiry", async () => {
+    const stale = signGrant(
+      door("auth"),
+      { audience: "room-A/6f1f0b6e-0f0a-4a7f-9b2e-1f6d5a3c2b10", exp: Date.now() - 1_000, nonce: "n8", keyId: "k1" },
+      sign,
+    );
+    expect((await gateGrant({ id: "1", method: "lease", grant: stale })).reason).toBe("expired");
+  });
+
   test("handleRequest refuses an ungranted lease with UNAUTHORIZED (no handler reached)", async () => {
     const resp = await handleRequest(JSON.stringify({ id: "9", method: "lease" }));
     expect(resp.ok).toBe(false);
     expect(resp.error?.code).toBe("UNAUTHORIZED");
+  });
+});
+
+describe("audienceInScope — ROOM_ID names a scope, not one fixed string (#191)", () => {
+  test("the room id itself stays accepted (grants minted before per-launch audiences)", () => {
+    expect(audienceInScope("room-A", "room-A")).toBe(true);
+  });
+
+  test("anything under ROOM_ID/ is in scope", () => {
+    expect(audienceInScope("room-A/abc", "room-A")).toBe(true);
+    expect(audienceInScope("room-A/abc/def", "room-A")).toBe(true);
+  });
+
+  test("the separator is required — a bare prefix is a different room", () => {
+    expect(audienceInScope("room-Attacker", "room-A")).toBe(false);
+    expect(audienceInScope("room-A-2", "room-A")).toBe(false);
+  });
+
+  test("fails closed with no ROOM_ID and with no presented audience", () => {
+    expect(audienceInScope("room-A", "")).toBe(false);
+    expect(audienceInScope("room-A/abc", "")).toBe(false);
+    expect(audienceInScope(undefined, "room-A")).toBe(false);
+    expect(audienceInScope("", "room-A")).toBe(false);
   });
 });
 

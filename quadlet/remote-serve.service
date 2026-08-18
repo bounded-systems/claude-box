@@ -6,8 +6,11 @@ After=claude-doors-volume.service launcherd-rs.service sni-gateway.service
 [Service]
 Type=simple
 # Mint this start's grant + boot script host-side. --log-driver=none keeps the
-# grant out of journald.
-ExecStartPre=/bin/sh -c 'podman run --rm --log-driver=none --userns keep-id:uid=1000,gid=1000 -v claude-box-issuer-keys:/keys:ro -v claude-box-bundle:/app:ro -e HOME=/tmp --entrypoint sh localhost/authd:dev -c "mkdir -p /tmp/.config/claude-box && cp /keys/issuer.key.pem /keys/issuer.pub.json /tmp/.config/claude-box/ && bun /app/claude-box.js internal-mint-auth-grant --audience claude-box-remote-serve" | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
+# grant out of journald. No --audience: internal-mint-auth-grant now binds each
+# start to its OWN audience under the room id (#191), which authd's ROOM_ID
+# scope accepts — passing the fixed bastion name is what made every start's
+# grant interchangeable.
+ExecStartPre=/bin/sh -c 'podman run --rm --log-driver=none --userns keep-id:uid=1000,gid=1000 -v claude-box-issuer-keys:/keys:ro -v claude-box-bundle:/app:ro -e HOME=/tmp --entrypoint sh localhost/authd:dev -c "mkdir -p /tmp/.config/claude-box && cp /keys/issuer.key.pem /keys/issuer.pub.json /tmp/.config/claude-box/ && bun /app/claude-box.js internal-mint-auth-grant" | (echo -n "CLAUDE_BOX_RC_GRANT=" && cat) > %t/claude-box-rc-grant.env'
 ExecStartPre=/bin/sh -c 'podman run --rm -v claude-box-bundle:/app:ro --entrypoint bun localhost/authd:dev /app/claude-box.js internal-print-rc-boot-script > %t/claude-box-rc-boot.sh && chmod +r %t/claude-box-rc-boot.sh'
 # Foreground `printf y | podman run -i` (the proven-registering shape) via a
 # helper script — RC only registers with a real interactive stdin, and piping

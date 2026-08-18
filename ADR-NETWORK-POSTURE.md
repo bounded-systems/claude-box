@@ -208,10 +208,38 @@ not evidence, the split is worth stating plainly:
   manifest matches the flags for every cell; bring-up failures tear down and
   throw rather than continuing.
 - **Not proven by those tests**: that podman/netavark's `--internal` really
-  removes the route on a given host, and that `socat` is present in the relay
-  image. Those are properties of the platform, checked once against a live macOS
-  box (the `curl` from a `--keeper`-only box that #236 filmed reaching
-  `example.com` should now fail to connect), not re-derived on every run.
+  removes the route on a given host; that `socat` is present in the relay image;
+  and which entry wins in `/etc/hosts` when the box pins the door hostname with
+  `--add-host` and podman may also write its own `host.containers.internal` (on
+  an internal network it likely writes none — there is no gateway — and the relay
+  additionally carries a `host.containers.internal` network alias as a DNS
+  fallback). Those are properties of the platform: checked once against a live
+  host, not re-derived on every run.
+
+- **ACCEPTED, UNPROVEN — the live check has NOT been run (2026-08-18, #263).**
+  The bullet above describes the posture, not a thing that happened. This branch
+  was developed in a Linux container with no podman and no macOS, so the `curl`
+  from a `--keeper`-only box that #236 filmed reaching `example.com` has never
+  been re-run against the fix. It should now fail to connect. Recorded here
+  rather than only in the PR body, because the ADR is what outlives the PR and
+  the sentence above otherwise reads as though the check was done — rule 3
+  applied to the sentence that invokes it.
+
+  Which host retires which item, so the residue is re-enterable rather than
+  rediscovered:
+
+  | item | host that settles it |
+  |---|---|
+  | `--internal` really removes the route | any Linux host with rootless podman |
+  | `socat` present in the relay image | same |
+  | `/etc/hosts` arbitration | **needs a mac** — podman there is already inside a VM, so who writes the entry is a different fact |
+
+  The first two do not need macOS even though TCP mode is macOS's default:
+  `isTcpMode()` is pure/env-driven and the darwin branch in `main()` only
+  supplies the default, so `DOORS_TCP=1` on a Linux podman host runs this exact
+  path. [`HOSTING.md`](./HOSTING.md) specifies such a host. A Lima VM does **not**
+  close the third item — it is Linux, so it moves the question rather than
+  answering it.
 
 ### The mechanisms not taken
 

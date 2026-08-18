@@ -137,6 +137,21 @@ authd writes the same shape into the box **minus `refreshToken`**, refreshing
    now, not the spec.
 3. **Exclusive use.** The RC credential should not be shared with a concurrent
    host `claude` session (rotation conflict). Consider a dedicated login.
+4. **Grant audience — per-launch, not yet per-entitlement (#191).** A grant is a
+   bearer token bound to an `audience`, so the audience is the only thing
+   telling one holder's grant from another's. Every bastion grant used to be
+   minted with the fixed bastion name, making all of them interchangeable;
+   claude-box now mints one per launch (`bastionInstanceAudience` →
+   `claude-box-remote-serve/<uuid>`) and authd's `ROOM_ID` names a **scope** —
+   it accepts the room id itself, or anything under `ROOM_ID/` (see
+   `audienceInScope`). No registration channel and no Quadlet change are
+   needed for that, which is also its limit: authd learns that grants are
+   per-instance, **not which instances are entitled**, so a grant captured
+   from one launch still verifies at another's lease. Closing that needs authd
+   to know the live audience set, or single-use nonce tracking — which
+   `guest-room/mod.ts` leaves to the caller and #191 records as its own
+   sub-task, blocked until grants are short-lived and frequently reissued
+   (today the same grant is deliberately reused every 10 minutes for a day).
 
 ## Build sketch (keeperd-sibling)
 

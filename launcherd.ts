@@ -25,6 +25,7 @@ import {
   transportString,
   unixPath,
   mintAuthGrant,
+  authAudienceFor,
   authLeaseCmd,
   buildRemoteServeScript,
   RC_WORKSPACE,
@@ -1253,8 +1254,10 @@ async function handleDispatch(params: Record<string, unknown>): Promise<unknown>
   // Lease this box's OWN RC credential from authd, exactly like the bastion
   // does for itself (claude-box.ts's run()) — a fresh, independent lease
   // scoped to this box's own launchId as the audience, not the bastion's.
+  // Through authAudienceFor: authd judges an audience against its static
+  // ROOM_ID scope, so a bare launchId is refused however unique it is (#191).
   const authDoor = mountDoors.find((d) => d.name === "auth");
-  const grant = authDoor ? mintAuthGrant(authDoor, launchId) : undefined;
+  const grant = authDoor ? mintAuthGrant(authDoor, authAudienceFor(launchId)) : undefined;
   const leaseCmd = authLeaseCmd(grant);
   const remoteControlArgs = [
     "remote-control",

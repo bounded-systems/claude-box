@@ -32,7 +32,7 @@ declaration, projected onto the `podman run` mounts/sockets).
 
 Each grant is opt-in per launch. No grant ⇒ the box can think and read its
 mounted repo, but cannot mutate anything outside its volume **and has no
-network at all** (`--network=none`). `--net-open` is an explicit, unsafe escape
+network at all** (no route off the box — see the transport note below). `--net-open` is an explicit, unsafe escape
 hatch (full ambient egress, no allowlist).
 
 Underneath every launch the box also runs **`--cap-drop=all
@@ -42,8 +42,9 @@ privilege-escalate the host. These are floor, not grants.
 
 ## Network is a door — not a NIC
 
-The box runs **`--network=none`**: it has no network interface, so there is no
-ambient egress to exfiltrate *through* — even with a repo mounted. Its only way
+The box gets **no ambient NIC** (`--network=none`, or an internal network that
+reaches only its granted doors — see the transport note below): there is no
+ambient egress to exfiltrate *through*, even with a repo mounted. Its only way
 out is the forwarded **netd** door: a unix socket whose daemon owns the egress
 **allowlist** (the network twin of keeperd/beadsd). The box holds no egress
 capability of its own; it can only *ask* netd, which decides what's reachable.
@@ -66,19 +67,30 @@ egress) exists only as a loud, explicit fallback for when no netd is running.
 netd's contract — socket protocol, default allowlist, no-MITM destination
 gating, audit log — is [NETD.md](./NETD.md).
 
-> **Transport caveat (macOS / TCP mode).** The `--network=none` hard boundary
-> above is the **unix-socket** transport (Linux / native hosts). On macOS,
-> virtiofs can't share a unix socket across the host↔podman-machine boundary, so
-> doors run on TCP ports and the box uses podman's **default network** to reach
-> them — which carries full internet NAT. There, netd is enforced only as an
-> **advisory `HTTPS_PROXY`** (a raw socket escapes it), and — until the fix in
-> [ADR-NETWORK-POSTURE.md](./ADR-NETWORK-POSTURE.md)'s follow-up lands — a box
-> holding a **non-`net` door still gets open egress** as a side effect of door
-> reachability ([#236](https://github.com/bounded-systems/claude-box/issues/236)).
-> The manifest reports this honestly: `capabilityJson` emits a `networkBoundary`
-> of `route` (hard), `proxy` (advisory), or `ambient` (open) alongside
-> `network`, from the single `networkPosture()` derivation that also sets the
-> podman flags — so what the box is told always matches what it gets.
+> **How the boundary is realized on each transport.** The `--network=none` form
+> above is the **unix-socket** transport (Linux / native hosts): no NIC at all,
+> and each door an individually mounted socket. On macOS, virtiofs can't share a
+> unix socket across the host↔podman-machine boundary, so doors run on TCP ports
+> — and reaching them used to mean podman's **default network**, which carries
+> full internet NAT. That made netd advisory, and handed a box holding a
+> **non-`net` door open egress it never asked for**
+> ([#236](https://github.com/bounded-systems/claude-box/issues/236)).
+>
+> TCP mode now reconstructs the same boundary instead: the box sits on a
+> per-launch **`--internal` network** (no gateway, no NAT) and reaches its doors
+> through a launcher-owned relay listening on **exactly the granted doors'
+> ports** ([door-relay.ts](./door-relay.ts),
+> [ADR-NETWORK-POSTURE.md](./ADR-NETWORK-POSTURE.md)). So "no egress door ⇒ you
+> cannot reach any host" holds on **both** transports, and a `--net` box's netd
+> is a real boundary on both rather than a proxy a raw socket can skip. If the
+> relay can't be established the launch **fails** rather than falling back to the
+> open network; `DOORS_TCP_RELAY=0` deliberately opts out and takes the old
+> advisory posture back.
+>
+> The manifest reports whichever you actually get: `capabilityJson` emits a
+> `networkBoundary` of `route` (hard), `proxy` (advisory), or `ambient` (open)
+> alongside `network`, from the single `networkPosture()` derivation that also
+> sets the podman flags — so what the box is told always matches what it gets.
 
 **One primitive, named presets.** A *door* is the whole capability mechanism: a
 single `(name, socket)` pair. `--keeper` / `--beads` are just **named presets**
@@ -160,16 +172,22 @@ runs.
 hop ([ROOM.md](./ROOM.md)), so on macOS the daemons listen on host TCP ports and the
 box dials `host.containers.internal:PORT`. This **ships and works today** (it's what
 `cbox` runs) — but it is honestly the *weakest* tier above. It is kept acceptable by
-three things, none of them the transport itself:
+several things, none of them the transport itself:
 
 - bound to **`127.0.0.1`** (loopback), never `0.0.0.0` — not LAN-exposed;
 - the **daemon still enforces policy** (netd allowlist, keeper signing rules), so an
   unauthorized connector is bounded, not free;
-- it's a **single-user trusted dev host** — a deliberately narrow threat model.
+- it's a **single-user trusted dev host** — a deliberately narrow threat model;
+- and, since #257, the **box's own reach is scoped to its grants**: it sits on a
+  per-launch internal network and dials its doors through a relay that listens on
+  exactly the granted ports (`door-relay.ts`), so a box can no longer reach a door
+  it was not given, nor any other host. That fixes the direction that was
+  *claude-box's* to fix.
 
-The residual gap is real (ambient host-local reachability; no possession-semantics
-without a token) — which is exactly why `--pod` exists and why the unix-socket
-end-state is the target, not a nicety.
+The residual gap is real and unchanged in the other direction: the daemons' host
+ports remain ambiently reachable by anything else running as that user on the
+host, and possession still isn't the grant without a token — which is exactly why
+`--pod` exists and why the unix-socket end-state is the target, not a nicety.
 
 **`--pod` recovers most of the contract.** Running the daemons as sidecars in the
 box's pod (shared netns) makes the door a `localhost:PORT` reachable **only by pod

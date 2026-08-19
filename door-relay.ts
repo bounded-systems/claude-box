@@ -123,52 +123,33 @@ export function relayForwardScript(ports: number[]): string {
   return [...lines, "wait"].join("\n");
 }
 
-/** The host-side network the relay is born on. `bridge` is podman's name for
- *  the default bridge network, deliberately in preference to hardcoding
- *  `podman`: the default's actual name is configurable in containers.conf, and
- *  a wrong guess would silently create a network rather than joining one. */
-export const HOST_SIDE_NETWORK = "bridge";
-
 /** `podman run` argv for the relay container.
  *
- *  DUAL-HOMED AT CREATION, both networks named here (#265). The relay needs the
- *  bridge to reach the host and the internal network to be reachable by the
- *  box, and it must have both before its entrypoint runs.
- *
- *  Order matters, and not for style. podman writes the container's /etc/hosts
- *  at creation, and `host.containers.internal` — which every socat target in
- *  `relayForwardScript` dials — comes from the network that has a gateway. The
- *  internal network has none, by construction. So the bridge is listed FIRST
- *  and the relay resolves that name to the HOST, while the box (a different
- *  container, on the internal network only) resolves the same name to the
- *  RELAY via `relayBoxArgv`'s `--add-host`. Two containers, one hostname, two
- *  answers: that split is the whole mechanism.
- *
- *  This replaced a start-then-`podman network connect` sequence, which was not
- *  merely uglier — it was BROKEN on rootless podman 5.x, whose default network
- *  mode is `pasta`, and `podman network connect` refuses a pasta-mode
- *  container ("invalid network mode"). Fail-closed meant the launch aborted
- *  rather than widening, so no box ever got a bad boundary; but no box could
- *  start either. Found by tests/door-relay-live.test.ts on its first CI run.
- *
- *  Inverting the old order instead — internal first, then connect the bridge —
- *  would have swapped a loud failure for a silent one: the relay would be born
- *  where `host.containers.internal` resolves to nothing, so every forward would
- *  fail to dial while bring-up reported success. */
+ *  It starts on the DEFAULT network (that is how it reaches the host at all);
+ *  `relayNetworkConnectArgv` then attaches it to the internal network too. The
+ *  relay is the only dual-homed thing in the launch, and it forwards ports
+ *  rather than routing packets, so its reach is not the box's reach. */
 export function relayRunArgv(plan: RelayPlan, image: string): string[] {
   return [
     "podman", "run", "-d", "--rm",
     "--name", plan.container,
-    // Host side first — see the ordering note above.
-    `--network=${HOST_SIDE_NETWORK}`,
-    // Box side, carrying the door hostname as a DNS alias so in-box resolution
-    // works even where /etc/hosts is managed differently.
-    `--network=${plan.network}:alias=${RELAY_HOSTNAME}`,
     // No doors, no mounts, no config volume: the relay holds no capability of
     // its own. It moves bytes between two ports it was told about.
     "--entrypoint", "sh",
     image,
     "-c", relayForwardScript(plan.ports),
+  ];
+}
+
+/** `podman network connect` argv — attaches the running relay to the internal
+ *  network under the door hostname, so in-box DNS resolves it even on hosts
+ *  where /etc/hosts is managed differently. `--add-host` (see `relayBoxArgv`)
+ *  is the primary binding; this alias is the belt to its braces. */
+export function relayNetworkConnectArgv(plan: RelayPlan): string[] {
+  return [
+    "podman", "network", "connect",
+    "--alias", RELAY_HOSTNAME,
+    plan.network, plan.container,
   ];
 }
 
@@ -244,13 +225,12 @@ export async function startDoorRelay(
     if (started.exitCode !== 0) {
       throw new Error(`could not start the door relay: ${started.stderr}`);
     }
-    // No attach step: relayRunArgv names both networks, so the relay is
-    // dual-homed the moment it exists (#265). One fewer sequenced call in the
-    // fail-closed path is one fewer partial state to unwind.
-    //
-    // The poll stays, now as defence rather than necessity: the address is
-    // assigned at creation, but podman has reported it a beat late, and a box
-    // launched against an empty address would have no door.
+    const connected = run(relayNetworkConnectArgv(plan));
+    if (connected.exitCode !== 0) {
+      throw new Error(`could not attach the door relay to ${plan.network}: ${connected.stderr}`);
+    }
+    // The address is assigned as part of the attach, but podman reports it a
+    // beat later; poll rather than race.
     for (let i = 0; i < 40; i++) {
       const ip = run(relayIpInspectArgv(plan));
       if (ip.exitCode === 0 && ip.stdout) return { plan, ip: ip.stdout, stop };

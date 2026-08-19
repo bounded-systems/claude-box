@@ -282,15 +282,36 @@ not evidence, the split is worth stating plainly:
   launch holding any door **could not start at all**. Fail-closed held: no box
   ever received a boundary weaker than promised.
 
-  Fixed by dual-homing the relay at creation (`relayRunArgv` names both
-  networks) and deleting the attach step. The ordering is now load-bearing and
-  unit-pinned: the host-side bridge is named first, because podman writes
-  `host.containers.internal` from the network that has a gateway, and that is
-  the name every socat target dials.
+  **NOT FIXED HERE, deliberately.** A dual-homing fix was written and tried on
+  the runner: name both networks on `podman run` and delete the attach step.
+  It cleared the pasta failure, and then the run failed one leg later — the
+  relay could not dial `host.containers.internal` at all. The instrumented run
+  showed why: it resolves to `169.254.1.2`, pasta's host address, which is
+  on-link only in pasta mode; a bridge-homed container has no route to it. The
+  box → relay leg was fine throughout (the relay's socat log shows the box's
+  connection accepted), so `relayBoxArgv` and the `--add-host` pin are not
+  implicated.
 
-  The lesson is the ADR's own: the mechanism had been reasoned about carefully
-  and was still wrong in a way only a real host could show. Every unit test
-  passed against a bring-up that could not bring anything up.
+  If that reading holds, the two requirements are in conflict under rootless
+  podman: reaching the host wants pasta, being reachable by the box wants a
+  bridge. The original code's choice of the default network was *right for
+  reaching the host*; its only flaw was being unattachable afterwards. So the
+  fix was reverted rather than merged — it swapped a mechanism that works where
+  the product ships for one that is unverified there and insufficient here.
+
+  **Scope, which is smaller than it first looked.** TCP mode is a macOS
+  workaround; Linux defaults to unix-socket mode, so `startDoorRelay` is never
+  reached unless someone sets `DOORS_TCP=1`. On macOS podman runs *rootful
+  inside the podman-machine VM*, where the host is routable from a bridge. The
+  mechanism plausibly works exactly where it is used, and this lane was
+  exercising a configuration the product does not ship. Tracked for decision
+  (fence it, mount the sockets, or keep pasta host-side) rather than patched.
+
+  The lesson is the ADR's own, and it cuts both ways: the mechanism had been
+  reasoned about carefully and was still wrong in a way only a real host could
+  show — and the first fix for it was also reasoned about carefully and was
+  also wrong. Every unit test passed against a bring-up that could not bring
+  anything up, and would have passed against the replacement too.
 
 ### The mechanisms not taken
 

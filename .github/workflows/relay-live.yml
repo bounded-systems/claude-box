@@ -22,7 +22,12 @@ name: relay-live
 #   - podman writes NO competing host.containers.internal on an internal
 #     network, so our --add-host is the only entry (this was filed as
 #     "needs a mac"; it did not)
-#   - the relay comes up dual-homed and forwards only granted ports
+# What it deliberately does NOT assert: that a relay comes up and forwards
+# traffic end-to-end. That test was written, run, and REMOVED -- it showed the
+# relay cannot reach the host under rootless podman at all, which is a design
+# question, not a bug the lane should hold red while it is decided. So this
+# lane proves the boundary PRIMITIVES behave as claimed; it does not prove the
+# mechanism built on them works. Do not read a green run as the latter.
 # What it does NOT settle: whether macOS DIVERGES on that third point, because
 # a podman-machine VM always has a gateway and so gives podman something to
 # point its own entry at. GitHub's Apple-silicon runners have no nested

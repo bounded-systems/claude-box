@@ -241,6 +241,28 @@ not evidence, the split is worth stating plainly:
   close the third item — it is Linux, so it moves the question rather than
   answering it.
 
+- **NARROWED — the first two rows are now CHECKED (2026-08-19, #265).**
+  `relay-live.yml` runs `tests/door-relay-live.test.ts` on a pinned
+  `ubuntu-24.04` runner, which ships podman: it brings up a real relay through
+  `startDoorRelay`, then asserts from inside a container wearing `relayBoxArgv`'s
+  own flags that the granted door answers, the internet does not, and an
+  ungranted host port does not either — plus `--internal` with no relay attached
+  at all, so the flag is isolated from the mechanism built on it. `socat` in the
+  relay image is asserted rather than inferred from `flake.nix`.
+
+  The host-that-settles-it framing above was too pessimistic by one fact: a
+  hosted runner IS "any Linux host with rootless podman", and the gate in
+  `tests/ocap.test.ts` was already passing its `command -v podman` half in CI —
+  only `podman image exists` failed, and the image is one `nix build` away. The
+  entry stayed `ACCEPTED, UNPROVEN` longer than the evidence was actually out of
+  reach. Worth remembering the next time a property is filed as unprovable: check
+  what CI already has before accepting the residue.
+
+  **Still unproven, and now the only item:** the `/etc/hosts` arbitration.
+  It needs macOS, and GitHub's Apple-silicon runners have no nested
+  virtualization, so `podman machine` there is **unverified** — an Intel
+  `macos-13` job may work and is worth one probe, but do not assume it.
+
 ### The mechanisms not taken
 
 Options 2 (`pasta` outbound restrictions) and 3 (host `pf` rules) remain the

@@ -64,14 +64,21 @@ function inBox(
   };
 }
 
-/** A fetch probe that reports one of two words and never throws, so a failure
- *  to connect is an assertion about output rather than about an exit code that
- *  could also mean "bun missing". */
+/** A fetch probe that never throws, so a failure to connect is an assertion
+ *  about output rather than about an exit code that could also mean "bun
+ *  missing".
+ *
+ *  It reports the CAUSE, not just "BLOCKED". The first version collapsed DNS
+ *  failure, connection refused and timeout into one word, and when the positive
+ *  control failed that single word could not distinguish "the relay never
+ *  resolved the host" from "socat was not listening yet" from "the route is
+ *  genuinely absent" — three different bugs with three different fixes. A
+ *  negative assertion that cannot say WHY is only half an assertion. */
 function probe(url: string): string {
   return (
     `bun -e 'fetch("${url}",{signal:AbortSignal.timeout(${PROBE_MS})})` +
     `.then(r=>r.text()).then(t=>console.log("REACHED:"+t.slice(0,32)))` +
-    `.catch(()=>console.log("BLOCKED"))'`
+    `.catch(e=>console.log("BLOCKED:"+(e&&e.name||"?")+":"+(e&&e.code||e&&e.message||"?")))'`
   );
 }
 
@@ -118,6 +125,25 @@ liveTest("a box on the internal network reaches its granted door and nothing els
     // 1. The granted door IS reachable, by the same hostname the door plumbing
     //    already uses — the relay is transparent to `resolveDoor`.
     const door = inBox(plan, relay.ip, probe(`http://${RELAY_HOSTNAME}:${grantedPort}/`));
+
+    // Relay-side state, printed unconditionally. When this assertion failed in
+    // CI the output said only "BLOCKED", which was not enough to name a cause,
+    // and each blind guess costs a full image build. The relay is torn down in
+    // `finally`, so anything not captured here is gone.
+    const say = (label: string, argv: string[]) => {
+      const r = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", timeout: 15_000 });
+      console.log(`[relay ${label}] ${r.stdout.toString().trim()}${r.stderr.toString().trim()}`);
+    };
+    console.log(`[relay ip on internal net] ${relay.ip}`);
+    console.log(`[host listener port] ${grantedPort}`);
+    say("/etc/hosts", ["podman", "exec", plan.container, "cat", "/etc/hosts"]);
+    say("resolves door host", ["podman", "exec", plan.container, "getent", "hosts", RELAY_HOSTNAME]);
+    say("listening", ["podman", "exec", plan.container, "sh", "-c", "netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null || echo '(no netstat/ss)'"]);
+    say("can dial host itself", ["podman", "exec", plan.container, "sh", "-c",
+      `bun -e 'fetch("http://${RELAY_HOSTNAME}:${grantedPort}/",{signal:AbortSignal.timeout(5000)}).then(r=>r.text()).then(t=>console.log("RELAY-REACHED:"+t)).catch(e=>console.log("RELAY-BLOCKED:"+(e&&e.name)+":"+(e&&e.code||e&&e.message)))'`]);
+    say("networks", ["podman", "inspect", plan.container, "--format", "{{json .NetworkSettings.Networks}}"]);
+    say("logs", ["podman", "logs", plan.container]);
+
     expect(door.out).toContain("REACHED:door-ok");
 
     // 2. The internet is NOT. This is #236's repro, inverted: the `curl` from a

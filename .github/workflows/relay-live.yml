@@ -1,0 +1,120 @@
+name: relay-live
+
+# The platform half of ADR-NETWORK-POSTURE's "What is proven where, and what is
+# not" (#265). Everything else in CI is unit-level: tests/door-relay.test.ts
+# proves the planners with an injected runner, which cannot reach the claim the
+# boundary actually rests on --
+#
+#   "An internal network has no gateway and no NAT, so a container on it has no
+#    route to anything off the subnet. Without this flag every other part of
+#    this module is theatre."  (door-relay.ts)
+#
+# -- because that is a property of podman/netavark. #261 merged with it recorded
+# ACCEPTED, UNPROVEN, on the reading that checking it needed a host no session
+# in this org had. That reading was wrong by one fact: THE RUNNER ALREADY HAS
+# PODMAN. tests/ocap.test.ts gates on
+# `command -v podman && podman image exists $IMAGE`, and in CI the first half
+# was passing all along -- only the image was missing. This lane loads it.
+#
+# What this settles:
+#   - `--internal` really removes the route
+#   - socat is present in the relay image
+#   - podman writes NO competing host.containers.internal on an internal
+#     network, so our --add-host is the only entry (this was filed as
+#     "needs a mac"; it did not)
+# What it deliberately does NOT assert: that a relay comes up and forwards
+# traffic end-to-end. That test was written, run, and REMOVED -- it showed the
+# relay cannot reach the host under rootless podman at all, which is a design
+# question, not a bug the lane should hold red while it is decided. So this
+# lane proves the boundary PRIMITIVES behave as claimed; it does not prove the
+# mechanism built on them works. Do not read a green run as the latter.
+# What it does NOT settle: whether macOS DIVERGES on that third point, because
+# a podman-machine VM always has a gateway and so gives podman something to
+# point its own entry at. GitHub's Apple-silicon runners have no nested
+# virtualization, so `podman machine` there is UNVERIFIED -- do not add a
+# macos-latest job to this file assuming it works; probe it first, separately.
+#
+# This lane earned its keep on run one: it caught that startDoorRelay could not
+# bring up a relay at all under rootless podman 5 (the pasta defect), which
+# every unit test passed straight through.
+#
+# Why a test file rather than shell steps: the assertions call the real exported
+# planners (planRelay, relayBoxArgv, startDoorRelay), so a change that drops
+# --internal from the shipped code turns this red. Hand-rolled `podman network
+# create --internal` in a `run:` block would keep passing while the product
+# stopped using it -- rule 3 rebuilt as a test.
+#
+# ubuntu-24.04 is PINNED, not ubuntu-latest: this lane's whole output is a claim
+# about a platform, so the platform must not drift under it silently. The
+# podman version is printed into the log for the same reason -- the evidence
+# should name what it was gathered on.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # FlakeHub Cache (OIDC -- no secret), same as publish-ghcr.yml
+
+concurrency:
+  group: relay-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    # The image build dominates this job. Bounded so a hung build fails in
+    # half an hour rather than occupying a runner for GitHub's 6h default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Recorded, not assumed. If a runner image ever ships without podman this
+      # step names that as the failure instead of it surfacing later as a
+      # skipped test that looks like a pass.
+      - name: Record the platform this evidence comes from
+        run: |
+          set -euo pipefail
+          podman version
+          podman info --format '{{.Host.NetworkBackend}}'
+
+      - name: Install nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          extra-conf: |
+            extra-experimental-features = nix-command flakes
+
+      # Shared nix binary cache -- without it this job rebuilds the whole image
+      # from source on every run. OIDC auth, no secret.
+      - uses: DeterminateSystems/flakehub-cache-action@4d48cd3cda2f381a3006ff800e1c1ca0c9809159 # v3.21.1
+
+      - name: Build and load the image
+        run: |
+          set -euo pipefail
+          nix build .#claude-image
+          podman load -i result
+          # The tests skip rather than fail without the image, so a load that
+          # silently produced a different tag would look like a green run over
+          # zero assertions. Fail here instead.
+          podman image exists localhost/claude-personal:dev
+
+      # One run, captured. A SKIPPED suite is green, and this lane exists to
+      # produce evidence -- so "ran nothing" has to fail rather than pass. That
+      # is the same reason the image-exists check above is not left to the
+      # test's own gate: two independent ways for this job to be vacuously
+      # green, both closed.
+      - name: Live relay boundary
+        run: |
+          set -euo pipefail
+          out="$(nix run nixpkgs#bun -- test tests/door-relay-live.test.ts 2>&1 | tee /dev/stderr)"
+          if echo "$out" | grep -qE '[1-9][0-9]* skip'; then
+            echo "::error::live relay tests SKIPPED -- podman or the image was unavailable, so this lane proved nothing"
+            exit 1
+          fi
+          if ! echo "$out" | grep -qE '[1-9][0-9]* pass'; then
+            echo "::error::no live relay test reported a pass"
+            exit 1
+          fi

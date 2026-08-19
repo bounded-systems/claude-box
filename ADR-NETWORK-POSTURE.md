@@ -241,6 +241,78 @@ not evidence, the split is worth stating plainly:
   close the third item — it is Linux, so it moves the question rather than
   answering it.
 
+- **NARROWED — the first two rows are now CHECKED (2026-08-19, #265).**
+  `relay-live.yml` runs `tests/door-relay-live.test.ts` on a pinned
+  `ubuntu-24.04` runner, which ships podman: it brings up a real relay through
+  `startDoorRelay`, then asserts from inside a container wearing `relayBoxArgv`'s
+  own flags that the granted door answers, the internet does not, and an
+  ungranted host port does not either — plus `--internal` with no relay attached
+  at all, so the flag is isolated from the mechanism built on it. `socat` in the
+  relay image is asserted rather than inferred from `flake.nix`.
+
+  The host-that-settles-it framing above was too pessimistic by one fact: a
+  hosted runner IS "any Linux host with rootless podman", and the gate in
+  `tests/ocap.test.ts` was already passing its `command -v podman` half in CI —
+  only `podman image exists` failed, and the image is one `nix build` away. The
+  entry stayed `ACCEPTED, UNPROVEN` longer than the evidence was actually out of
+  reach. Worth remembering the next time a property is filed as unprovable: check
+  what CI already has before accepting the residue.
+
+  **Narrowed again the same day, with evidence.** The `/etc/hosts` item was
+  filed as "needs a mac" wholesale; that bundled three questions and only one
+  of them is macOS-shaped. Observed on the runner: podman writes **no**
+  competing `host.containers.internal` entry on an `--internal` network (there
+  is no gateway to point one at), so our `--add-host` is the only entry and the
+  "which wins" question is moot rather than open. The `/etc/hosts` a container
+  gets is written by Linux podman in both cases — on macOS that is Linux podman
+  inside the VM — so the arbitration itself was never macOS-only.
+
+  **Still unproven, and now the only item:** whether macOS DIVERGES, because a
+  podman-machine VM always has a gateway and so gives podman something to point
+  its own entry at. That needs a mac. GitHub's Apple-silicon runners have no
+  nested virtualization, so `podman machine` there is **unverified** — an Intel
+  `macos-13` job may work and is worth one probe, but do not assume it.
+
+- **What the live lane caught that unit tests could not (2026-08-19, #265).**
+  On its first CI run it failed the positive control: `startDoorRelay` aborted
+  at `podman network connect` with `"pasta" is not supported: invalid network
+  mode`. The relay was started with no `--network`, taking rootless podman 5's
+  default — pasta — which `connect` refuses. So on rootless podman on Linux,
+  exactly the configuration [`HOSTING.md`](./HOSTING.md) recommends, a TCP-mode
+  launch holding any door **could not start at all**. Fail-closed held: no box
+  ever received a boundary weaker than promised.
+
+  **NOT FIXED HERE, deliberately.** A dual-homing fix was written and tried on
+  the runner: name both networks on `podman run` and delete the attach step.
+  It cleared the pasta failure, and then the run failed one leg later — the
+  relay could not dial `host.containers.internal` at all. The instrumented run
+  showed why: it resolves to `169.254.1.2`, pasta's host address, which is
+  on-link only in pasta mode; a bridge-homed container has no route to it. The
+  box → relay leg was fine throughout (the relay's socat log shows the box's
+  connection accepted), so `relayBoxArgv` and the `--add-host` pin are not
+  implicated.
+
+  If that reading holds, the two requirements are in conflict under rootless
+  podman: reaching the host wants pasta, being reachable by the box wants a
+  bridge. The original code's choice of the default network was *right for
+  reaching the host*; its only flaw was being unattachable afterwards. So the
+  fix was reverted rather than merged — it swapped a mechanism that works where
+  the product ships for one that is unverified there and insufficient here.
+
+  **Scope, which is smaller than it first looked.** TCP mode is a macOS
+  workaround; Linux defaults to unix-socket mode, so `startDoorRelay` is never
+  reached unless someone sets `DOORS_TCP=1`. On macOS podman runs *rootful
+  inside the podman-machine VM*, where the host is routable from a bridge. The
+  mechanism plausibly works exactly where it is used, and this lane was
+  exercising a configuration the product does not ship. Tracked for decision
+  (fence it, mount the sockets, or keep pasta host-side) rather than patched.
+
+  The lesson is the ADR's own, and it cuts both ways: the mechanism had been
+  reasoned about carefully and was still wrong in a way only a real host could
+  show — and the first fix for it was also reasoned about carefully and was
+  also wrong. Every unit test passed against a bring-up that could not bring
+  anything up, and would have passed against the replacement too.
+
 ### The mechanisms not taken
 
 Options 2 (`pasta` outbound restrictions) and 3 (host `pf` rules) remain the

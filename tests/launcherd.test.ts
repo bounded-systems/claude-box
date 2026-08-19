@@ -641,7 +641,7 @@ describe("caller-based policy (SO_PEERCRED)", () => {
       netOpen: false,
       denied: [],
       depth: 0,
-      posture: { egress: "none", boundary: "route" },
+      posture: { egress: "none", boundary: "route", mechanism: "netns" },
     };
 
     test("omitted: behaves exactly like an ordinary launch (no entrypoint override)", async () => {

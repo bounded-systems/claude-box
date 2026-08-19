@@ -42,6 +42,15 @@ import {
   signGrant,
 } from "./guest-room/mod.ts";
 import { DEFAULT_ALLOW } from "./netd/netd.ts";
+// Route-level door reachability for TCP mode (#236/#257): the internal network
+// + per-launch forwarding relay that stops the transport from widening egress.
+import {
+  type StartedRelay,
+  planRelay,
+  relayBoxArgv,
+  relayPorts,
+  startDoorRelay,
+} from "./door-relay.ts";
 import { loadOrCreateBoxKey, issuerKeysPath } from "./lib/box-keys.ts";
 import {
   type RemoteControlFlags,
@@ -133,6 +142,17 @@ const NETD_PROXY = "http://127.0.0.1:3128";
 
 // In TCP mode (DOORS_TCP=1), the proxy points directly to netd on the host.
 const NETD_TCP_PROXY = `http://host.containers.internal:${TCP_PORTS.netd}`;
+
+/** The image the per-launch door relay runs (door-relay.ts). Defaults to the
+ *  claude-box image because it is local and already carries `socat` (flake.nix);
+ *  the relay uses nothing else from it, holds no door, and mounts nothing.
+ *  Deliberately NOT the guest's image: a tool guest (`--guest bun`) runs a stock
+ *  upstream image with no socat, and the boundary must not depend on which guest
+ *  the operator picked. `CLAUDE_BOX_RELAY_IMAGE` overrides for hosts that would
+ *  rather run a minimal forwarder image of their own. */
+function relayImage(env: Env): string {
+  return env.CLAUDE_BOX_RELAY_IMAGE || IMAGE;
+}
 
 // Extra egress hosts the --remote-control profile needs ON TOP of the default
 // anthropic allowlist: the GrowthBook/statsig feature-flag + telemetry endpoint
@@ -396,10 +416,12 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       use: "Read external content through the scout door at /run/doors/scoutd.sock ($SCOUTD_SOCK): ask scoutd to fetch a repo/PR/issue/URL and it returns CONTENT, never a token or live socket. You hold NO read credentials and NO network for reads — scoutd owns the read tokens + allowlist. A host/scope it refuses is final; do not retry or tunnel around it.",
       deny: "No external reads in this box — do not assume you can clone, fetch, or browse; there is no token and no read route. Do not claim a fetch succeeded. If the task needs external reads, relaunch with --scout.",
     },
-    // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box runs
-    // --network=none and routes HTTPS_PROXY → the relay → this socket, so netd's
-    // allowlist is the only way out (see run() + CAPABILITIES.md "Network is a
-    // door — not a NIC"). The daemon is the network twin of keeperd/beadsd.
+    // The egress door. Unlike the others it carries LAUNCH EFFECTS: the box gets
+    // no ambient NIC — either --network=none with HTTPS_PROXY → the in-box relay
+    // → this socket (unix), or an internal network whose only path out is the
+    // door relay's netd port (TCP, #236/#257) — so netd's allowlist is the only
+    // way out either way (see run() + CAPABILITIES.md "Network is a door — not a
+    // NIC"). The daemon is the network twin of keeperd/beadsd.
     net: {
       flag: "--net",
       inBox: "/run/doors/netd.sock",
@@ -407,7 +429,7 @@ function knownDoors(env: Env = process.env): DoorCatalog {
       hostDefault: env.NETD_SOCK ?? defaultHostSock("netd", env),
       grants: "policed network egress via the netd allowlist proxy",
       use: "All egress goes through the netd door at /run/doors/netd.sock ($NETD_SOCK); HTTPS_PROXY is set for you. You can reach ONLY hosts netd's allowlist permits — there is no other route off the box. A blocked host is final; do not retry or tunnel around it.",
-      deny: "No network. This box runs --network=none with no egress door — you cannot reach any host. Do not attempt network calls or claim they worked; relaunch with --net for policed egress (or --net-open for unrestricted, unsafe egress).",
+      deny: "No network. This box holds no egress door and has NO ROUTE to any host — it runs with no NIC at all, or on an internal network that reaches only the doors it was granted. You cannot reach any host. Do not attempt network calls or claim they worked; relaunch with --net for policed egress (or --net-open for unrestricted, unsafe egress).",
     },
     // The launcher door — spawn sub-boxes without holding podman. The box asks
     // launcherd to spawn; launcherd owns the runtime and enforces policy. This
@@ -1379,13 +1401,39 @@ export type NetworkPosture = {
   egress: "none" | "policed" | "open";
   /** How egress is constrained:
    *  - "route"   — kernel/netns level: no route to a non-granted host exists
-   *                (holds against a MALICIOUS in-box process). unix `--network=none`.
+   *                (holds against a MALICIOUS in-box process). unix
+   *                `--network=none`; on TCP, the internal network + door relay.
    *  - "proxy"   — advisory: only HTTPS_PROXY-honoring clients are constrained;
    *                a raw socket escapes (holds only vs a COOPERATIVE process).
-   *                TCP-mode default network + proxy env — the macOS reality.
-   *  - "ambient" — no constraint at all (`--net-open`, and the #236 hole). */
+   *                TCP-mode default network + proxy env.
+   *  - "ambient" — no constraint at all (`--net-open`, and the #236 hole, which
+   *                now survives only behind the DOORS_TCP_RELAY=0 opt-out). */
   boundary: "route" | "proxy" | "ambient";
+  /** WHICH mechanism realizes the boundary — the transport-specific half, kept
+   *  ON the posture so `networkArgv` remains a total function of this ONE value
+   *  (the ADR's whole point) even though "route" now has two realizations:
+   *  - "netns"   — `--network=none`: no NIC at all. Doors ride mounted sockets.
+   *  - "relay"   — a per-launch `--internal` podman network whose only path off
+   *                the subnet is the launcher-owned door relay, listening on
+   *                exactly the granted doors' ports (door-relay.ts, #236/#257).
+   *  - "default" — podman's default network, with its full outbound NAT. Only
+   *                ever paired with "proxy" or "ambient"; it is precisely what
+   *                makes those boundaries soft. */
+  mechanism: "netns" | "relay" | "default";
 };
+
+/** Whether TCP mode enforces door reachability at the ROUTE level (#236's
+ *  remaining half, #257). On by default wherever TCP mode is; `DOORS_TCP_RELAY=0`
+ *  opts out and restores the pre-fix posture — deliberately, and reported
+ *  honestly as proxy/ambient rather than claimed as a boundary.
+ *
+ *  The opt-out exists because the mechanism needs podman internal networks. An
+ *  operator whose host cannot provide one should be able to get a box that TELLS
+ *  them their boundary is soft, rather than a failed launch they route around by
+ *  disabling something that matters more. */
+function isRelayEnforced(env: Env): boolean {
+  return env.DOORS_TCP_RELAY !== "0" && env.DOORS_TCP_RELAY !== "false";
+}
 
 /** The ONE derivation of a launch's network posture. Pure; both the manifest
  *  (`capabilityJson`) and the podman-flag decision (`run()`) read this, so they
@@ -1396,54 +1444,89 @@ export type NetworkPosture = {
  *
  *  The two axes are orthogonal: `doors` gives DOOR REACHABILITY (host:port for
  *  each granted daemon); egress is a SEPARATE grant (the net door, or
- *  `--net-open`). The bug being fixed is that TCP mode's transport granted door
+ *  `--net-open`). The bug was that TCP mode's transport granted door
  *  reachability by handing the box podman's default network, which incidentally
- *  carries internet NAT — widening egress as a side effect. Here we report that
- *  reality honestly; real route-level enforcement in TCP mode is the ADR's
- *  named follow-up. */
+ *  carries internet NAT — widening egress as a side effect. The door relay
+ *  (door-relay.ts) separates the two axes on TCP as well: the box gets an
+ *  internal network reaching exactly the granted doors' ports and nothing else,
+ *  so reachability is derived from the grant instead of from the transport. */
 export function networkPosture(launch: Launch, env: Env = process.env): NetworkPosture {
-  if (launch.netOpen) return { egress: "open", boundary: "ambient" };
+  if (launch.netOpen) return { egress: "open", boundary: "ambient", mechanism: "default" };
   const hasNetDoor = launch.doors.some((d) => d.name === "net");
-  const tcp = isTcpMode(env);
-  if (hasNetDoor) {
-    // Egress via netd. Hard (route) on unix (`--network=none` + socket relay);
-    // advisory (proxy) on TCP (default network + HTTPS_PROXY — a raw socket
-    // escapes netd). See the ADR's "netd is advisory on TCP" finding.
-    return { egress: "policed", boundary: tcp ? "proxy" : "route" };
+  const egress = hasNetDoor ? ("policed" as const) : ("none" as const);
+  // --pod: the box shares ONE netns with the pod's own netd (POD.md /
+  // ADR-POD-ORCHESTRATION.md), and the pod is created on podman's default
+  // network — so neither transport's boundary applies. Reported for what it is:
+  // a net door is advisory there (netd is a localhost hop a raw socket skips),
+  // and without one the pod's NAT is ambient. Giving the pod path a real
+  // boundary is its own change; claiming one here would be #236 again.
+  if (launch.pod) {
+    return hasNetDoor
+      ? { egress: "policed", boundary: "proxy", mechanism: "default" }
+      : { egress: "open", boundary: "ambient", mechanism: "default" };
   }
-  // No egress grant. On unix (or TCP with zero doors) the box gets
-  // `--network=none` — truly no route. On TCP WITH ≥1 (non-net) door, run()
-  // hands it the default network for door reachability, which is full,
-  // unpoliced internet egress (#236) — reported honestly as open/ambient.
-  if (tcp && launch.doors.length > 0) return { egress: "open", boundary: "ambient" };
-  return { egress: "none", boundary: "route" };
+  if (!isTcpMode(env)) {
+    // Unix: no NIC at all. Egress (if granted) rides the MOUNTED netd socket, so
+    // the boundary is the netns itself — nothing to route to.
+    return { egress, boundary: "route", mechanism: "netns" };
+  }
+  // TCP. Only a granted door needs a NIC; a doorless box still gets none.
+  if (launch.doors.length === 0) return { egress: "none", boundary: "route", mechanism: "netns" };
+  if (!isRelayEnforced(env)) {
+    // DOORS_TCP_RELAY=0 — the pre-#257 posture, reported for what it is. The
+    // default network carries full NAT, so a net door is only advisory (a raw
+    // socket escapes netd) and a non-net door gets egress it never asked for.
+    return hasNetDoor
+      ? { egress: "policed", boundary: "proxy", mechanism: "default" }
+      : { egress: "open", boundary: "ambient", mechanism: "default" };
+  }
+  // The box sits on an internal network (no gateway, no NAT) and reaches the
+  // relay, which listens on exactly the granted doors' ports. No route exists to
+  // anything else — so a net door's netd is now a real boundary, and a non-net
+  // door carries no egress at all. Same two cells the ADR flagged as wrong.
+  return { egress, boundary: "route", mechanism: "relay" };
 }
 
 /** Pure: the podman network/proxy argv for a posture — the other half of the
  *  single source of truth (networkPosture derives it; this enforces it), so the
  *  manifest and the flags cannot diverge. `proxyUrl` is the egress proxy for the
- *  "proxy" boundary (the shared netd, or a scoped RC/pathbase netd — the one
- *  runtime detail run() threads in). The "route" boundary's proxy is always the
- *  fixed in-box loopback relay (NETD_PROXY); "ambient" gets no proxy at all. */
-export function networkArgv(posture: NetworkPosture, proxyUrl: string): string[] {
+ *  TCP postures (the shared netd, or a scoped RC/pathbase netd — the one runtime
+ *  detail run() threads in); under "relay" that name resolves to the relay, which
+ *  forwards it to the host. The "netns" mechanism's proxy is always the fixed
+ *  in-box loopback relay (NETD_PROXY).
+ *
+ *  `relay` is required by — and only by — the "relay" mechanism. Passing none is
+ *  a programming error rather than a fallback: a box that silently launched on
+ *  the default network after the relay went missing is exactly #236, so this
+ *  throws instead. */
+export function networkArgv(
+  posture: NetworkPosture,
+  proxyUrl: string,
+  relay?: StartedRelay,
+): string[] {
   const proxyEnv = (url: string) => [
     "--env", `HTTPS_PROXY=${url}`,
     "--env", `HTTP_PROXY=${url}`,
     "--env", `ALL_PROXY=${url}`,
     "--env", "NO_PROXY=localhost,127.0.0.1",
   ];
-  switch (posture.boundary) {
-    case "route":
+  const policed = posture.egress === "policed";
+  switch (posture.mechanism) {
+    case "netns":
       // Hard isolation: no NIC. Egress (if policed) rides the mounted netd
       // socket via the in-box loopback relay at NETD_PROXY.
-      return ["--network=none", ...(posture.egress === "policed" ? proxyEnv(NETD_PROXY) : [])];
-    case "proxy":
-      // Default network (for host.containers.internal door reachability) +
-      // advisory HTTPS_PROXY → netd.
-      return proxyEnv(proxyUrl);
-    case "ambient":
-      // Open egress, no proxy nudge.
-      return [];
+      return ["--network=none", ...(policed ? proxyEnv(NETD_PROXY) : [])];
+    case "relay": {
+      // Internal network: the ONLY reachable address is the relay, and the only
+      // reachable ports on it are the granted doors'. Egress (if policed) still
+      // addresses netd by its usual name — which now lands on the relay.
+      if (!relay) throw new Error("networkArgv: the relay mechanism needs a started relay");
+      return [...relayBoxArgv(relay.plan, relay.ip), ...(policed ? proxyEnv(proxyUrl) : [])];
+    }
+    case "default":
+      // Podman's default network — full outbound NAT. An advisory HTTPS_PROXY is
+      // the most a "proxy" boundary can do; "ambient" gets no nudge at all.
+      return posture.boundary === "proxy" ? proxyEnv(proxyUrl) : [];
   }
 }
 
@@ -2076,28 +2159,72 @@ async function run(
     );
   }
 
+  // TCP mode's route boundary (#236/#257): put the box on a per-launch INTERNAL
+  // network (no gateway, no NAT) whose only path off the subnet is a relay
+  // listening on exactly the granted doors' ports — the scoped netds included,
+  // which is why this runs after they are allocated above. The relay makes door
+  // reachability a grant again instead of a side effect of the transport.
+  let relay: StartedRelay | undefined;
+  if (manifest.posture.mechanism === "relay") {
+    // pid for "whose relay is this?" when one leaks; a random tail so a leaked
+    // network from a crashed launch can never be silently adopted by a later
+    // one that happens to reuse the pid.
+    const plan = planRelay(
+      `${process.pid}-${crypto.randomUUID().slice(0, 8)}`,
+      relayPorts(doors, [gitDoor?.port, scopedNetd?.port].filter((p): p is number => !!p)),
+    );
+    try {
+      relay = await startDoorRelay(plan, relayImage(env));
+    } catch (e) {
+      // Fail CLOSED. Falling back to the default network here would silently
+      // hand the box the very egress this mechanism exists to deny (#236), and
+      // the manifest has already promised a route boundary.
+      console.error(
+        `claude-box: could not establish the door relay — ${(e as Error).message}\n` +
+          "  The box is NOT starting: falling back to podman's default network would give it\n" +
+          "  unpoliced internet egress it was never granted (issue #236).\n" +
+          "  To launch anyway with a soft (advisory) boundary, set DOORS_TCP_RELAY=0 — the\n" +
+          "  manifest will then report the box's egress as proxy/ambient, honestly.",
+      );
+      process.exit(2);
+    }
+    console.error(
+      `claude-box: door relay on internal network ${plan.network} — reachable: ` +
+        `${plan.ports.join(", ")} (nothing else has a route)`,
+    );
+  }
+
   // Network flags derive from the SAME posture the manifest reports
   // (networkPosture / ADR-NETWORK-POSTURE.md) — one source of truth, so what the
   // box is TOLD (capabilityJson.network) is exactly what it gets. networkArgv()
   // is the pure posture→podman-flags map (tested against the truth table); the
-  // scoped-netd proxy URL (RC/pathbase) is the one runtime detail threaded in.
+  // scoped-netd proxy URL (RC/pathbase) and the relay are the runtime details
+  // threaded in.
   argv.push(
     ...networkArgv(
       manifest.posture,
       scopedNetd ? `http://host.containers.internal:${scopedNetd.port}` : NETD_TCP_PROXY,
+      relay,
     ),
   );
-  // Surface an open box at the launch site — deliberate (--net-open) or the #236
-  // hole (a TCP box with a non-net door inherits the default network's full NAT
-  // as a side effect of door reachability). An unasked-for open box is exactly
-  // what the operator must not learn about only by reading the manifest JSON.
+  // Surface an open box at the launch site — deliberate (--net-open), or the #236
+  // hole where an operator has opted out of the route boundary. An unasked-for
+  // open box is exactly what the operator must not learn about only by reading
+  // the manifest JSON.
   if (manifest.posture.boundary === "ambient") {
     console.error(
       netOpen
         ? "claude-box: --net-open — UNPOLICED full network egress (no netd allowlist)"
         : "claude-box: WARNING — this box has OPEN, unpoliced internet egress despite\n" +
-            "  holding no --net door: on macOS (TCP mode) a non-net door still gets the\n" +
-            "  default network's full NAT (issue #236). Egress is NOT restricted to netd.",
+            "  holding no --net door: DOORS_TCP_RELAY=0 opts out of the internal-network\n" +
+            "  boundary, so a non-net door still inherits the default network's full NAT\n" +
+            "  (issue #236). Egress is NOT restricted to netd. Unset it to close this.",
+    );
+  } else if (manifest.posture.boundary === "proxy") {
+    console.error(
+      "claude-box: NOTE — egress is ADVISORY here: DOORS_TCP_RELAY=0 leaves the box on\n" +
+        "  the default network, so netd only constrains clients that honor HTTPS_PROXY;\n" +
+        "  a raw socket escapes it. Unset DOORS_TCP_RELAY for a route-level boundary.",
     );
   }
 
@@ -2387,6 +2514,15 @@ async function run(
   if (scopedNetd) {
     console.error(`claude-box: stopping scoped egress door (netd :${scopedNetd.port})`);
     scopedNetd.stop();
+  }
+
+  // Tear down the per-launch door relay and its internal network. The names carry
+  // a random tail, so a pair leaked by a crashed launch is never ADOPTED by a
+  // later one (which would silently widen it); it is inert until a
+  // `podman network prune` sweeps it.
+  if (relay) {
+    console.error(`claude-box: stopping door relay (network ${relay.plan.network})`);
+    relay.stop();
   }
 
   // Clean up the isolated clone on exit (a plain temp dir, not a worktree).

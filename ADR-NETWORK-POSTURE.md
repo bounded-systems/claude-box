@@ -1,8 +1,9 @@
 # ADR — network posture is one derived capability, and it reports what it enforces
 
-> Status: **accepted** (2026-07-07) · **partially implemented** (this PR: the
-> single derivation + honest manifest; real TCP route-enforcement is the named
-> follow-up below). Tracking:
+> Status: **accepted** (2026-07-07) · **implemented** — the single derivation +
+> honest manifest landed first (#237); the route-level TCP enforcement the
+> follow-up named landed second (#257), and the truth table below is now the
+> table of what is *enforced*, with no wrong cells left. Tracking:
 > [#236](https://github.com/bounded-systems/claude-box/issues/236). Pairs with
 > [CAPABILITIES.md](./CAPABILITIES.md) ("Network is a door — not a NIC"),
 > [NETD.md](./NETD.md) (the egress door), and
@@ -53,7 +54,11 @@ codebase already upholds for the scout door's host allowlist (`scoutd.ts`:
 *"what the agent is TOLD it may reach is exactly what scoutd ENFORCES"*) — network
 posture was the one capability where it wasn't applied.
 
-## A second, broader finding: on TCP mode, netd is advisory, not a boundary
+## A second, broader finding: on TCP mode, netd was advisory, not a boundary
+
+> Resolved by #257 (below): the door relay makes netd route-enforced on TCP too.
+> Kept as written because it is *why* `boundary` exists as a reported axis at
+> all — and because `DOORS_TCP_RELAY=0` still buys you exactly this.
 
 Unifying the derivation forced an honest look at every cell, and surfaced a
 finding wider than #236: **in TCP mode, netd is an *advisory* egress proxy, not
@@ -95,17 +100,27 @@ type NetworkPosture = {
 function networkPosture(launch: Launch, env: Env): NetworkPosture;
 ```
 
-The truth table (every cell reproduces `run()`'s *actual* podman behavior —
-this PR deduplicates the decision, it does not change what launches do):
+The truth table (every cell reproduces `run()`'s *actual* podman behavior).
+`mechanism` is the third field the posture carries: *how* the boundary is
+realized, so `route` can have two realizations and `networkArgv` stays a total
+function of the one value.
 
-| netOpen | net door | transport | doors | egress | boundary | note |
-|---|---|---|---|---|---|---|
-| yes | — | any | any | open | ambient | `--net-open` (deliberate, unsafe) |
-| no | yes | unix | any | policed | route | hard boundary — the intended posture |
-| no | yes | tcp | any | policed | proxy | advisory only (macOS reality) |
-| no | no | unix | any | none | route | truly no route |
-| no | no | tcp | **≥1** | **open** | **ambient** | **#236 — the hole** |
-| no | no | tcp | 0 | none | route | 0 doors ⇒ `--network=none` |
+| netOpen | net door | transport | doors | egress | boundary | mechanism | note |
+|---|---|---|---|---|---|---|---|
+| yes | — | any | any | open | ambient | default | `--net-open` (deliberate, unsafe) |
+| no | yes | unix | any | policed | route | netns | hard boundary — no NIC, mounted socket |
+| no | yes | tcp | any | policed | route | relay | **was `proxy`** — netd is a real boundary now |
+| no | no | unix | any | none | route | netns | truly no route |
+| no | no | tcp | **≥1** | **none** | **route** | **relay** | **#236 closed** — doors reachable, nothing else |
+| no | no | tcp | 0 | none | route | netns | 0 doors ⇒ `--network=none` |
+
+Two rows are outside the transport axis, because their networking is somebody
+else's:
+
+| case | egress | boundary | mechanism | note |
+|---|---|---|---|---|
+| `--pod` | policed / open | proxy / ambient | default | the pod's own netns + its in-pod netd; giving the pod path a real boundary is its own change |
+| `DOORS_TCP_RELAY=0` | policed / open | proxy / ambient | default | the deliberate opt-out — the pre-#257 posture, still reported honestly |
 
 Consumers:
 
@@ -124,7 +139,7 @@ Consumers:
   every `(doors × transport)` combination — so the two can never silently
   diverge again.
 
-### Why report the hole instead of fixing it in this PR
+### Why report the hole instead of fixing it first (the #237 decision)
 
 An honest manifest is strictly better than a lying one, and it is the
 *prerequisite* for a real fix: once posture is a single derived value, genuine
@@ -136,11 +151,16 @@ rather than a silent contradiction. This mirrors the repo's ethic throughout:
 never claim "hard isolation" when the mechanism is a cooperative proxy (cf.
 `scoutd.ts`'s "interposition, not cooperation" distinction).
 
-## Follow-up (not in this PR) — real route-level enforcement in TCP mode
+It also paid off exactly as predicted: the fix below changed **two functions**
+(`networkPosture`, `networkArgv`) and added one module, because there was only
+ever one place where the decision lived.
 
-Make a non-`net` TCP box actually unable to reach the internet (boundary
-`route`, not `ambient`), and make `--net` in TCP mode a real boundary rather
-than advisory. Candidate mechanisms, in rough order of preference:
+## Route-level enforcement in TCP mode (#257) — the follow-up, now landed
+
+The goal this section set: make a non-`net` TCP box actually unable to reach the
+internet (boundary `route`, not `ambient`), and make `--net` in TCP mode a real
+boundary rather than advisory. The mechanisms it weighed, in its own order of
+preference:
 
 1. **Internal podman network + a per-launch door-forwarding relay.** Put the box
    on an `--internal` network (no gateway NAT) and reach each granted door
@@ -152,5 +172,79 @@ than advisory. Candidate mechanisms, in rough order of preference:
 3. **Host `pf` rules per launch.** A firewall rule scoping the container's
    egress; heaviest and most host-specific, last resort.
 
-Whatever lands, it plugs into the single `networkPosture()` derivation and is
-proven by the same invariant test — the point of this ADR.
+**Mechanism 1 is what shipped** (`door-relay.ts`). Per launch:
+
+- `podman network create --internal claude-box-<id>` — no gateway, no NAT, so a
+  container on it has **no route off the subnet**. That one flag is the boundary;
+  everything else is scaffolding around it.
+- A relay container, dual-homed on that network and on the default one, running
+  one `socat` listener per **granted** door port, each forwarding to the same
+  port on `host.containers.internal`. It forwards ports; it does not route. The
+  forwarded set is derived from the grants (`relayPorts`), which is what makes
+  this an OCAP mechanism rather than a firewall: what the box is told it holds
+  and what the box can reach are the same list *by construction*.
+- The box joins **only** the internal network, with `host.containers.internal`
+  pinned to the relay. Every door URL, `$NETD_SOCK`-style env and proxy URL is
+  unchanged — `resolveDoor`, `planDoorMounts` and `NETD_TCP_PROXY` never learn
+  the relay exists; the name simply resolves somewhere else.
+
+It plugs into the single `networkPosture()` derivation (as a `relay` mechanism
+under a `route` boundary) and is proven by the same invariant test — the point of
+this ADR. Bring-up is **fail-closed**: any failed step tears down what it built
+and the launch aborts, because falling back to the default network is precisely
+the silent widening #236 was, and the manifest has by then already promised a
+route boundary. `DOORS_TCP_RELAY=0` is the deliberate opt-out for a host that
+cannot provide an internal network — it restores the old posture *and reports it*
+as `proxy`/`ambient`, so the escape hatch cannot become a quiet lie.
+
+### What is proven where, and what is not
+
+Per `docs/agentic-code-hygiene.md`'s rule that a gate's own claim about itself is
+not evidence, the split is worth stating plainly:
+
+- **Unit-proven** (`tests/door-relay.test.ts`, `tests/network-posture.test.ts`,
+  no podman needed): the forwarded set equals the granted set; the network is
+  created `--internal`; the box gets that network and only that network; the
+  manifest matches the flags for every cell; bring-up failures tear down and
+  throw rather than continuing.
+- **Not proven by those tests**: that podman/netavark's `--internal` really
+  removes the route on a given host; that `socat` is present in the relay image;
+  and which entry wins in `/etc/hosts` when the box pins the door hostname with
+  `--add-host` and podman may also write its own `host.containers.internal` (on
+  an internal network it likely writes none — there is no gateway — and the relay
+  additionally carries a `host.containers.internal` network alias as a DNS
+  fallback). Those are properties of the platform: checked once against a live
+  host, not re-derived on every run.
+
+- **ACCEPTED, UNPROVEN — the live check has NOT been run (2026-08-18, #263).**
+  The bullet above describes the posture, not a thing that happened. This branch
+  was developed in a Linux container with no podman and no macOS, so the `curl`
+  from a `--keeper`-only box that #236 filmed reaching `example.com` has never
+  been re-run against the fix. It should now fail to connect. Recorded here
+  rather than only in the PR body, because the ADR is what outlives the PR and
+  the sentence above otherwise reads as though the check was done — rule 3
+  applied to the sentence that invokes it.
+
+  Which host retires which item, so the residue is re-enterable rather than
+  rediscovered:
+
+  | item | host that settles it |
+  |---|---|
+  | `--internal` really removes the route | any Linux host with rootless podman |
+  | `socat` present in the relay image | same |
+  | `/etc/hosts` arbitration | **needs a mac** — podman there is already inside a VM, so who writes the entry is a different fact |
+
+  The first two do not need macOS even though TCP mode is macOS's default:
+  `isTcpMode()` is pure/env-driven and the darwin branch in `main()` only
+  supplies the default, so `DOORS_TCP=1` on a Linux podman host runs this exact
+  path. [`HOSTING.md`](./HOSTING.md) specifies such a host. A Lima VM does **not**
+  close the third item — it is Linux, so it moves the question rather than
+  answering it.
+
+### The mechanisms not taken
+
+Options 2 (`pasta` outbound restrictions) and 3 (host `pf` rules) remain the
+fallbacks if the relay proves unworkable on some host. Either would replace
+`door-relay.ts` wholesale without touching anything else: the posture is one
+derivation, `networkArgv` is one map, and both already model "route, by some
+mechanism" — which was the reason to unify them before fixing anything.

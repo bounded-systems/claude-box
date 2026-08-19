@@ -3,8 +3,11 @@
 `netd` is the daemon behind claude-box's **`--net`** grant: the box's *only* way
 onto the network. It is the egress twin of **keeperd** (git writes) and
 **beadsd** (beads) — a **door, not a credential or a NIC in the box**. The box
-runs `--network=none` and holds no egress capability of its own; it can only
-*ask* netd, which **owns the allowlist** and decides what's reachable.
+gets no ambient NIC — `--network=none` on the unix transport, an internal
+network reaching only its granted doors on TCP
+([ADR-NETWORK-POSTURE.md](./ADR-NETWORK-POSTURE.md)) — and holds no egress
+capability of its own; it can only *ask* netd, which **owns the allowlist** and
+decides what's reachable.
 
 This file is the **contract** netd implements. The daemon itself is external
 (like keeperd/beadsd); claude-box only forwards its socket and points in-box
@@ -186,4 +189,4 @@ Contract only. The launcher already forwards the door and sets the proxy env;
 the image already relays loopback→`/run/netd.sock`. **netd-the-daemon is not yet
 running**, so the `--net` end-to-end path (and its `test.todo` in
 `tests/ocap.test.ts`) is pending the pod (`prx-asr`). Until then, the verified
-guarantee is the *default*: no door ⇒ `--network=none` ⇒ no egress.
+guarantee is the *default*: no door ⇒ no route ⇒ no egress.

@@ -26,8 +26,8 @@ import {
   planRelay,
   relayBoxArgv,
   relayForwardScript,
+  HOST_SIDE_NETWORK,
   relayIpInspectArgv,
-  relayNetworkConnectArgv,
   relayNetworkCreateArgv,
   relayPorts,
   relayRunArgv,
@@ -112,6 +112,36 @@ describe("the podman argv", () => {
     expect(argv[argv.indexOf("--name") + 1]).toBe(plan.container);
   });
 
+  test("the relay is dual-homed AT CREATION — both networks, no attach step", () => {
+    // #265: podman network connect refuses a pasta-mode container, which is
+    // rootless podman 5's default, so a start-then-connect relay could never
+    // come up on Linux. Both homes must be named on the run itself.
+    const argv = relayRunArgv(plan, "img");
+    const nets = argv.filter((a) => a.startsWith("--network="));
+    expect(nets).toEqual([
+      `--network=${HOST_SIDE_NETWORK}`,
+      `--network=${plan.network}:alias=${RELAY_HOSTNAME}`,
+    ]);
+  });
+
+  test("the HOST-side network is named first, so /etc/hosts resolves to the host", () => {
+    // Load-bearing, not cosmetic. podman writes host.containers.internal from
+    // the network carrying a gateway; an --internal network has none. Listing
+    // the internal net first would leave every socat target undialable while
+    // bring-up still reported success — a silent failure where the pasta bug
+    // was at least a loud one.
+    const nets = relayRunArgv(plan, "img").filter((a) => a.startsWith("--network="));
+    expect(nets[0]).toBe(`--network=${HOST_SIDE_NETWORK}`);
+    expect(nets[0]).not.toContain(plan.network);
+  });
+
+  test("the host-side network is podman's default bridge, not a hardcoded name", () => {
+    // containers.conf can rename the default network; "bridge" is the mode
+    // name that always resolves to it. A literal "podman" would silently
+    // CREATE a network on a host that renamed it.
+    expect(HOST_SIDE_NETWORK).toBe("bridge");
+  });
+
   test("the box joins the internal network and pins the door host to the relay", () => {
     const argv = relayBoxArgv(plan, "10.89.0.2");
     expect(argv).toContain(`--network=${plan.network}`);
@@ -156,7 +186,9 @@ describe("startDoorRelay: fail-closed bring-up", () => {
     return startDoorRelay(plan, "img", run, nap).then((relay) => {
       expect(relay.ip).toBe("10.89.0.2");
       const verbs = calls.map((c) => c.slice(1, 3).join(" "));
-      expect(verbs.slice(0, 3)).toEqual(["network create", "run -d", "network connect"]);
+      expect(verbs.slice(0, 2)).toEqual(["network create", "run -d"]);
+      // The attach step is gone, not reordered (#265).
+      expect(verbs).not.toContain("network connect");
     });
   });
 
@@ -172,9 +204,20 @@ describe("startDoorRelay: fail-closed bring-up", () => {
     expect(calls.some((c) => c.join(" ") === `podman network rm ${plan.network}`)).toBe(true);
   });
 
-  test("a failed attach tears down BOTH — no half-built relay is left behind", async () => {
-    const { calls, run } = runner("network connect");
-    await expect(startDoorRelay(plan, "img", run, nap)).rejects.toThrow(/attach/);
+  test("no attach step exists to fail — the relay is dual-homed at creation", async () => {
+    // Replaces "a failed attach tears down BOTH". That test could only pass
+    // because bring-up HAD an attach step; #265 removed it, and the property
+    // worth keeping is that nothing calls network connect at all.
+    const { calls, run } = runner();
+    await startDoorRelay(plan, "img", run, nap);
+    expect(calls.some((c) => c.join(" ").includes("network connect"))).toBe(false);
+  });
+
+  test("a relay that never gets an address tears down BOTH — no half-built relay", async () => {
+    // The teardown-on-partial-failure property the attach test used to carry,
+    // rehomed onto the failure mode that still exists.
+    const { calls, run } = runner(undefined, "");
+    await expect(startDoorRelay(plan, "img", run, nap)).rejects.toThrow(/never got an address/);
     const done = calls.map((c) => c.join(" "));
     expect(done).toContain(`podman rm -f ${plan.container}`);
     expect(done).toContain(`podman network rm ${plan.network}`);

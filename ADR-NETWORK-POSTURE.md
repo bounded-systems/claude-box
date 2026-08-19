@@ -258,10 +258,39 @@ not evidence, the split is worth stating plainly:
   reach. Worth remembering the next time a property is filed as unprovable: check
   what CI already has before accepting the residue.
 
-  **Still unproven, and now the only item:** the `/etc/hosts` arbitration.
-  It needs macOS, and GitHub's Apple-silicon runners have no nested
-  virtualization, so `podman machine` there is **unverified** — an Intel
+  **Narrowed again the same day, with evidence.** The `/etc/hosts` item was
+  filed as "needs a mac" wholesale; that bundled three questions and only one
+  of them is macOS-shaped. Observed on the runner: podman writes **no**
+  competing `host.containers.internal` entry on an `--internal` network (there
+  is no gateway to point one at), so our `--add-host` is the only entry and the
+  "which wins" question is moot rather than open. The `/etc/hosts` a container
+  gets is written by Linux podman in both cases — on macOS that is Linux podman
+  inside the VM — so the arbitration itself was never macOS-only.
+
+  **Still unproven, and now the only item:** whether macOS DIVERGES, because a
+  podman-machine VM always has a gateway and so gives podman something to point
+  its own entry at. That needs a mac. GitHub's Apple-silicon runners have no
+  nested virtualization, so `podman machine` there is **unverified** — an Intel
   `macos-13` job may work and is worth one probe, but do not assume it.
+
+- **What the live lane caught that unit tests could not (2026-08-19, #265).**
+  On its first CI run it failed the positive control: `startDoorRelay` aborted
+  at `podman network connect` with `"pasta" is not supported: invalid network
+  mode`. The relay was started with no `--network`, taking rootless podman 5's
+  default — pasta — which `connect` refuses. So on rootless podman on Linux,
+  exactly the configuration [`HOSTING.md`](./HOSTING.md) recommends, a TCP-mode
+  launch holding any door **could not start at all**. Fail-closed held: no box
+  ever received a boundary weaker than promised.
+
+  Fixed by dual-homing the relay at creation (`relayRunArgv` names both
+  networks) and deleting the attach step. The ordering is now load-bearing and
+  unit-pinned: the host-side bridge is named first, because podman writes
+  `host.containers.internal` from the network that has a gateway, and that is
+  the name every socat target dials.
+
+  The lesson is the ADR's own: the mechanism had been reasoned about carefully
+  and was still wrong in a way only a real host could show. Every unit test
+  passed against a bring-up that could not bring anything up.
 
 ### The mechanisms not taken
 

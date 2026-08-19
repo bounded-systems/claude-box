@@ -16,14 +16,22 @@ name: relay-live
 # `command -v podman && podman image exists $IMAGE`, and in CI the first half
 # was passing all along -- only the image was missing. This lane loads it.
 #
-# What this settles (the ADR's table, first two rows):
+# What this settles:
 #   - `--internal` really removes the route
 #   - socat is present in the relay image
-# What it does NOT settle: the /etc/hosts arbitration between our `--add-host`
-# and podman's own host.containers.internal entry. That needs macOS, where
-# podman runs inside a VM. GitHub's Apple-silicon runners have no nested
+#   - podman writes NO competing host.containers.internal on an internal
+#     network, so our --add-host is the only entry (this was filed as
+#     "needs a mac"; it did not)
+#   - the relay comes up dual-homed and forwards only granted ports
+# What it does NOT settle: whether macOS DIVERGES on that third point, because
+# a podman-machine VM always has a gateway and so gives podman something to
+# point its own entry at. GitHub's Apple-silicon runners have no nested
 # virtualization, so `podman machine` there is UNVERIFIED -- do not add a
 # macos-latest job to this file assuming it works; probe it first, separately.
+#
+# This lane earned its keep on run one: it caught that startDoorRelay could not
+# bring up a relay at all under rootless podman 5 (the pasta defect), which
+# every unit test passed straight through.
 #
 # Why a test file rather than shell steps: the assertions call the real exported
 # planners (planRelay, relayBoxArgv, startDoorRelay), so a change that drops
